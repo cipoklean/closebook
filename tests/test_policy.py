@@ -18,8 +18,8 @@ from app.domain.policy import (
     within_bank_fee_tolerance, PayablePriority,
 )
 
-GBP_RATE = Decimal("1.27")   # 1 GBP = 1.27 USD
-EUR_RATE = Decimal("1.14")   # 1 EUR = 1.14 USD
+GBP_RATE = Decimal("1.27")   # 1.27 GBP per 1 USD
+EUR_RATE = Decimal("0.8756")  # 0.8756 EUR per 1 USD (live-probed inverse)
 
 
 # ---- committed-cash budget ----------------------------------------------
@@ -35,8 +35,9 @@ def test_committed_cash_never_negative():
 
 def test_committed_cash_usd_equivalent():
     c = CommittedCash("GBP", expected_inflows_minor=800_000, earmarked_minor=0)
-    # GBP 8,000 * 1.27 = USD 10,160
-    assert c.usd_equivalent_minor({"GBP": GBP_RATE}) == 1_016_000
+    # GBP 8,000 / 1.27 = USD 6,299.21
+    assert c.usd_equivalent_minor({"GBP": GBP_RATE}) == int(
+        Decimal(8_000) / Decimal("1.27") * 100)
 
 
 def test_unpriced_currency_is_not_spendable():
@@ -50,8 +51,23 @@ def test_usd_value_minor_usd_passthrough():
 
 
 def test_usd_value_minor_converts():
-    # EUR 10,000 * 1.14 = USD 11,400
-    assert usd_value_minor(1_000_000, "EUR", {"EUR": EUR_RATE}) == 1_140_000
+    """EUR 10,000 at 0.8756 EUR-per-USD = USD 11,419 (divide, not multiply)."""
+    assert usd_value_minor(1_000_000, "EUR", {"EUR": EUR_RATE}) == int(
+        Decimal(10_000) / Decimal("0.8756") * 100)
+
+
+def test_rate_convention_is_ccy_per_usd():
+    """Pins the convention so policy and planner can never disagree again:
+    rates[CCY] = CCY per 1 USD, so USD value = amount / rate."""
+    # GBP 1,000 at 1.27 GBP-per-USD -> USD 787.40
+    usd = usd_value_minor(100_000, "GBP", {"GBP": Decimal("1.27")})
+    assert usd == 78_740
+    assert usd_value_minor(100_000, "GBP", {"GBP": Decimal("1.27")}) < 100_000
+
+
+def test_zero_or_missing_rate_is_zero_value():
+    assert usd_value_minor(100_000, "GBP", {"GBP": Decimal("0")}) == 0
+    assert usd_value_minor(100_000, "GBP", {}) == 0
 
 
 def test_usd_value_minor_unknown_currency_zero():
@@ -93,9 +109,16 @@ def test_above_auto_limit_needs_approval():
 
 
 def test_auto_limit_uses_usd_equivalent():
-    """EUR 2,500 * 1.14 = USD 2,850 -> over the USD 2,500 limit."""
-    needs, _ = requires_approval(250_000, "EUR", {"EUR": EUR_RATE})
+    """EUR 3,000 at 0.8756 EUR-per-USD = USD 3,425 -> over the USD 2,500 limit."""
+    needs, why = requires_approval(300_000, "EUR", {"EUR": EUR_RATE})
     assert needs is True
+    assert "exceeds the auto-pay limit" in why
+
+
+def test_auto_limit_allows_euro_below_threshold():
+    """EUR 2,000 at 0.8756 = USD 2,283 -> under the limit, auto-payable."""
+    needs, _ = requires_approval(200_000, "EUR", {"EUR": EUR_RATE})
+    assert needs is False
 
 
 def test_low_confidence_always_needs_approval_even_if_small():

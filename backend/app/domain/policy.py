@@ -67,16 +67,16 @@ class CommittedCash:
         return max(0, self.expected_inflows_minor - self.earmarked_minor)
 
     def usd_equivalent_minor(self, rates: Optional[dict[str, Decimal]] = None) -> int:
-        """Convert to USD for floor/limit comparisons."""
+        """Convert to USD for floor/limit comparisons (see usd_value_minor for
+        the rate convention: rates[CCY] = CCY per 1 USD)."""
         if self.currency == "USD":
             return self.available_minor()
         rate = (rates or {}).get(self.currency)
-        if rate is None:
+        if not rate:
             # Conservative: treat unknown currency as not spendable for policy.
             return 0
-        # rates are quoted as 1 <ccy> = <rate> USD
         major = Decimal(self.available_minor()) / Decimal(minor_for(self.currency))
-        return int(major * rate * 100)
+        return int(major / rate * 100)
 
 
 # ---- loading the committed-cash budget ----------------------------------
@@ -120,15 +120,25 @@ def load_budget(path: str | Path | None = None) -> BudgetSettings:
 # ---- limits -------------------------------------------------------------
 def usd_value_minor(amount_minor: int, currency: str,
                     rates: Optional[dict[str, Decimal]] = None) -> int:
-    """USD-equivalent of a (minor, currency) amount. Unknown currency -> 0
-    (conservative: never treat an unpriced currency as spendable)."""
+    """USD-equivalent of a (minor, currency) amount.
+
+    RATE CONVENTION (single source of truth for the whole codebase):
+        rates[CCY] = units of CCY per 1 USD.
+    So EUR 0.8756 means "1 USD buys EUR 0.8756", and the USD value of a EUR
+    amount is the EUR amount DIVIDED by the rate. This matches how a conversion
+    actually reads (sell USD, buy CCY) and the live-probed Airwallex client_rate
+    of 1.138726, which is the inverse (USD per EUR) for USD 9,012.85 ->
+    EUR 7,914.85.
+
+    Unknown currency -> 0 (conservative: never treat an unpriced currency as
+    spendable)."""
     if currency == "USD":
         return amount_minor
     rate = (rates or {}).get(currency)
-    if rate is None:
+    if not rate:
         return 0
     major = Decimal(amount_minor) / Decimal(minor_for(currency))
-    return int(major * rate * 100)
+    return int(major / rate * 100)
 
 
 def requires_approval(amount_minor: int, currency: str,
@@ -199,13 +209,25 @@ class PayablePriority:
         return (-self.criticality, due, -self.defer_cost_usd_minor)
 
 
+def priority_key(criticality: int, due_date: Optional[datetime],
+                 defer_cost_usd_minor: int) -> tuple:
+    """THE ordering key for payables. Single source of truth.
+
+    Criticality desc, then earliest due date, then costliest-to-defer desc.
+    `prioritise()` uses this, and the planner applies the same key to indices
+    so the two can never disagree about who gets served first. Keep it here.
+    """
+    return (-criticality, due_date or datetime.max, -defer_cost_usd_minor)
+
+
 def prioritise(items: Iterable[PayablePriority]) -> list[PayablePriority]:
     """Deterministic ordering: criticality, then due date, then defer cost.
 
     When cash is short this decides who gets paid and who gets deferred —
     the decision must be reproducible, so it lives in code, not in a prompt.
     """
-    return sorted(items, key=lambda i: i.key())
+    return sorted(items, key=lambda i: priority_key(
+        i.criticality, i.due_date, i.defer_cost_usd_minor))
 
 
 # ---- matching thresholds -------------------------------------------------
