@@ -50,7 +50,11 @@ class Simulation:
 
     def list_deposits(self) -> list[dict]:
         data = self._c.call("GET", "/api/v1/deposits", is_simulation=True)
-        return data.get("data", []) or []
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return data.get("items") or data.get("data") or []
+        return []
 
     # --- transfer outcomes ---------------------------------------------
     def transition_transfer(self, transfer_id: str, next_status: str,

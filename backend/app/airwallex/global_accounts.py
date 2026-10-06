@@ -16,8 +16,12 @@ class GlobalAccounts:
         self._c = client
 
     def list(self) -> list[dict]:
+        # Verified live 2026-10-06: the response envelope is {"items": [...]},
+        # NOT {"data": [...]}. Handle both defensively.
         data = self._c.call("GET", "/api/v1/global_accounts")
-        return data.get("data", data.get("global_accounts", [])) or []
+        if isinstance(data, dict):
+            return data.get("items") or data.get("data") or []
+        return data or []
 
     def get(self, account_id: str) -> dict:
         return self._c.call("GET", f"/api/v1/global_accounts/{account_id}")

@@ -23,7 +23,12 @@ class Transfers:
 
     def list(self) -> list[dict]:
         data = self._c.call("GET", "/api/v1/transfers")
-        return data.get("data", []) or []
+        # Live sandbox returns a bare LIST or {"items": [...]} (not "data").
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return data.get("items") or data.get("data") or []
+        return []
 
     def get(self, transfer_id: str) -> dict:
         return self._c.call("GET", f"/api/v1/transfers/{transfer_id}")

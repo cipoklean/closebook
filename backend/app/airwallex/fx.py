@@ -36,22 +36,40 @@ class FX:
         self._c = client
 
     def current_rate(self, base: str, quote_ccy: str) -> Decimal:
+        """Indicative rate.
+
+        Verified live 2026-10-06: the query params are `buy_currency` and
+        `sell_currency`. Passing base/quote returns
+        400 invalid_argument "'buy_currency' is not specified".
+        """
         data = self._c.call(
-            "GET", "/api/v1/fx/rates/current", query={"base": base, "quote": quote_ccy}
+            "GET", "/api/v1/fx/rates/current",
+            query={"buy_currency": quote_ccy, "sell_currency": base},
         )
-        # defensive: shape may be {"data":{"rate":...}} or {"data":[{"rate":...}]}
+        # Shape is unverified against the live API yet (the 400 above masked
+        # it); accept {"rate": ...}, {"items": [{"rate": ...}]}, {"data": ...}.
         d = data.get("data", data) if isinstance(data, dict) else data
         if isinstance(d, dict):
-            return Decimal(str(d.get("rate")))
+            rate = d.get("rate")
+            if rate is None and isinstance(d.get("items"), list) and d["items"]:
+                rate = d["items"][0].get("rate")
+            if rate is None:
+                raise ValueError("no rate field in fx response: " + repr(data)[:200])
+            return Decimal(str(rate))
         if isinstance(d, list) and d:
             return Decimal(str(d[0].get("rate")))
-        raise ValueError("unexpected fx rates shape: " + repr(data))
+        raise ValueError("unexpected fx rates shape: " + repr(data)[:200])
 
     def create_quote(self, *, sell_currency: str, buy_currency: str,
                     sell_amount_minor: Optional[int] = None,
                     buy_amount_minor: Optional[int] = None,
                     sell_amount_major: Optional[Decimal] = None) -> Quote:
         body: dict = {"sell_currency": sell_currency, "buy_currency": buy_currency}
+        # Verified live 2026-10-06 via the Airwallex docs MCP: `validity` is a
+        # REQUIRED enum, not a duration string. Allowed: MIN_1, MIN_15, MIN_30,
+        # HR_1, HR_4, HR_8, HR_24. HR_1 is the default for most flows; we use
+        # HR_1 because a quote is SINGLE_USE and must be booked promptly.
+        body["validity"] = "HR_1"
         amounts: dict[str, tuple[int, str]] = {}
         if sell_amount_minor is not None:
             body["sell_amount"] = "placeholder"  # replaced at the money boundary
@@ -61,10 +79,22 @@ class FX:
             amounts["buy_amount"] = (buy_amount_minor, buy_currency)
         data = self._c.call("POST", "/api/v1/fx/quotes/create", json_body=body,
                             money_amounts_minor=amounts)
-        d = data.get("data", data) if isinstance(data, dict) else data
+        # Verified live 2026-10-06 (docs MCP + 400-error probing): the quote
+        # response is a BARE object with `id`, `awx_rate`, `buy_amount`,
+        # `sell_amount`, `usage` (SINGLE_USE/MULTI_USE) and `valid_to_at`.
+        # The builder guide's "client_rate" is the *developer MCP* field name;
+        # REST exposes awx_rate. Accept either.
+        d = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
+        rate = None
+        for key in ("client_rate", "awx_rate", "rate"):
+            if isinstance(d, dict) and d.get(key) is not None:
+                rate = Decimal(str(d[key]))
+                break
+        if rate is None:
+            raise ValueError("no rate field in quote response: " + repr(data)[:200])
         return Quote(
-            quote_id=d.get("id") or d.get("quote_id"),
-            client_rate=Decimal(str(d.get("client_rate", "0"))),
+            quote_id=(d.get("id") or d.get("quote_id")) if isinstance(d, dict) else None,
+            client_rate=rate,
             buy_currency=buy_currency,
             sell_currency=sell_currency,
         )

@@ -11,7 +11,8 @@ from pathlib import Path
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+# config.py lives at backend/app/config.py; parents[2] is the repo root
+REPO_ROOT = Path(__file__).resolve().parents[2]
 ENV_FILE = REPO_ROOT / ".env"
 
 ALLOWED_AWX_HOSTS = {"api.sandbox.airwallex.com", "sandbox.airwallex.com"}
@@ -51,7 +52,10 @@ class Settings(BaseSettings):
 
     def sandbox_ready(self) -> bool:
         """True when the two credentials needed for Phase 1 are present."""
-        return bool(self.awx_client_id.get_secret_value() and self.awx_api_key.get_secret_value())
+        return bool(
+            self.awx_client_id.get_secret_value().strip()
+            and self.awx_api_key.get_secret_value().strip()
+        )
 
 
 @lru_cache

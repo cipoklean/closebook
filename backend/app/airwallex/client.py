@@ -103,7 +103,17 @@ class AirwallexClient:
                 timeout=15.0,
             )
             resp.raise_for_status()
-            token: str = resp.json()["access_token"]
+            payload = resp.json()
+            # Sandbox login returns {"token": ..., "expires_at": ...}
+            # (not "access_token"); accept either shape. Guard against a
+            # non-dict body so the failure is a clear error, not an
+            # AttributeError deep in the auth path.
+            if not isinstance(payload, dict):
+                raise ApiError(resp.status_code, None,
+                               f"unexpected login response type: {type(payload).__name__}")
+            token: str = payload.get("token") or payload.get("access_token")
+            if not token:
+                raise ApiError(resp.status_code, None, "login returned no token field")
             self._token = token
             self._token_obtained_at = time.monotonic()
             return token

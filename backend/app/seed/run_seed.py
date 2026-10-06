@@ -87,9 +87,15 @@ def _fund_sandbox(db: DB, settings) -> None:
             country = _country_for_currency(currency)
             created = ga.create(db.session(), country_code=country,
                                 currency=currency, transfer_method="LOCAL")
-            node = created.get("data") if isinstance(created, dict) else None
-            ga_id = (node or created).get("id") if isinstance(node, dict) else None
-            if ga_id is None:
+            # Verified live 2026-10-06: global_accounts/create returns a BARE
+            # object ({"id": ..., "status": "PROCESSING", ...}), not wrapped in
+            # "data". Accept both shapes.
+            node = created
+            if isinstance(created, dict) and isinstance(created.get("data"), dict):
+                node = created["data"]
+            if isinstance(node, dict):
+                ga_id = node.get("id") or node.get("global_account_id")
+            if not ga_id:
                 raise RuntimeError(f"could not resolve global account for {currency}: {created}")
         existing[currency] = ga_id
 
@@ -119,12 +125,12 @@ def _latest_balances(db: DB) -> dict[str, int]:
     from ..models import BalanceSnapshot
     with db.session() as s:
         rows = s.query(BalanceSnapshot).all()
-        latest: dict[str, int] = {}
+        latest: dict[str, tuple[object, int]] = {}
         for r in rows:
-            cur = latest.get(r.currency, -1)
-            if r.fetched_at and r.fetched_at >= cur:
-                latest[r.currency] = r.available_minor
-        return latest
+            prev = latest.get(r.currency)
+            if prev is None or (r.fetched_at and r.fetched_at >= prev[0]):
+                latest[r.currency] = (r.fetched_at, r.available_minor)
+        return {ccy: val[1] for ccy, val in latest.items()}
 
 
 def main() -> int:
