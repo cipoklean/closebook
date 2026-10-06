@@ -1,0 +1,291 @@
+"""Matching engine tests — the Phase 2 acceptance criteria.
+
+closebook.md requires unit tests for: exact, typo, partial, multi-invoice,
+overpaid and ambiguous cases. Each test below maps to one demo beat.
+"""
+from __future__ import annotations
+
+import pytest
+
+from app.domain.matching import (
+    Allocation, Candidate, MatchResult, fold_digits, match_inflow, normalise,
+    number_blob, token_set_ratio, try_exact, try_exact_multi, try_partial,
+    try_rule,
+)
+
+
+def _c(inv_id, number, customer, currency, open_minor, original=None):
+    return Candidate(invoice_id=inv_id, number=number, customer_name=customer,
+                     currency=currency, amount_open_minor=open_minor,
+                     amount_original_minor=original or open_minor)
+
+
+# beat 2: INV-0041 USD 12,000
+BRIGHTLINE = _c(1, "INV-0041", "Brightline Retail", "USD", 1_200_000, 1_200_000)
+# beat 3: INV-0042 GBP 8,000
+HARROW = _c(2, "INV-0042", "Harrow & Co", "GBP", 800_000, 800_000)
+LUMEN = _c(3, "INV-0043", "Lumen Stores", "USD", 450_000, 450_000)
+
+
+def test_normalise_keeps_words_intact():
+    """Digit-lookalike folding must NOT corrupt words: INV-0041 -> inv0041."""
+    assert normalise("INV-0041") == "inv0041"
+    assert normalise("INV 0041") == "inv0041"
+    assert normalise("INV_0041") == "inv0041"
+    # "INV" survives — this is the bug the word-safe split fixed.
+    assert normalise("INV") == "inv"
+
+
+def test_fold_digits_handles_lookalike_typos():
+    assert fold_digits("0O41") == "0041"
+    assert fold_digits("INV-O04l") == "inv-0041"
+    assert number_blob("inv 0O41 brightline") == "0041"
+
+
+def test_token_set_ratio():
+    assert token_set_ratio("Brightline Retail", "Brightline Retail") == 1.0
+    assert token_set_ratio("Lumen Stores", "Lumen Stores") == 1.0
+    assert 0.0 <= token_set_ratio("Harrow and Co", "Harrow & Co") <= 1.0
+    assert token_set_ratio("", "anything") == 0.0
+    assert token_set_ratio("Acme Ltd", "Globex GmbH") < 0.5
+
+
+# ---- tier 1: EXACT -------------------------------------------------------
+def test_exact_match_clean_reference():
+    r = try_exact(1_200_000, "USD", "INV-0041 Brightline", [BRIGHTLINE, LUMEN])
+    assert r is not None
+    assert r.status == "MATCHED"
+    assert r.confidence == 1.0
+    assert r.method == "EXACT"
+    assert r.allocations[0].invoice_id == 1
+
+
+def test_exact_match_survives_o_zero_typo():
+    """Beat 2 literally uses reference "inv 0O41 brightline"."""
+    r = try_exact(1_200_000, "USD", "inv 0O41 brightline", [BRIGHTLINE, LUMEN])
+    assert r is not None, "O/0 typo must still match exactly"
+    assert r.confidence == 1.0
+    assert r.allocations[0].invoice_id == 1
+
+
+def test_exact_requires_currency_and_amount_to_agree():
+    assert try_exact(1_200_000, "GBP", "INV-0041", [BRIGHTLINE]) is None
+    assert try_exact(999, "USD", "INV-0041", [BRIGHTLINE]) is None
+
+
+# ---- tier 2: RULE --------------------------------------------------------
+def test_rule_needs_payer_identity_for_single_invoice():
+    """The "only one open invoice" rule must NOT fire on a fuzzy payer name.
+    Here "L. Stores" vs "Lumen Stores" is a weak match, and the amount does not
+    fit anyway, so tier 2 declines and tier 3 classifies it instead."""
+    cands = [_c(9, "INV-0099", "Lumen Stores", "USD", 500_000)]
+    assert try_rule(440_000, "USD", "L. Stores", cands) is None
+
+
+def test_rule_single_invoice_needs_plausible_amount():
+    """Even a perfectly identified payer must not have an unrelated-sized
+    payment claimed for its invoice — tier 3 handles part-payments."""
+    cands = [_c(9, "INV-0099", "Lumen Stores", "USD", 500_000)]
+    assert try_rule(120_000, "USD", "Lumen Stores", cands) is None
+
+
+def test_rule_single_invoice_fires_on_plausible_amount():
+    """Identified payer, small shortfall within bank-fee tolerance -> tier 2."""
+    cands = [_c(9, "INV-0099", "Lumen Stores", "USD", 500_000)]
+    r = try_rule(499_800, "USD", "Lumen Stores", cands)
+    assert r is not None
+    assert r.confidence == 0.85  # below auto threshold: approval, not auto
+
+
+def test_rule_high_confidence_on_fuzzy_payer_and_amount():
+    r = try_rule(450_000, "USD", "Lumen Stores", [LUMEN])
+    assert r.confidence >= 0.9
+    assert r.status == "MATCHED"
+
+
+# ---- tier 3: PARTIAL / MULTI / OVERPAID ---------------------------------
+def test_partial_payment_records_shortfall():
+    """Beat 3: GBP 4,800 against GBP 8,000 -> a deliberate 40% part-payment.
+
+    Confidence is 0.85, deliberately BELOW the 0.90 auto threshold: a
+    part-payment is applied to the invoice but still needs a human to decide
+    whether to chase the remaining GBP 3,200.
+    """
+    r = try_partial(480_000, "GBP", "Harrow & Co", [HARROW])
+    assert r.status == "PARTIAL"
+    assert r.shortfall_minor == 320_000   # GBP 3,200
+    assert 0.75 <= r.confidence < 0.90     # auto-apply no, escalate yes
+
+
+def test_small_shortfall_outside_fee_tolerance_escalates():
+    """GBP 7,900 vs 8,000: too big for a bank fee, too small to be a deliberate
+    part-payment. Genuinely ambiguous -> must not be guessed."""
+    r = try_partial(790_000, "GBP", "Harrow & Co", [HARROW])
+    assert r.status == "AMBIGUOUS"
+    assert r.needs_escalation
+
+
+def test_unknown_payer_cannot_auto_apply_on_amount_alone():
+    """A deposit with no recognisable payer must not auto-apply to an invoice
+    just because the amount nearly fits."""
+    r = try_partial(480_000, "GBP", "", [HARROW])
+    assert r.confidence < 0.9
+    assert r.status in {"PARTIAL", "AMBIGUOUS"}
+
+
+def test_unrelated_payer_does_not_auto_apply():
+    r = try_partial(480_000, "GBP", "Globex GmbH", [HARROW])
+    assert r.confidence < 0.9
+
+
+def test_partial_tolerates_small_bank_fee():
+    # 800,000 expected, 799,500 received -> 50 units short, within tolerance
+    r = try_partial(799_500, "GBP", "Harrow & Co", [HARROW])
+    assert r.status == "PARTIAL"
+    assert r.shortfall_minor == 500
+
+
+def test_multi_invoice_subset_sum():
+    a = _c(1, "INV-A", "Acme", "USD", 300_000)
+    b = _c(2, "INV-B", "Acme", "USD", 450_000)
+    r = try_exact_multi(750_000, "USD", [a, b])
+    assert r.status == "MATCHED"
+    assert {x.invoice_id for x in r.allocations} == {1, 2}
+    assert r.confidence >= 0.9
+
+
+def test_multi_invoice_needs_two_invoices():
+    """A single exact invoice is tier 2's job, not the subset-sum's."""
+    a = _c(1, "INV-A", "Acme", "USD", 300_000)
+    assert try_exact_multi(300_000, "USD", [a]) is None
+
+
+def test_multi_invoice_beats_single_invoice_partial():
+    """The orchestrator must try the subset-sum before the partial rule, so a
+    payment covering two bills is not mistaken for a part-payment of one."""
+    a = _c(1, "INV-A", "Acme", "USD", 300_000)
+    b = _c(2, "INV-B", "Acme", "USD", 450_000)
+    r = match_inflow(750_000, "USD",
+                     {"payer_name": "Acme", "reference_raw": "batch remittance"},
+                     [a, b])
+    assert r.status == "MATCHED"
+    assert {x.invoice_id for x in r.allocations} == {1, 2}
+
+
+def test_overpaid_records_credit():
+    r = try_partial(500_000, "USD", "Lumen Stores", [_c(3, "INV-0043", "Lumen Stores", "USD", 450_000)])
+    assert r.status == "OVERPAID"
+    assert r.credit_minor == 50_000
+
+
+# ---- tier 4: LLM with code re-validation --------------------------------
+class StubLLM:
+    def __init__(self, response):
+        self.response = response
+
+    def propose(self, inflow, candidates):
+        return self.response
+
+
+def _needs_llm_candidates():
+    """Two open invoices, unknown payer: the deterministic tiers cannot reach
+    0.90 (amount-only match is capped at 0.88 without a recognisable payer),
+    so the orchestrator MUST fall through to tier 4. That is what makes these
+    tests actually exercise the LLM path and its code re-validation."""
+    return [_c(1, "INV-Z1", "Zephyr Trading", "USD", 700_000),
+            _c(2, "INV-Z2", "Globex GmbH", "USD", 500_000)]
+
+
+def test_llm_proposal_is_revalidated_in_code():
+    r = match_inflow(
+        700_000, "USD",
+        {"payer_name": "", "reference_raw": "wire ref 88123"},
+        _needs_llm_candidates(),
+        llm=StubLLM({"allocations": {"1": 700_000}, "confidence": 0.96,
+                     "rationale": "single open invoice matches the reference"}),
+    )
+    assert r.method == "LLM"
+    assert r.status == "MATCHED"
+    assert r.allocations[0].invoice_id == 1
+
+
+def test_llm_overallocation_is_caught_by_code():
+    """Model claims 900,000 against a 700,000 open balance -> ESCALATE."""
+    r = match_inflow(
+        700_000, "USD", {"payer_name": "", "reference_raw": "wire ref 88123"},
+        _needs_llm_candidates(),
+        llm=StubLLM({"allocations": {"1": 900_000}, "confidence": 0.99,
+                     "rationale": "looks right to me"}),
+    )
+    assert r.status == "AMBIGUOUS"
+    assert r.confidence == 0.0
+
+
+def test_llm_allocations_must_sum_to_inflow():
+    r = match_inflow(
+        700_000, "USD", {"payer_name": "", "reference_raw": "batch"},
+        _needs_llm_candidates(),
+        llm=StubLLM({"allocations": {"1": 700_000, "2": 500_000},
+                     "confidence": 0.99, "rationale": "both"}),
+    )
+    assert r.status in {"PARTIAL", "OVERPAID"}
+    assert r.confidence <= 0.9   # never a clean auto-match on a bad sum
+
+
+def test_llm_currency_crossing_is_rejected():
+    r = match_inflow(
+        700_000, "USD", {"payer_name": "", "reference_raw": ""},
+        [_c(1, "INV-Z1", "X", "GBP", 700_000),
+         _c(2, "INV-Z2", "X", "GBP", 500_000)],
+        llm=StubLLM({"allocations": {"1": 700_000}, "confidence": 0.99,
+                     "rationale": "same amount"}),
+    )
+    assert r.status == "AMBIGUOUS"
+
+
+def test_llm_unknown_invoice_is_rejected():
+    r = match_inflow(
+        700_000, "USD", {"payer_name": "", "reference_raw": "wire"},
+        _needs_llm_candidates(),
+        llm=StubLLM({"allocations": {"999": 700_000}, "confidence": 0.99,
+                     "rationale": "?"}),
+    )
+    assert r.status == "AMBIGUOUS"
+
+
+def test_dead_llm_escalates_rather_than_guesses():
+    class Boom:
+        def propose(self, inflow, candidates):
+            raise RuntimeError("gateway 503")
+
+    r = match_inflow(700_000, "USD", {"payer_name": "", "reference_raw": "wire"},
+                     _needs_llm_candidates(), llm=Boom())
+    assert r.status == "AMBIGUOUS"
+    assert r.needs_escalation
+
+
+# ---- orchestrator --------------------------------------------------------
+def test_beat2_end_to_end_typo_deposit():
+    r = match_inflow(1_200_000, "USD",
+                     {"payer_name": "Brightline Retail",
+                      "reference_raw": "inv 0O41 brightline"},
+                     [BRIGHTLINE, LUMEN])
+    assert r.status == "MATCHED"
+    assert r.method == "EXACT"
+
+
+def test_beat3_end_to_end_partial_deposit():
+    r = match_inflow(480_000, "GBP",
+                     {"payer_name": "Harrow & Co", "reference_raw": "Harrow pt1"},
+                     [HARROW])
+    assert r.status == "PARTIAL"
+    assert r.shortfall_minor == 320_000
+
+
+def test_beat6_ambiguous_escalates():
+    """USD 4,400 from "L. Stores" must NOT auto-match INV-0043 (USD 4,500)."""
+    r = match_inflow(440_000, "USD",
+                     {"payer_name": "L. Stores", "reference_raw": ""},
+                     [BRIGHTLINE, LUMEN])
+    assert r.status == "AMBIGUOUS"
+    assert r.needs_escalation

@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "CLOSEBOOK COMMITTED-CASH BUDGET — the cash the business has actually",
+    "committed, as opposed to the sandbox balance which is just capacity.",
+    "",
+    "The Airwallex sandbox pre-funds ~10,000,000 in every major currency, so",
+    "policy written against the raw balance never binds: the USD 5,000 reserve",
+    "floor and the USD 2,500 auto-pay limit would never fire and the demo would",
+    "show nothing. Closebook therefore tracks its own committed-cash budget and",
+    "treats the sandbox balance as the ceiling of what it COULD move.",
+    "",
+    "expected_inflows_minor: receivables already invoiced and reasonably",
+    "                    expected to land (the business's committed cash).",
+    "earmarked_minor:     cash already reserved for a known obligation.",
+    "",
+    "available = expected_inflows - earmarked. Policy is written against that.",
+    "Minor units throughout (integer), consistent with the rest of the system."
+  ],
+  "currency": "USD",
+  "expected_inflows_minor": 4000000,
+  "earmarked_minor": 0,
+  "reserve_floor_usd": "5000.00",
+  "auto_pay_limit_usd": "2500.00",
+  "fx_tolerance_pct": "0.50",
+  "approval_expiry_minutes": 30
+}

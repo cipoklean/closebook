@@ -11,6 +11,7 @@ from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from .models import Base  # ensure all tables are registered on Base
 
@@ -27,6 +28,11 @@ def make_engine(database_url: str | None = None):
     if url.startswith("sqlite"):
         _DATA_DIR.mkdir(parents=True, exist_ok=True)
         kwargs["connect_args"] = {"check_same_thread": False}
+        if ":memory:" in url:
+            # Every new connection to ":memory:" gets a brand-new empty
+            # database, so create_all and the test session would see different
+            # schemas. StaticPool pins one connection for the whole process.
+            kwargs["poolclass"] = StaticPool
     return create_engine(url, **kwargs)
 
 
@@ -48,3 +54,32 @@ def get_db(db: DB):
         with db.session() as s:
             yield s
     return _dep
+
+
+# Module-level default, so `from app.db import SessionLocal` works in scripts,
+# tests and the FastAPI app without threading a DB object everywhere.
+_default_db: DB | None = None
+
+
+def get_default_db() -> DB:
+    global _default_db
+    if _default_db is None:
+        _default_db = DB()
+    return _default_db
+
+
+def session_scope():
+    """`with session_scope() as s:` — commit on success, rollback on error."""
+    with get_default_db().session() as s:
+        try:
+            yield s
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise
+
+
+def reset_default_db() -> None:
+    """Drop the cached DB so a new CLOSEBOOK_DATABASE_URL takes effect."""
+    global _default_db
+    _default_db = None
