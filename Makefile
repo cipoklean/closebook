@@ -1,9 +1,11 @@
-# Closebook — Makefile (dev tooling). All targets run inside .venv when present.
-SHELL := /bin/bash
-PY := .venv/bin/python
-PIP := .venv/bin/pip
-APP := $(PY) -m app
-BASE := backend
+# Closebook — Makefile (dev tooling).
+#
+# PY resolves to an ABSOLUTE venv path so targets that `cd backend/` (to put
+# `app` on sys.path) still find the interpreter. A relative `.venv/bin/python`
+# breaks the moment a target changes directory (real bug hit 2026-10-06).
+ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+PY := $(ROOT)/.venv/bin/python
+PIP := $(ROOT)/.venv/bin/pip
 
 .PHONY: help setup dev seed demo test webhook-url run-ui clean
 
@@ -22,16 +24,16 @@ setup:
 	@echo "setup complete."
 
 dev:
-	$(PY) -m uvicorn app.main:app --app-dir $(BASE) --host 0.0.0.0 --port 8000 --reload
+	cd backend && $(PY) -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 seed:
-	cd $(BASE) && $(PY) -m app.seed.run_seed
+	cd backend && $(PY) -m app.seed.run_seed
 
 demo:
-	cd $(BASE) && $(PY) -m app.seed.run_demo
+	cd backend && $(PY) -m app.seed.run_demo
 
 test:
-	cd $(BASE) && $(PY) -m pytest -q ../tests
+	$(PY) -m pytest -q tests/
 
 # Print a fresh public URL for the webhook receiver (Settings > Developer > Webhooks in the sandbox app).
 webhook-url:

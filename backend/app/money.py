@@ -34,8 +34,16 @@ def to_major(amount_minor: int, currency: str) -> Decimal:
 
 
 def to_major_str(amount_minor: int, currency: str) -> str:
-    """API-ready string in major units (no trailing-zero surprises)."""
-    return str(to_major(amount_minor, currency).normalize())
+    """API-ready string in major units, no scientific notation, no trailing zeros.
+
+    `Decimal.normalize()` on 100 -> 1E+2, which Airwallex's JSON parser would
+    reject, so strip trailing zeros manually instead.
+    """
+    m = to_major(amount_minor, currency)
+    s = format(m, "f")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s or "0"
 
 
 def to_minor(amount_major: Decimal | str, currency: str) -> int:

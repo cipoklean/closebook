@@ -1,0 +1,62 @@
+"""Transfers (payouts).
+
+State machine (closebook.md §5.4):
+- Terminal states are PAID or CANCELLED. A FAILED transfer ends CANCELLED,
+  NOT FAILED — read `failure_type` + `failure_reason` to decide the fix.
+- SENT is in-flight, never final. CANCELLED does not mean a human cancelled.
+- request_id: 10-50 chars; a bare UUIDv4 hex (32) is valid.
+- A non-success/timeout on create is AMBIGUOUS — look up by request_id before
+  retrying. Query the transfer list for the request_id to find it.
+- SWIFT pays a flat fee per payout (EUR 12.85 in the demo corridors);
+  LOCAL is free.
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+from .client import AirwallexClient, _reserve_request_id
+
+
+class Transfers:
+    def __init__(self, client: AirwallexClient):
+        self._c = client
+
+    def list(self) -> list[dict]:
+        data = self._c.call("GET", "/api/v1/transfers")
+        return data.get("data", []) or []
+
+    def get(self, transfer_id: str) -> dict:
+        return self._c.call("GET", f"/api/v1/transfers/{transfer_id}")
+
+    def create(self, db_session, *, beneficiary_id: str, currency: str,
+               amount_minor: int, transfer_method: str,
+               reference: Optional[str] = None,
+               request_id: Optional[str] = None, plan_step=None) -> dict:
+        """Create a payout. The caller MUST have persisted request_id first.
+
+        Money boundary: amount_minor (integer) -> major-unit string here.
+        """
+        rid = request_id or _reserve_request_id(db_session, plan_step)
+        from ..money import to_major_str
+        body: dict = {
+            "request_id": rid,
+            "beneficiary_id": beneficiary_id,
+            "transfer_currency": currency,
+            "transfer_amount": to_major_str(amount_minor, currency),
+            "transfer_method": transfer_method,
+        }
+        if reference:
+            body["reference"] = reference
+        return self._c.call("POST", "/api/v1/transfers/create", json_body=body,
+                            request_id=rid, is_simulation=False)
+
+    def find_by_request_id(self, request_id: str) -> Optional[dict]:
+        """The ambiguous-retry lookup: did this request_id already create a
+        transfer? Returns the matching transfer object or None."""
+        for t in self.list():
+            if t.get("request_id") == request_id:
+                return t
+        return None
+
+
+__all__ = ["Transfers"]

@@ -1,0 +1,17 @@
+"""Make `import app.*` work from tests without installing the package.
+
+The backend package lives at backend/; add it to sys.path so tests and the
+Makefile (`python -m pytest ../tests` style) can import cleanly.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent / "backend"
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+# Point the app at an in-memory / temp DB for tests so we never touch real data.
+os.environ.setdefault("CLOSEBOOK_DATABASE_URL", "sqlite:///:memory:")

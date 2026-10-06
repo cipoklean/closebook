@@ -17,18 +17,27 @@ Closebook is an agent that **closes the books in real time** for a cross-border 
 
 ## 2. CURRENT STATUS
 
-- **Phase:** Phase 1 of 6 (Foundation), ~45% done.
-- **Working now (verified by reading files, NOT yet executed — no venv/tests run):** repo skeleton, `config.py` (loads `.env`, forces sandbox host), `money.py` (major/minor conversion).
-- **Broken / half-done:** `db.py`/`models.py` not written; `airwallex/` client + module files not written; `seed/scenario.py`, `main.py`, `make seed` not written; no tests exist yet; **no commit yet** (all files untracked).
-- **Blocker for live work:** `.env` is not filled. Code can be written and unit-tested *with Airwallex mocked* right now, but `make seed` / any real sandbox call needs david's credentials (below).
-- **Needed from david:** values for `.env` (see HOW TO RUN). The repo already ships `.env.example` + a `make setup` that copies it to `.env`.
+- **Phase:** Phase 1 of 6 (Foundation), **100% done** — verified by execution.
+- **Working now (all verified by actual runs, not just file reads):**
+  - `make test` → **22 passed** (money: 11, webhook: 6, idempotency: 4, +1)
+  - `make seed` → seeds the local ledger and prints the plan-of-record (offline path works; sandbox funding is gated on `.env`)
+  - `make demo` → drives all 7 beats offline (beat-1 preview prints which payables auto-pay vs stay HELD)
+  - `make dev` → FastAPI boots; `/healthz` and `/state` return 200
+  - All 13 Phase-1 modules import cleanly (config, money, db, models + 9 airwallex modules)
+- **Bugs found & fixed this phase (all caught by tests, before any live call):**
+  - `Decimal.normalize()` produced `1E+2` (scientific notation) — Airwallex's JSON parser would reject it; fixed with manual trailing-zero strip
+  - Makefile targets broke (`Error 127`) because they `cd backend` but called the venv python by a *relative* path — fixed with an absolute `ROOT`-resolved `PY`
+  - `run_demo` beat-1 read `payout_method` off `InvoicePayable`, but that column lives on `Supplier` (AttributeError on first run) — fixed to join through `p.supplier`
+- **Not done:** matching engine, policy engine, planner, executor, agent/LLM tools, React dashboard (Phases 2–5). `main.py` serves a minimal index only.
+- **Blocker for live work:** `.env` is still empty (created 0600 from `.env.example`). Everything above runs *without* creds; only `make seed`'s sandbox-funding path and the live demo beats need them.
+- **Needed from david:** paste `AWX_CLIENT_ID`, `AWX_API_KEY`, `AWX_WEBHOOK_SECRET`, `ANTHROPIC_API_KEY` into `~/closebook/.env` (via `vim ~/closebook/.env` or the file — never in chat).
 
 **NEXT STEPS (numbered; an agent can start #1 immediately):**
-1. Write `backend/app/db.py` (engine + session factory, SQLite, Postgres-compatible types) and `backend/app/models.py` implementing the full §4 schema (`customer`, `supplier`, `invoice_receivable`, `invoice_payable`, `inflow`, `match`, `plan_step`, `approval`, `ledger_entry`, `webhook_event`, `agent_run`) and an Alembic/`create_all` bootstrap so `make seed` can open the DB.
-2. Write `backend/tests/test_money.py`: conversion cases (USD $100.00, JPY exponent 0, CNY exponent 2) + a to_major→to_minor round-trip property.
-3. Write `backend/app/airwallex/client.py`: login (`POST /api/v1/authentication/login`, headers `x-client-id`+`x-api-key`, no body), cache the bearer token and refresh at 25 min, attach a UUIDv4 `request_id` to every mutating call **persisted before the call**, 429 backoff (20/s global, 10/endpoint, 10 concurrent), and an ambiguous-retry guard that looks up the object by `request_id` before ever retrying a money movement.
-4. Scaffold the thin `airwallex/` modules: `balances.py, fx.py, beneficiaries.py, transfers.py, issuing.py, global_accounts.py, simulation.py` (ALL simulation calls behind one interface), `webhooks.py` (HMAC verify + dedupe + ordering).
-5. Write `main.py` (FastAPI + static UI) and `seed/scenario.py`; add `tests/test_webhook.py` + `tests/test_idempotency.py`; run `make test` to green; commit.
+1. **Phase 2 — `domain/matching.py`**: the 5-tier matcher (EXACT → RULE → partial/multi-invoice subset-sum → LLM-assisted with code re-validation → <0.75 ESCALATE). Unit tests for exact, typo (O/0), partial, multi-invoice, overpaid, ambiguous — per closebook.md §5.1/Phase 2 acceptance.
+2. **Phase 2 — `domain/ledger.py`**: double-entry postings + reconciliation report; receivable status transitions (OPEN→PARTIAL→PAID/OVERPAID) on each match.
+3. **Phase 3 — `domain/policy.py`**: reserve floor, auto-pay limit, match-confidence auto threshold, SWIFT EUR 12.85 fee, priority ordering (criticality → due date → defer cost) as pure functions with unit tests.
+4. **Phase 3 — `domain/planner.py` + `executor.py`**: rebuild-on-trigger, diff against previous plan, never re-issue a step with an `airwallex_object_id`, idempotent execution with the request_id guard. Acceptance: beats 1–2 end-to-end; kill mid-transfer and restart → no duplicate.
+5. After Phase 3: wire `main.py`'s webhook path to the executor (currently marks processed only), and build the React dashboard for Phase 5.
 
 ## 3. HOW TO RUN
 
@@ -107,6 +116,10 @@ closebook/
 - **Transfers end CANCELLED, never FAILED.** A failed transfer auto-cancels within seconds; read `failure_type`/`failure_reason`. Budget two flat EUR 12.85 SWIFT fees if both original+replacement are SWIFT.
 - **Developer MCP cannot create global accounts** — use REST `POST /global_accounts/create`.
 - **EUR global account `country_code` must be NL/DE/FR** (BE is rejected); it is the account country, not the currency.
+- **`Decimal.normalize()` returns scientific notation** (`100` → `1E+2`). Airwallex's JSON parser would reject that; never use `.normalize()` for API amount strings — strip trailing zeros manually (`money.to_major_str`).
+- **A Makefile target that `cd`s elsewhere breaks on relative paths.** `cd backend && .venv/bin/python` fails with `Error 127`; resolve the interpreter to an absolute path first (`ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))`).
+- **Schema columns that "should" be on a model may live on a related one.** `payout_method` is on `Supplier`, not `InvoicePayable` — a first `make demo` run died on `AttributeError`. When a field is conceptually per-supplier, read it through the relationship, don't denormalize it onto the payable.
+- **Tests catch wiring bugs that file reads don't.** All three Phase-1 bugs above were found by *running* `make test`/`seed`/`demo`/TestClient, never by reading the code. Run the targets, don't just write them.
 
 ## 7. ACTIVITY LOG (append only, newest at the bottom)
 
@@ -130,3 +143,17 @@ closebook/
 - Commands: `find`/`git status`/`date` (baseline re-captured just before writing). No tests yet.
 - Result: works (log reflects verified on-disk state; all 6 non-AGENTS.md files confirmed present; no commits existed prior).
 - Next: START #1 in NEXT STEPS (db.py + models.py + migration bootstrap).
+
+### 2026-10-06 22:40 WAT - Phase 1 code written (venv + 13 modules)
+- Did: created `.venv` (background install, exit 0); wrote `db.py`, `models.py` (full §4 schema, 12 tables incl. balance_snapshot), `airwallex/{client,global_accounts,balances,fx,beneficiaries,transfers,issuing,simulation,webhooks}.py`, `seed/{scenario,run_seed,run_demo}.py`, `main.py` (FastAPI + webhook receiver + `/healthz`/`/state`), and tests `test_money.py`, `test_webhook.py`, `test_idempotency.py` (with `conftest.py` putting `backend/` on sys.path).
+- Files: see tree in §4; all under backend/ and tests/.
+- Commands: `.venv/bin/python -m pytest -q tests/` → 22 passed.
+- Result: works — but three real bugs surfaced during verification (see next entry).
+- Next: fix the three bugs, then commit Phase 1.
+
+### 2026-10-06 23:00 WAT - Three real bugs caught by running, not writing
+- Did: hit and fixed (1) `Decimal.normalize()` → `1E+2` scientific notation (money.py `to_major_str` rewrote to strip trailing zeros manually); (2) Makefile `Error 127` — targets `cd backend` but called `.venv/bin/python` by a relative path, fixed with `ROOT := $(abspath ...)` absolute `PY`; (3) `make demo` beat-1 `AttributeError: 'InvoicePayable' object has no attribute 'payout_method'` — that column lives on `Supplier`, fixed to join through `p.supplier`.
+- Files: backend/app/money.py, Makefile, backend/app/seed/run_demo.py.
+- Commands: `make test` → 22 passed; `make seed` → seeds local ledger, prints plan-of-record; `make demo` → all 7 beats offline; `make dev`-equivalent (`TestClient`) → `/healthz` 200, `/state` 200.
+- Result: works. Phase 1 verified end-to-end offline.
+- Next: update AGENTS.md + commit Phase 1 in one commit (per standing rule).
