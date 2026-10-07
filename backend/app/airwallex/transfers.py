@@ -12,9 +12,12 @@ State machine (closebook.md §5.4):
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from .client import AirwallexClient, _reserve_request_id
+
+log = logging.getLogger("closebook.transfers")
 
 
 class Transfers:
@@ -79,6 +82,25 @@ class Transfers:
         for t in self.list():
             if t.get("request_id") == request_id:
                 return t
+        return None
+
+    def status_of(self, transfer_id: str) -> Optional[str]:
+        """Live status of a transfer, or None if it cannot be read.
+
+        Used by incident recovery: a `payout.transfer.failed` webhook is a
+        CLAIM, not proof, so the status must be fetched before acting on it. A
+        lookup that itself fails must not raise into the recovery path — an
+        unknown status is itself a valid answer, and the safe one.
+        """
+        if not transfer_id:
+            return None
+        try:
+            obj = self.get(transfer_id)
+        except Exception:
+            log.warning("could not look up transfer %s", transfer_id)
+            return None
+        if isinstance(obj, dict):
+            return obj.get("status")
         return None
 
 

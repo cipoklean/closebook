@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse
 from .airwallex.webhooks import WebhookHandler
 from .config import get_settings
 from .db import DB, get_db
+from .domain.incidents import Incident, Recovery, handle_event, parse_payload
 from .models import InvoicePayable, InvoiceReceivable
 
 log = logging.getLogger("closebook")
@@ -29,6 +30,21 @@ app = FastAPI(title="Closebook", version="0.1.0")
 _db = DB()
 _settings = get_settings()
 _webhooks = WebhookHandler(_db, _settings.awx_webhook_secret.get_secret_value())
+# Lazy: resolving the Airwallex client touches .env credentials, and importing
+# main.py must not require live credentials (tests import it).
+_transfers = None
+# Incidents raised by processed webhooks, newest last. In-memory on purpose —
+# this is a demo view; incidents are also written to plan_step/transfer state.
+INCIDENTS: list[Incident] = []
+
+
+def _transfer_client():
+    global _transfers
+    if _transfers is None:
+        from .airwallex.client import AirwallexClient
+        from .airwallex.transfers import Transfers
+        _transfers = Transfers(AirwallexClient())
+    return _transfers
 
 
 @app.get("/healthz")
@@ -63,6 +79,17 @@ def state() -> dict:
     }
 
 
+@app.get("/incidents")
+def incidents() -> list[dict]:
+    """Open incidents raised by verified webhooks, newest last.
+
+    Surfaced on the dashboard: an incident that is not visible is an incident
+    nobody acts on. Each carries its decided recovery, so the UI never has to
+    re-derive the policy.
+    """
+    return [i.to_dict() for i in INCIDENTS]
+
+
 @app.post(_settings.webhook_path)
 async def webhook(request: Request, background: BackgroundTasks) -> Response:
     """Ack-fast (200) so Airwallex never retries on a slow handler, then
@@ -81,10 +108,29 @@ async def webhook(request: Request, background: BackgroundTasks) -> Response:
 
 
 def _process_pending() -> None:
-    """Pull unprocessed webhook events in created_at order and hand them to
-    the executor (Phase 3 wires the real handler; for now, mark processed)."""
+    """Process unprocessed webhook events oldest-first.
+
+    Every failure event is looked up on Airwallex BEFORE a recovery is chosen:
+    a `payout.transfer.failed` webhook is a claim about a transfer, not proof of
+    one, and treating the claim as fact is how you pay twice.
+    """
     for ev in _webhooks.pending_events():
         log.info("processing webhook %s (%s)", ev.event_id, ev.name)
+        payload = parse_payload(ev.payload)
+        live_status = None
+        if ev.name in {"payout.transfer.failed", "payout.transfer.cancelled",
+                       "payout.transfer.paid"}:
+            transfer_id = payload.get("transfer_id") or payload.get("transaction_id")
+            if transfer_id:
+                try:
+                    live_status = _transfer_client().status_of(transfer_id)
+                except Exception:
+                    log.warning("lookup failed for %s", transfer_id)
+        incident = handle_event(ev.name, payload, event_id=ev.event_id,
+                                live_status=live_status)
+        if incident.recovery is not Recovery.IGNORE:
+            log.warning("INCIDENT %s", incident.describe())
+            INCIDENTS.append(incident)
         _webhooks.mark_processed(ev.event_id)
 
 
@@ -98,7 +144,8 @@ def index() -> str:
         f"<code>{_settings.webhook_url}</code>. Sandbox ready: "
         f"{'yes' if _settings.sandbox_ready() else 'no (.env empty)'}</p>"
         "<ul><li><a href='/healthz'>/healthz</a></li>"
-        "<li><a href='/state'>/state</a></li></ul>"
+        "<li><a href='/state'>/state</a></li>"
+        f"<li><a href='/incidents'>/incidents</a> ({len(INCIDENTS)})</li></ul>"
         "</body></html>"
     )
 
