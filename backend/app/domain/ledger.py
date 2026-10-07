@@ -70,7 +70,19 @@ def apply_inflow_to_receivables(db_session, inflow, result) -> list[Match]:
 
     `result` is a matching.MatchResult. This is the only place a receivable's
     amount_paid/status changes.
+
+    CONFIDENCE IS ENFORCED HERE, not only in the matcher. The matcher already
+    scores a weak match below `MATCH_CONFIDENCE_AUTO` so it escalates, but
+    scoring it low does not stop a caller from applying the allocations anyway.
+    The matcher returned a 0.85 OVERPAID for a fuzzy payer and the ledger
+    applied it to an invoice regardless — a refund obligation created from a
+    70%-confidence guess. Below the auto threshold the cash is still posted and
+    the invoice still moves to PARTIAL (so the money is visible and chaseable),
+    but it is recorded as awaiting approval rather than as a settled match.
     """
+    from .policy import MATCH_CONFIDENCE_AUTO
+
+    needs_approval = result.confidence < MATCH_CONFIDENCE_AUTO
     cands = {c.invoice_id: c for c in []}  # placeholder, filled below
     created: list[Match] = []
     # A recorded overpayment is money that WAS received against this invoice but
@@ -109,6 +121,11 @@ def apply_inflow_to_receivables(db_session, inflow, result) -> list[Match]:
 
     inflow.match_status = MatchStatus[result.status] if result.status in MatchStatus.__members__ \
         else MatchStatus.AMBIGUOUS
+    # A sub-threshold match is never recorded as settled. AMBIGUOUS keeps the
+    # cash visible and the invoice traceable while forcing a human decision.
+    if needs_approval and inflow.match_status in (MatchStatus.MATCHED,
+                                                  MatchStatus.PARTIAL):
+        inflow.match_status = MatchStatus.AMBIGUOUS
 
     # Cash in: debit the cash account, credit the receivable clearing account.
     # `allocated` is what was applied to invoices; the credit portion is
@@ -143,16 +160,25 @@ class ReconciliationReport:
     receivables_overpaid: list[dict] = field(default_factory=list)
     payables_by_status: dict[str, list[str]] = field(default_factory=dict)
     cash_by_currency: dict[str, int] = field(default_factory=dict)
+    suspense_by_currency: dict[str, int] = field(default_factory=dict)
     unmatched_inflows: list[dict] = field(default_factory=list)
     ambiguous_inflows: list[dict] = field(default_factory=list)
     balanced: bool = True
 
     def summary(self) -> str:
+        cash = ", ".join(f"{k} {v/100:,.2f}"
+                         for k, v in sorted(self.cash_by_currency.items())) or "none"
         lines = [
             f"Receivables open: {len(self.receivables_open)}",
             f"Receivables paid: {len(self.receivables_paid)}",
             f"Receivables overpaid: {len(self.receivables_overpaid)}",
-            f"Cash by currency: {self.cash_by_currency}",
+            f"Cash: {cash}",
+        ]
+        if self.suspense_by_currency:
+            sus = ", ".join(f"{k} {v/100:,.2f}"
+                            for k, v in sorted(self.suspense_by_currency.items()))
+            lines.append(f"Unapplied (needs a human): {sus}")
+        lines += [
             f"Unmatched inflows: {len(self.unmatched_inflows)}",
             f"Ambiguous inflows: {len(self.ambiguous_inflows)}",
             f"Ledger balanced: {'yes' if self.balanced else 'NO'}",
@@ -186,17 +212,29 @@ def reconcile(db_session) -> ReconciliationReport:
         rep.payables_by_status.setdefault(p.status.value, []).append(p.number)
 
     cash: dict[str, int] = {}
+    suspense: dict[str, int] = {}
     for e in db_session.query(LedgerEntry).all():
-        cash.setdefault(e.currency, 0)
-        cash[e.currency] += e.debit_minor - e.credit_minor
-        # every posting must balance per (txn, currency)
+        net = e.debit_minor - e.credit_minor
+        if e.account.startswith("cash:"):
+            # Only real cash accounts count as cash.
+            cash.setdefault(e.currency, 0)
+            cash[e.currency] += net
+        elif e.account == "unapplied_cash":
+            suspense.setdefault(e.currency, 0)
+            suspense[e.currency] += -net  # a credit is money we hold unapplied
+
+    # every posting must balance per (txn, currency)
     by_txn: dict[tuple[str, str], tuple[int, int]] = {}
     for e in db_session.query(LedgerEntry).all():
         key = (e.txn_id, e.currency)
         d, c = by_txn.get(key, (0, 0))
         by_txn[key] = (d + e.debit_minor, c + e.credit_minor)
     rep.balanced = all(d == c for d, c in by_txn.values())
+    # Summing EVERY account's net made cash cancel against the clearing and
+    # suspense accounts, so this dict was always empty and the reserve-floor
+    # check had nothing to measure. Only `cash:*` accounts are cash.
     rep.cash_by_currency = {k: v for k, v in cash.items() if v != 0}
+    rep.suspense_by_currency = {k: v for k, v in suspense.items() if v != 0}
 
     from ..models import Inflow
     for i in db_session.query(Inflow).all():

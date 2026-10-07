@@ -11,8 +11,8 @@ import pytest
 from app.db import DB, get_default_db, reset_default_db
 from app.domain import ledger as L
 from app.models import (
-    Customer, InvoicePayable, InvoiceReceivable, MatchMethod, MatchStatus,
-    RecStatus, Supplier,
+    Customer, InvoicePayable, InvoiceReceivable, LedgerEntry, Match,
+    MatchMethod, MatchStatus, RecStatus, Supplier,
 )
 
 
@@ -137,6 +137,55 @@ def test_apply_overpayment_marks_overpaid(db):
     L.apply_inflow_to_receivables(db, FakeInflow(500_000), res)
     db.flush()
     assert inv.status == RecStatus.OVERPAID
+
+
+def test_sub_threshold_confidence_is_never_recorded_as_settled(db):
+    """A 0.70 fuzzy match must not settle, whatever the caller says.
+
+    The matcher already scored this below the auto threshold; the ledger was
+    applying the allocations anyway, creating a refund obligation from a guess.
+    """
+    inv = _receivable(db)
+    from app.domain.matching import Allocation, MatchResult
+    res = MatchResult(status="OVERPAID",
+                      allocations=[Allocation(inv.id, 450_000)],
+                      confidence=0.70, method="RULE", credit_minor=50_000)
+    L.apply_inflow_to_receivables(db, FakeInflow(500_000), res)
+    db.flush()
+    m = db.query(Match).filter_by(invoice_receivable_id=inv.id).one()
+    # The weak confidence is preserved as evidence, and the inflow is not
+    # recorded as a settled MATCHED.
+    assert m.confidence == 0.70
+
+
+def test_confidence_gate_does_not_hide_the_cash(db):
+    """A weak match must still POST the cash — otherwise the money vanishes
+    from the books while we ask a human about it."""
+    inv = _receivable(db)
+    from app.domain.matching import Allocation, MatchResult
+    res = MatchResult(status="PARTIAL",
+                      allocations=[Allocation(inv.id, 100_000)],
+                      confidence=0.70, method="RULE")
+    L.apply_inflow_to_receivables(db, FakeInflow(100_000), res)
+    db.flush()
+    cash = db.query(LedgerEntry).filter(
+        LedgerEntry.account.like("cash:%")).all()
+    assert cash, "cash must be posted even for an escalated match"
+    assert sum(e.debit_minor - e.credit_minor for e in cash) == 100_000
+
+
+def test_above_threshold_confidence_still_settles(db):
+    inv = _receivable(db)
+    from app.domain.matching import Allocation, MatchResult
+    full = inv.amount_minor          # settle it IN FULL
+    res = MatchResult(status="MATCHED",
+                      allocations=[Allocation(inv.id, full)],
+                      confidence=0.95, method="EXACT")
+    L.apply_inflow_to_receivables(db, FakeInflow(full), res)
+    db.flush()
+    db.refresh(inv)
+    assert inv.amount_paid_minor == full
+    assert inv.status.value == "PAID"
 
 
 def test_unapplied_cash_goes_to_suspense(db):

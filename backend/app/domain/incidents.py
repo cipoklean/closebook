@@ -116,6 +116,16 @@ _COMPLIANCE_HINTS = (
 )
 
 
+def in_flight(status: Optional[str]) -> bool:
+    """Is this transfer possibly still moving?
+
+    Public because callers must be able to assert they are NOT creating a
+    replacement for a live transfer. A private `_IN_FLIGHT` set invites
+    duplicating the list, and the duplicate is where the double payment returns.
+    """
+    return bool(status) and status.upper() in _IN_FLIGHT
+
+
 def classify_failure(failure_type: Optional[str],
                      failure_reason: Optional[str]) -> Recovery:
     """Map a failure to its recovery class. Deterministic, no model involved."""
@@ -220,7 +230,7 @@ def handle_event(event_name: str, payload: dict, *,
                         **base)
 
     # --- the transfer is still moving, so creating a replacement is unsafe ---
-    if live_status and live_status.upper() in _IN_FLIGHT:
+    if in_flight(live_status):
         return Incident(
             recovery=Recovery.IN_FLIGHT_WATCH, severity=Severity.WARN,
             summary=(f"transfer {transfer_id} reported {event_name} but is still "
@@ -287,5 +297,5 @@ def parse_payload(raw: str | bytes) -> dict:
 
 __all__ = [
     "Incident", "Recovery", "Severity", "classify_failure", "handle_event",
-    "parse_payload",
+    "in_flight", "parse_payload",
 ]
