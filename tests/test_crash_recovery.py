@@ -43,13 +43,20 @@ def _executor(session, transfers):
 
 
 def _seed_step() -> int:
+    """Persist via the REAL writer so the payload shape matches production.
+
+    Hand-writing payload_json here is what let the FX/PAY identity bug hide:
+    the fixture produced a row no real lookup could match.
+    """
+    from app.domain.plan_store import new_run_id, persist_plan
+    from app.domain.planner import ACT_PAY, Step
+
+    step = Step(action=ACT_PAY, reason="r", payable_number="PO-7003",
+                supplier="Atlanta Packaging", amount_minor=180_000,
+                currency="USD")
     with session_scope() as s:
-        row = PlanStep(type=StepType.TRANSFER,
-                       payload_json=json.dumps({"payable_number": "PO-7003"}),
-                       status=StepStatus.PROPOSED)
-        s.add(row)
-        s.commit()
-        return row.id
+        rows, _ = persist_plan(s, new_run_id(), [step])
+        return rows[0].id
 
 
 def test_crash_after_send_before_writeback_does_not_double_pay():

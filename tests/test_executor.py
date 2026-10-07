@@ -38,7 +38,8 @@ def _spine():
     with session_scope() as s:
         s.add(PlanStep(
             type=StepType.TRANSFER,
-            payload_json=json.dumps({"payable_number": "PO-7003"}),
+            payload_json=json.dumps({"payable_number": "PO-7003",
+                                     "action": "PAY"}),
             status=StepStatus.PROPOSED))
         s.commit()
     yield
@@ -97,7 +98,8 @@ def _pay_step(**kw) -> Step:
 def _row(number="PO-7003", **kw) -> PlanStep:
     with session_scope() as s:
         row = PlanStep(type=StepType.TRANSFER,
-                       payload_json=json.dumps({"payable_number": number}),
+                       payload_json=json.dumps({"payable_number": number,
+                                                "action": "PAY"}),
                        status=StepStatus.PROPOSED, **kw)
         s.add(row)
         s.commit()
@@ -191,7 +193,8 @@ def test_ambiguous_fx_does_not_resend_the_conversion():
     # which is how the executor finds their persisted row.
     with session_scope() as s:
         s.add(PlanStep(type=StepType.FX,
-                       payload_json=json.dumps({"payable_number": "PO-7003"}),
+                       payload_json=json.dumps({"payable_number": "PO-7003",
+                                                "action": "FX"}),
                        status=StepStatus.PROPOSED))
         s.commit()
     step = Step(action=ACT_FX, reason="convert", sell_currency="USD",

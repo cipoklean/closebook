@@ -53,9 +53,12 @@ def _matches(row: PlanStep, step: Step) -> bool:
         return False
     if not isinstance(payload, dict):
         return False
-    # The payable is the identity. A payable has at most one transfer step and
-    # at most one FX step per plan, so (payable, action) is sufficient and is
-    # stable across runs.
+    # IDENTITY IS (payable_number, action) — never payable_number alone.
+    # A payable legitimately has BOTH an FX step and a transfer step; keying on
+    # the payable alone makes them collide, so a paid FX conversion's
+    # airwallex_object_id gets adopted by the transfer and the payout silently
+    # never happens. That bug shipped and was caught only by running the real
+    # EUR payout end to end.
     return (payload.get("payable_number") == step.payable_number
             and payload.get("action") == step.action)
 
@@ -70,10 +73,15 @@ def find_step(db: Session, step: Step) -> Optional[PlanStep]:
 
 
 def is_already_paid(db: Session, step: Step) -> bool:
-    """True when this payable already has a live transfer on Airwallex.
+    """True when THIS step already has a live Airwallex object.
 
-    This is the cross-run duplicate guard: even if the plan is rebuilt from
-    scratch, a payable that has already been paid is not planned again.
+    The cross-run duplicate guard: even if the plan is rebuilt from scratch, a
+    payable already paid is not planned again.
+
+    Identity is (payable_number, action) via find_step — checking only the
+    payable would see a completed FX conversion for the same payable and
+    conclude the PAYMENT was already made, silently skipping the supplier.
+    That bug was live and is why find_step owns this decision.
     """
     row = find_step(db, step)
     return bool(row and row.airwallex_object_id)

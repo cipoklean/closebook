@@ -33,8 +33,25 @@ def _isolated_db():
 
 
 def _row(number="PO-7003", kind=StepType.TRANSFER, **kw):
-    defaults = dict(type=kind, payload_json=json.dumps({"payable_number": number}),
-                    status=StepStatus.PROPOSED)
+    """Write a row in the REAL persisted shape (payable_number + action).
+
+    Hand-rolling payload_json here is exactly what hid the FX/PAY identity
+    bug, so fixtures go through plan_store.persist_plan instead.
+    """
+    from app.domain.plan_store import new_run_id, persist_plan
+    from app.domain.planner import ACT_FX, ACT_PAY, Step
+
+    action = ACT_FX if kind == StepType.FX else ACT_PAY
+    step = Step(action=action, reason="fixture", payable_number=number,
+                supplier="Atlanta Packaging", amount_minor=180_000, currency="USD")
+    with session_scope() as s:
+        rows, _ = persist_plan(s, new_run_id(), [step])
+        row = rows[0]
+        for k, v in kw.items():
+            setattr(row, k, v)
+        s.commit()
+        return row.id
+    defaults = dict(type=kind, status=StepStatus.PROPOSED)
     defaults.update(kw)
     with session_scope() as s:
         r = PlanStep(**defaults)
@@ -62,16 +79,18 @@ def test_a_persisted_step_is_found_by_its_payable():
     assert _find() is not None
 
 
-def test_re_persisting_the_same_payable_does_not_orphan_the_first_row():
-    """The bug: a second seed row left the executor blind to the first."""
+def test_re_persisting_the_same_payable_reuses_the_same_row():
+    """Persisting twice must CONVERGE, not append a second identity.
+
+    An earlier version of this test asserted `first != second`, encoding the
+    very bug that let a duplicate payout through: a fresh row per run meant the
+    executor had nothing to recognise. The correct invariant is one row.
+    """
     reset_default_db()
     first = _row()
     second = _row()
-    assert first != second
-    found = _find()
-    # _row_for takes the newest, but the newest must still be the one we just
-    # wrote — and the executor must be able to see it.
-    assert found.id == second
+    assert first == second, "a second seed created a second plan_step identity"
+    assert _find().id == first
 
 
 def test_a_step_with_a_live_object_is_recognised_as_done():
@@ -175,3 +194,64 @@ def test_payable_number_with_sql_wildcards_is_matched_exactly():
     _row(number="PO_7004", airwallex_object_id="tr_plain")
     assert _find(number="PO_7003").airwallex_object_id == "tr_underscore"
     assert _find(number="PO_7004").airwallex_object_id == "tr_plain"
+
+# ---- FX vs PAY identity (a real bug, caught live 2026-10-07) -------------
+def test_fx_and_transfer_steps_for_one_payable_do_not_collide():
+    """THE bug: the FX conversion's object id was adopted by the payment.
+
+    Both steps carry payable_number PO-7001. Keying on the payable alone made
+    the transfer report ALREADY_DONE after the conversion ran, so the supplier
+    was never paid and the run still looked successful.
+    """
+    from app.domain.executor import Executor
+    from app.domain.plan_store import find_step, new_run_id, persist_plan
+    from app.domain.planner import ACT_FX, ACT_PAY, Step
+
+    fx = Step(action=ACT_FX, reason="convert", payable_number="PO-7001",
+              sell_currency="USD", sell_amount_minor=1_026_317,
+              buy_currency="EUR", buy_amount_minor=901_285, currency="EUR")
+    pay = Step(action=ACT_PAY, reason="pay", payable_number="PO-7001",
+               supplier="Rotterdam Freight BV", amount_minor=901_285,
+               currency="EUR")
+    with session_scope() as s:
+        rows, _ = persist_plan(s, new_run_id(), [fx, pay])
+        fx_row = [r for r in rows if r.type == StepType.FX][0]
+        pay_row = [r for r in rows if r.type == StepType.TRANSFER][0]
+        # Simulate: the FX conversion succeeded and wrote its object id back.
+        fx_row.airwallex_object_id = "cnv_live_1"
+        s.commit()
+
+    with session_scope() as s:
+        assert find_step(s, fx).airwallex_object_id == "cnv_live_1"
+        # The transfer step must NOT see that object id...
+        assert find_step(s, pay).airwallex_object_id is None
+
+        ex = Executor.__new__(Executor)
+        ex.db = s
+
+        class _Fake:
+            pass
+        f = _Fake(); f.payable_number = "PO-7001"; f.action = ACT_PAY
+        assert Executor._row_for(ex, f).airwallex_object_id is None, \
+            "the transfer adopted the FX conversion's object id"
+
+
+def test_an_executor_would_pay_after_the_fx_conversion_completed():
+    """End-to-end shape of the bug: conversion done => payment must proceed."""
+    from app.domain.plan_store import find_step, new_run_id, persist_plan
+    from app.domain.planner import ACT_FX, ACT_PAY, Step
+
+    fx = Step(action=ACT_FX, reason="c", payable_number="PO-7001",
+              sell_currency="USD", sell_amount_minor=1_026_317,
+              buy_currency="EUR", buy_amount_minor=901_285, currency="EUR")
+    pay = Step(action=ACT_PAY, reason="p", payable_number="PO-7001",
+               supplier="Rotterdam Freight BV", amount_minor=901_285,
+               currency="EUR")
+    with session_scope() as s:
+        rows, _ = persist_plan(s, new_run_id(), [fx, pay])
+        [r for r in rows if r.type == StepType.FX][0].airwallex_object_id = "cnv_1"
+        s.commit()
+    with session_scope() as s:
+        is_already_paid_now = find_step(s, pay).airwallex_object_id is not None
+        assert is_already_paid_now is False, \
+            "PO-7001 would look already paid and be silently skipped"

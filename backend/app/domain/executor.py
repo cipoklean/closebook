@@ -318,28 +318,18 @@ class Executor:
     def _row_for(self, step: Step) -> Optional[PlanStep]:
         """Find the persisted plan_step for a planner step, if there is one.
 
-        Deliberately parses the payload JSON instead of LIKE-matching the text.
-        A SQL LIKE on JSON is wrong in ways that bite quietly: `%` and `_` in a
-        payable number are wildcards, and the separator spacing must match
-        whatever wrote the column. Reading the value back is the only way to
-        be sure a step is matched to ITSELF and not to a different row.
+        Identity is (payable_number, action) — matching on the payable ALONE is
+        a bug: one payable has both an FX step and a transfer step, so the FX
+        row's `airwallex_object_id` would be adopted by the transfer, the
+        payout would report ALREADY_DONE, and the supplier would never get
+        paid. Caught by running the real EUR payout end to end.
+
+        Delegates to plan_store.find_step so the writer and this reader cannot
+        disagree about what identifies a step.
         """
-        if not step.payable_number:
-            return None
-        rows = (self.db.query(PlanStep)
-                .order_by(PlanStep.id.desc())
-                .limit(200).all())
-        for row in rows:
-            if not row.payload_json:
-                continue
-            try:
-                payload = json.loads(row.payload_json)
-            except (ValueError, TypeError):
-                continue
-            if isinstance(payload, dict) and \
-                    payload.get("payable_number") == step.payable_number:
-                return row
-        return None
+        from .plan_store import find_step
+
+        return find_step(self.db, step)
 
 
 def _error_detail(exc: ApiError) -> str:
