@@ -88,6 +88,14 @@ def main() -> int:
         if is_already_paid(s, step):
             print("\n  This payable already has a live transfer — "
                   "not planning or paying it again.")
+            # Return here. Previously this printed the refusal and then fell
+            # through to `rows[0]`, which is empty precisely BECAUSE the payout
+            # already happened — so the correct behaviour exited with an
+            # IndexError. A safety guard must not end in a crash.
+            print("  DUPLICATE PREVENTED: no new request_id was minted and no "
+                  "money moved.")
+            return 0
+    with session_scope() as s:
         rows, skipped = persist_plan(s, new_run_id(), [step])
         step_row_id = rows[0].id
         print(f"  persisted plan_step id={step_row_id} (skipped={len(skipped)})")
