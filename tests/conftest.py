@@ -15,3 +15,8 @@ if str(BACKEND_DIR) not in sys.path:
 
 # Point the app at an in-memory / temp DB for tests so we never touch real data.
 os.environ.setdefault("CLOSEBOOK_DATABASE_URL", "sqlite:///:memory:")
+
+# Tests must never depend on a developer's local .env, and must never read a
+# REAL secret. Approval signing needs CLOSEBOOK_HMAC_SECRET, so set a fixed
+# test-only value here. `setdefault` still lets CI override it deliberately.
+os.environ.setdefault("CLOSEBOOK_HMAC_SECRET", "test-only-not-a-real-secret")

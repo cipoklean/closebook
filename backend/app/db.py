@@ -7,6 +7,7 @@ DATABASE_URL is the only production change. Tables are created idempotently
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 from sqlalchemy import create_engine
@@ -68,8 +69,14 @@ def get_default_db() -> DB:
     return _default_db
 
 
+@contextmanager
 def session_scope():
-    """`with session_scope() as s:` — commit on success, rollback on error."""
+    """`with session_scope() as s:` — commit on success, rollback on error.
+
+    Decorated with @contextmanager: without it this is a bare generator and
+    `with session_scope()` raises "object does not support the context manager
+    protocol" — while the docstring cheerfully promises that exact usage.
+    """
     with get_default_db().session() as s:
         try:
             yield s
