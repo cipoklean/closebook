@@ -23,3 +23,7 @@ node_modules/
 logs/
 NOTES.local.md
 *.log
+
+# Never commit .env backups — they contain live credentials.
+.env.bak*
+data/*.bak*
