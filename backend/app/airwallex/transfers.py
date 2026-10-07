@@ -36,6 +36,8 @@ class Transfers:
     def create(self, db_session, *, beneficiary_id: str, currency: str,
                amount_minor: int, transfer_method: str,
                reference: Optional[str] = None,
+               reason: Optional[str] = None,
+               source_currency: Optional[str] = None,
                request_id: Optional[str] = None, plan_step=None) -> dict:
         """Create a payout. The caller MUST have persisted request_id first.
 
@@ -51,12 +53,23 @@ class Transfers:
         body: dict = {
             "request_id": request_id,
             "beneficiary_id": beneficiary_id,
+            # Verified live 2026-10-07: transfers/create requires
+            # `source_currency` (the currency being debited) in addition to
+            # `transfer_currency`. Sending only the latter fails with
+            # validation_failed naming `source_currency` — which is how we
+            # found it.
+            "source_currency": source_currency or currency,
             "transfer_currency": currency,
             "transfer_amount": to_major_str(amount_minor, currency),
             "transfer_method": transfer_method,
         }
         if reference:
             body["reference"] = reference
+        # Verified live 2026-10-07: transfers/create requires `reason`
+        # (a human-readable purpose shown in the Airwallex dashboard). Omitting
+        # it entirely fails validation; an empty string may also be rejected,
+        # so always send a real one.
+        body["reason"] = reason or reference or "Supplier payout"
         return self._c.call("POST", "/api/v1/transfers/create", json_body=body,
                             request_id=request_id, is_simulation=False)
 

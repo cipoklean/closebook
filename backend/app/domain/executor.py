@@ -240,9 +240,9 @@ class Executor:
         except ApiError as exc:
             if row is not None:
                 row.status = StepStatus.CANCELLED
-                row.reason = f"api error: {exc}"
+                row.reason = f"api error: {_error_detail(exc)}"
                 self.db.commit()
-            return StepResult(step, True, None, "FAILED", f"{exc}", )
+            return StepResult(step, True, None, "FAILED", _error_detail(exc))
 
         oid = _object_id(obj)
         if row is not None:
@@ -340,6 +340,29 @@ class Executor:
                     payload.get("payable_number") == step.payable_number:
                 return row
         return None
+
+
+def _error_detail(exc: ApiError) -> str:
+    """The part of an Airwallex error that actually names the problem.
+
+    `str(ApiError)` is just "[code] message" and for validation_failed that
+    message is generic — the offending fields live in the payload's
+    details.errors[].source. Airwallex consistently reports the field you did
+    NOT send, so surfacing it turns a dead end into a one-line fix.
+    """
+    parts = [str(exc)]
+    payload = exc.payload if isinstance(exc.payload, dict) else {}
+    details = payload.get("details") or {}
+    errors = details.get("errors") if isinstance(details, dict) else None
+    if errors:
+        for err in errors[:5]:
+            if isinstance(err, dict):
+                parts.append(f"field={err.get('source')} code={err.get('code')}")
+            else:
+                parts.append(str(err))
+    if payload.get("message"):
+        parts.append(str(payload["message"]))
+    return " | ".join(parts)
 
 
 def _object_id(obj: Any) -> Optional[str]:

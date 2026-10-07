@@ -19,6 +19,20 @@ Captured facts:
   BOTH `awx_rate` and `client_rate`.
 - POST /fx/conversions/create -> 201 bare object with awx_rate, buy_amount,
   quote_id, conversion_id, rate_details[].
+- POST /beneficiaries/schema -> 200 {"errors": {}, "schema": {DOTTED_KEY: meta}}
+  a FLAT dotted map, NOT a nested "properties" tree. Allowed enum values hide in
+  meta["validation_functions"][0]["parameters"]["values"].
+- POST /beneficiaries/validate -> takes the INNER beneficiary and wraps it
+  itself; passes the whole body and it is double-nested (error 001 on fields
+  that are present).
+- POST /beneficiaries/create -> needs {"beneficiary": {...}} already in the
+  body PLUS transfer_methods as a list. Requires entity_type PERSONAL|COMPANY
+  (not INDIVIDUAL), account_routing_value1 (not account_routing_number),
+  account_name, and for EUR an `iban` with a valid MOD-97 checksum (bad IBAN ->
+  code 083 at CREATION).
+- POST /transfers/create -> requires BOTH source_currency and
+  transfer_currency, AND a `reason` string. Omitting either returns
+  validation_failed naming exactly the missing field.
 """
 from __future__ import annotations
 
@@ -178,3 +192,81 @@ def test_snapshot_skips_unknown_currencies():
     with db.session() as s:
         rows = s.query(BalanceSnapshot).all()
     assert [r.currency for r in rows] == ["USD"]
+
+# ---- transfers/create body shape (live failures, 2026-10-07) -------------
+class _Recorder:
+    """Captures the body a wrapper would POST, without any network."""
+
+    def __init__(self):
+        self.bodies = []
+
+    def call(self, method, path, *, json_body=None, **kw):
+        self.bodies.append((method, path, json_body))
+        return {"id": "tr_1", "status": "SENT"}
+
+
+def test_transfer_create_sends_source_currency_and_reason():
+    """Both were missing and the API named each one in turn.
+
+    Live sequence: without source_currency -> "field=source_currency code=001";
+    add it, without reason -> "field=reason code=001".
+    """
+    from app.airwallex.transfers import Transfers
+
+    rec = _Recorder()
+    Transfers(rec).create(None, beneficiary_id="bn_1", currency="EUR",
+                         amount_minor=901_285, transfer_method="SWIFT",
+                         reference="PO-7001",
+                         request_id="rid-1")
+    _, _, body = rec.bodies[0]
+    assert body["source_currency"] == "EUR"
+    assert body["transfer_currency"] == "EUR"
+    assert body["reason"], "reason is required by transfers/create"
+    assert body["transfer_amount"] == "9012.85"
+
+
+def test_transfer_create_source_currency_can_differ_from_target():
+    """Cross-currency: USD funded, EUR paid."""
+    from app.airwallex.transfers import Transfers
+
+    rec = _Recorder()
+    Transfers(rec).create(None, beneficiary_id="bn_1", currency="EUR",
+                         amount_minor=900_000, transfer_method="SWIFT",
+                         source_currency="USD", request_id="rid-2")
+    _, _, body = rec.bodies[0]
+    assert body["source_currency"] == "USD"
+    assert body["transfer_currency"] == "EUR"
+
+
+def test_beneficiary_create_body_is_nested_and_lists_transfer_methods():
+    from app.airwallex.beneficiaries import Beneficiaries
+
+    rec = _Recorder()
+    inner = {"entity_type": "COMPANY", "name": "Rotterdam Freight BV",
+             "address": {"city": "Rotterdam", "country_code": "NL"},
+             "bank_details": {"iban": "NL08INGB0000001234"}}
+    Beneficiaries(rec).create(None, country="NL", currency="EUR",
+                              transfer_method="SWIFT", beneficiary=inner,
+                              request_id="rid-3")
+    _, _, body = rec.bodies[0]
+    assert body["beneficiary"] == inner, "create needs the beneficiary nested"
+    assert body["transfer_methods"] == ["SWIFT"]
+
+
+def test_explicit_request_id_does_not_touch_the_plan_step():
+    """Regression: eager `or` fallback crashed on a None plan_step.
+
+    Passing request_id explicitly must never call _reserve_request_id.
+    """
+    from app.airwallex.transfers import Transfers
+
+    rec = _Recorder()
+
+    class ExplodingSession:
+        def execute(self, *a, **k):
+            raise AssertionError("must not touch the DB when rid is supplied")
+
+    Transfers(rec).create(ExplodingSession(), beneficiary_id="bn", currency="USD",
+                          amount_minor=100, transfer_method="LOCAL",
+                          request_id="rid-4")
+    assert rec.bodies[0][2]["request_id"] == "rid-4"
