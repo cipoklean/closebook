@@ -136,18 +136,19 @@ def _process_pending() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
-    return (
-        "<html><head><title>Closebook</title></head>"
-        "<body style='font-family:system-ui;padding:2rem'>"
-        "<h1>Closebook — dashboard (Phase 5)</h1>"
-        "<p>Webhook receiver live at "
-        f"<code>{_settings.webhook_url}</code>. Sandbox ready: "
-        f"{'yes' if _settings.sandbox_ready() else 'no (.env empty)'}</p>"
-        "<ul><li><a href='/healthz'>/healthz</a></li>"
-        "<li><a href='/state'>/state</a></li>"
-        f"<li><a href='/incidents'>/incidents</a> ({len(INCIDENTS)})</li></ul>"
-        "</body></html>"
-    )
+    """The dashboard. Everything on it was decided by the deterministic layer
+    before this function ran — the page only presents."""
+    from .dashboard import build_context
+    from .ui import render
+    try:
+        ctx = build_context(_db, INCIDENTS)
+    except Exception:
+        log.exception("dashboard context failed")
+        return ("<html><body style='font-family:system-ui;padding:2rem'>"
+                "<h1>Closebook</h1><p>The dashboard could not read state. "
+                "Try <a href='/state'>/state</a> or <a href='/healthz'>/healthz</a>."
+                "</p></body></html>")
+    return render(ctx)
 
 
 if __name__ == "__main__":
