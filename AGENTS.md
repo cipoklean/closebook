@@ -15,7 +15,7 @@ Closebook is an agent that **closes the books in real time** for a cross-border 
 - **Full spec:** `~/closebook/closebook.md` (a.k.a. closebook.md) — the authoritative build prompt. Read it before changing scope.
 - **Sandbox only.** `https://api.sandbox.airwallex.com`, no real money, no production.
 
-- **Phase:** Phase 3 of 6 complete, **Phase 4 started**. Phases 1–3 done and verified against the live sandbox; live money has moved. Remaining: approval-gated payout, webhook wiring, live beats, dashboard.
+- **Phase:** Phases 1–5 COMPLETE and verified against the live sandbox. Live money has moved, the approval-gated payout passes, webhook recovery is wired, beats 2–7 execute live, and the dashboard ships. **Remaining: the demo video, and David-only steps (rotate the exposed sandbox key, push to GitHub).**
 - **Working now (all verified by actual runs, not just file reads):**
   - `make test` → **200 passed** (money 11, webhook 6, idempotency 4, airwallex-contract 12, matching 28, policy 28, ledger 13, planner 25, executor 20, crash-recovery 3, plan-binding 12, incidents 30, webhook-recovery 8)
   - **LIVE WEBHOOK RECOVERY VERIFIED (Phase 4)** → `scripts/probe_webhook_recovery.py` posts a signed `payout.transfer.failed` at the running server, which looks the transfer up on Airwallex and records a decided recovery. RESULT: PASS (`in_flight_watch`, WARN, replacement flags False).
@@ -48,13 +48,42 @@ Closebook is an agent that **closes the books in real time** for a cross-border 
   - **`Decimal("1.10")` and `Decimal("1.1")` produced different approval hashes**, voiding a valid approval over trailing zeros. `canonical()` now normalises before stringifying.
   - `Decimal.normalize()` → `1E+2` scientific notation; Makefile `Error 127`; `run_demo` read `payout_method` off the wrong table; digit-folding turned `INV` into `1NV`; an unpriced currency valued at 0 USD and auto-paid; a fully-overpaid invoice marked exactly `PAID`, losing the credit; `:memory:` SQLite handing each connection a fresh empty DB
   - **Live-discovered (Phase 1):** login field is `token`; `global_accounts` list is under `items`; create + `fx/*` return bare objects; `balances/current` is a bare list keyed `available_amount`; `fx/rates/current` needs `buy_currency`+`sell_currency`; `fx/quotes/create` requires a `validity` enum
-- **Not done:** webhook-to-executor wiring, agent/LLM tools, live beat execution (Phases 4–5). `main.py` serves a minimal index only. The executor is fully tested but has **not yet issued a real live transfer** — every test runs against fakes.
+- **Superseded — for the record, these were the Phase 4–5 gaps and all are now CLOSED:** webhook-to-executor wiring (wired + live-verified), live beat execution (beats 2–7 run for real), the dashboard (ships, browser-verified), agent/LLM tools (`domain/llm.py`, optional and offline-safe), README (written, and found MISSING from the repo by a fresh-clone test). The executor issued its first real transfer in Phase 3 — the earlier note claiming it had not was already false when written.
 - **Blocker for live work: NONE for Airwallex.** `.env` has `AWX_CLIENT_ID` + `AWX_API_KEY` (auth verified HTTP 201) and now also `CLOSEBOOK_HMAC_SECRET`. Still optional: `AWX_WEBHOOK_SECRET` (Phase 4 only — polling fallback covers the demo) and an LLM provider (Phase 5 only — **no money needed**, use the free OpenAI-compatible route per §5).
 
 **NEXT STEPS (numbered; an agent can start #1 immediately):**
-1. **Phase 4b — beats 3–6 execute live** instead of printing expected outcomes. Beat 5 (incident recovery) is now genuinely wired; the remaining beats still print expected outcomes.
-3. **Phase 5 — agent/LLM tools + one-page dashboard.** The UI must surface the plan, the approvals and the reconciliation report — anything not linked from the main screen does not exist for a judge.
-4. **Phase 5 — README + demo video.** Submission deadline 2026-11-13 18:29 UTC.
+1. **Record the demo video (< 5 min).** Submission deadline **2026-11-13 18:29 UTC**. Everything it needs is verified: `make dev` for the dashboard, `python -m app.seed.live_beats` for the 7 live beats, `scripts/live_approved_payout.py` for the approval gate, `scripts/probe_webhook_recovery.py` for incident recovery.
+2. **David-only (cannot be done by an agent):** rotate the Airwallex sandbox API key (it was committed once — see §7 10:20), and push the repo to GitHub.
+3. **Optional hardening if time allows:** real Alembic migrations (schema still uses `create_all`); a GB/GBP and CN/USD beneficiary corridor verified end to end; polling-based transfer-status refresh so `in_flight_watch` incidents auto-resolve.
+
+## 2. WHAT A NEW AGENT MUST NOT RE-BREAK
+
+Read this before changing anything. Each line cost real debugging time.
+
+1. **NEVER call Airwallex directly from a script or test.** Only
+   `domain/executor.py` moves money. Everything else plans, matches or explains.
+2. **NEVER submit a request without a `request_id` already committed.** The
+   unique `plan_step.request_id` is the idempotency spine. Automated PAY/FX with
+   no persisted row must raise `ExecutionRefused`, not proceed.
+3. **NEVER re-send a step that has an `airwallex_object_id`,** and never re-send
+   a `SUBMITTED` step — look it up with `find_by_request_id` first.
+4. **NEVER change payment terms without a new approval and a new request_id.**
+   That includes a "replacement" for a failed payment.
+5. **NEVER trust a webhook.** Look the object up on Airwallex before acting.
+   A `failed` webhook on a still-`PROCESSING` transfer must create nothing.
+6. **NEVER let a model output touch money.** Model output is a proposal;
+   `try_llm` re-derives every number and escalates on any mismatch.
+7. **NEVER key a plan step on `payable_number` alone** — it is
+   `(payable_number, action)`. One payable legitimately has both FX and PAY.
+8. **NEVER apply allocations without re-checking confidence at the write path.**
+   A low score is not a control.
+9. **NEVER let raw Airwallex balances drive policy.** Capacity != committed cash.
+10. **NEVER commit `.env`, `.env.bak*`, or any credential value,** and check
+    `git status` before `git add -A`.
+11. **NEVER use `Decimal.normalize()` for API output** (gives `1E+2`), and
+    normalise rates before hashing an approval.
+12. **NEVER assume a docstring or a green isolated test proves a live path
+    works.** Every serious bug here was found by running the real thing.
 
 ## 3. HOW TO RUN
 
@@ -396,3 +425,16 @@ Do not trust the builder guide or the docs for envelopes — these were all conf
 - **A dict with only a payable number is truthy — `if not payload` will not filter legacy rows.** They render blank on a judge-facing page. Filter on whether the step names an AMOUNT.
 - **A UI state with no pill colour is an invisible warning.** `IN_FLIGHT_WATCH` rendered unstyled and read as "fine". Test for the styled class (`class="pill warn">IN_FLIGHT_WATCH`), not just the presence of the string, because the helper upper-cases.
 - **A stale uvicorn on port 8000 served old code through three separate restarts and made every live check lie.** `make dev` binds 8000; kill anything holding it, or use a different port, BEFORE trusting a live result. Uvicorn without `--reload` does not pick up edits.
+
+### 2026-10-07 10:20 WAT - README, security fix, and full verification from a clean clone
+- Did: wrote README.md, purged a committed `.env` backup from git history, fixed the duplicate guard's crash, then verified EVERYTHING end to end including from a fresh `git clone`.
+- Files: README.md (new), .gitignore, scripts/live_payout.py, AGENTS.md.
+- Commands: `make test` -> **240 passed**. Fresh clone -> `make setup` -> `make test` (240 passed) -> `make seed` (live sandbox funded) -> uvicorn boots, all four endpoints 200, dashboard shows 40,000.00 committed cash.
+- **SECURITY (fixed, needs the owner to act):** `.env.bak.1791332676` — a backup of the live `.env` containing the Airwallex sandbox client id and API key — was committed to git by a `git add -A` in commit `5f5be16`. It is untracked, ignored (`.env.bak*`) and **purged from all history with `git filter-repo --invert-paths`**. Verified: no `.env` or `.env.bak*` is tracked, and no credential VALUE appears anywhere in history (the only `sk-nry` matches are the key PREFIX in prose). **The Airwallex sandbox key should still be rotated — a secret that was ever in git must be treated as exposed even after history is rewritten.**
+- **A safety guard must not end in a traceback.** `live_payout.py` correctly refused the duplicate payout, then fell through to `rows[0]` — which is empty *precisely because* the payout already existed — and exited with `IndexError`. It now returns cleanly with "DUPLICATE PREVENTED: no new request_id was minted and no money moved." The correct behaviour was producing a crash.
+- **A fresh clone is the only honest test of the judge path, and it caught a missing README.** The clone had no `README.md` because I had written it but never staged it. Only cloning the repo and running `make setup && make test && make seed` surfaced that.
+- Verified and passing: 240 tests, deterministic planner (5 runs -> 1 plan), live beats 7/7 and idempotent on replay, live signed-webhook recovery (`in_flight_watch`, looked up on Airwallex), all endpoints 200, duplicate protection confirmed against the live API (still exactly 4 sandbox transfers, no new one created), `.env.example` contains no real values.
+
+- **`git add -A` will commit a `.env` backup.** The `cp .env .env.bak.<ts>` idiom for backing up a live `.env` is exactly what got committed here. Back up secrets outside the repo, and always check `git status` before staging. If a secret does land in history, `git filter-repo --path <file> --invert-paths --force` removes it — but the credential must still be ROTATED, because it was exposed.
+- **Print a refusal and then RETURN.** A guard that logs "already paid" and continues into code that assumes the row exists crashes on the correct path. Every early-return on a safety check must return.
+- **Test the real entry point: clone the repo and run it.** Writing a file is not committing it. A fresh `git clone` + `make setup` + `make test` + `make seed` is the only check that matches what a judge actually does.
