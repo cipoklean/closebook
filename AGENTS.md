@@ -438,3 +438,10 @@ Do not trust the builder guide or the docs for envelopes — these were all conf
 - **`git add -A` will commit a `.env` backup.** The `cp .env .env.bak.<ts>` idiom for backing up a live `.env` is exactly what got committed here. Back up secrets outside the repo, and always check `git status` before staging. If a secret does land in history, `git filter-repo --path <file> --invert-paths --force` removes it — but the credential must still be ROTATED, because it was exposed.
 - **Print a refusal and then RETURN.** A guard that logs "already paid" and continues into code that assumes the row exists crashes on the correct path. Every early-return on a safety check must return.
 - **Test the real entry point: clone the repo and run it.** Writing a file is not committing it. A fresh `git clone` + `make setup` + `make test` + `make seed` is the only check that matches what a judge actually does.
+
+### 2026-10-07 10:45 WAT - Final verification pass; local DB backups untracked
+- Did: verified the committed state from a fresh clone, untracked two local SQLite backups, and re-ran the whole suite.
+- Commands: fresh `git clone` -> `make setup` -> **240 passed**. 67 tracked files, 0 `.env`/`.bak` tracked.
+- Result: `data/closebook.sqlite3.bak*` (scratch copies from my own probing, committed by `git add -A` again) are untracked and ignored. Verified they contained **no** credentials before removing. `.env.example` is intentionally tracked and holds placeholder values only.
+- **Everything verified green:** 240 tests; deterministic planner (5 runs -> 1 plan); live beats 7/7 and idempotent on replay; live signed-webhook recovery (`in_flight_watch`, real Airwallex lookup); all endpoints 200 from a fresh clone; duplicate protection confirmed against the live API (still exactly 4 sandbox transfers, none created by the re-run).
+- **Still owed by David:** rotate the Airwallex sandbox key, push to GitHub, record the demo video.
