@@ -7,7 +7,7 @@ State machine (closebook.md §5.4):
 - request_id: 10-50 chars; a bare UUIDv4 hex (32) is valid.
 - A non-success/timeout on create is AMBIGUOUS — look up by request_id before
   retrying. Query the transfer list for the request_id to find it.
-- SWIFT pays a flat fee per payout (EUR 12.85 in the demo corridors);
+- SWIFT pays a flat fee per payout (EUR 12.85 in the demo correquest_idors);
   LOCAL is free.
 """
 from __future__ import annotations
@@ -41,10 +41,15 @@ class Transfers:
 
         Money boundary: amount_minor (integer) -> major-unit string here.
         """
-        rid = request_id or _reserve_request_id(db_session, plan_step)
+        # Eager-`or` trap: `request_id or _reserve_request_id(...)`
+        # evaluates the fallback even when request_id is given, so an
+        # explicit id with no plan_step crashed on None.request_id.
+        if request_id is None:
+            request_id = _reserve_request_id(db_session, plan_step)
+
         from ..money import to_major_str
         body: dict = {
-            "request_id": rid,
+            "request_id": request_id,
             "beneficiary_id": beneficiary_id,
             "transfer_currency": currency,
             "transfer_amount": to_major_str(amount_minor, currency),
@@ -53,7 +58,7 @@ class Transfers:
         if reference:
             body["reference"] = reference
         return self._c.call("POST", "/api/v1/transfers/create", json_body=body,
-                            request_id=rid, is_simulation=False)
+                            request_id=request_id, is_simulation=False)
 
     def find_by_request_id(self, request_id: str) -> Optional[dict]:
         """The ambiguous-retry lookup: did this request_id already create a

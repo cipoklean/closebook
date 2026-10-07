@@ -103,7 +103,12 @@ class FX:
                          sell_amount_minor: int, quote_id: Optional[str] = None,
                          request_id: Optional[str] = None, plan_step=None) -> dict:
         """Book a conversion. Single-use quote; omit x-api-version."""
-        rid = request_id or _reserve_request_id(db_session, plan_step)
+        # Eager-`or` trap: `request_id or _reserve_request_id(...)`
+        # evaluates the fallback even when request_id is given, so an
+        # explicit id with no plan_step crashed on None.request_id.
+        if request_id is None:
+            request_id = _reserve_request_id(db_session, plan_step)
+
         body: dict = {
             "sell_currency": sell_currency,
             "buy_currency": buy_currency,
@@ -113,7 +118,7 @@ class FX:
             body["quote_id"] = quote_id
         amounts = {"sell_amount": (sell_amount_minor, sell_currency)}
         return self._c.call("POST", "/api/v1/fx/conversions/create", json_body=body,
-                            money_amounts_minor=amounts, request_id=rid, is_simulation=False)
+                            money_amounts_minor=amounts, request_id=request_id, is_simulation=False)
 
 
 __all__ = ["FX", "Quote"]

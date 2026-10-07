@@ -31,10 +31,15 @@ class Issuing:
 
     def create_cardholder(self, db_session, *, email: str, cardholder_type: str = "DELEGATE",
                           request_id: Optional[str] = None, plan_step=None) -> dict:
-        rid = request_id or _reserve_request_id(db_session, plan_step)
-        body = {"request_id": rid, "type": cardholder_type, "email": email}
+        # Eager-`or` trap: `request_id or _reserve_request_id(...)`
+        # evaluates the fallback even when request_id is given, so an
+        # explicit id with no plan_step crashed on None.request_id.
+        if request_id is None:
+            request_id = _reserve_request_id(db_session, plan_step)
+
+        body = {"request_id": request_id, "type": cardholder_type, "email": email}
         return self._c.call("POST", "/api/v1/issuing/cardholders/create",
-                            json_body=body, request_id=rid, is_simulation=False)
+                            json_body=body, request_id=request_id, is_simulation=False)
 
     def create_card(self, db_session, *, cardholder_id: str, currency: str,
                     per_transaction_limit_minor: int, all_time_limit_minor: Optional[int],
@@ -48,14 +53,19 @@ class Issuing:
         controls can block an authorization.
         """
         from ..money import to_major_str
-        rid = request_id or _reserve_request_id(db_session, plan_step)
+        # Eager-`or` trap: `request_id or _reserve_request_id(...)`
+        # evaluates the fallback even when request_id is given, so an
+        # explicit id with no plan_step crashed on None.request_id.
+        if request_id is None:
+            request_id = _reserve_request_id(db_session, plan_step)
+
         limits = {
             "PER_TRANSACTION": to_major_str(per_transaction_limit_minor, currency),
         }
         if all_time_limit_minor is not None:
             limits["ALL_TIME"] = to_major_str(all_time_limit_minor, currency)
         body: dict = {
-            "request_id": rid,
+            "request_id": request_id,
             "cardholder_id": cardholder_id,
             "currency": currency,
             "limits": limits,
@@ -67,7 +77,7 @@ class Issuing:
         if merchant_categories:
             body["merchant_categories"] = merchant_categories
         return self._c.call("POST", "/api/v1/issuing/cards/create", json_body=body,
-                            request_id=rid, is_simulation=False)
+                            request_id=request_id, is_simulation=False)
 
     def update_card(self, card_id: str, *, card_status: str) -> dict:
         """card_status in {ACTIVE, FROZEN, CLOSED} — freeze once the invoice is paid."""

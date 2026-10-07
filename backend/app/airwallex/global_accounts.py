@@ -29,8 +29,13 @@ class GlobalAccounts:
     def create(self, db_session, *, country_code: str, currency: str,
                transfer_method: str = "LOCAL", request_id: Optional[str] = None,
                plan_step=None) -> dict:
-        rid = request_id or (_reserve_request_id(db_session, plan_step) if plan_step is not None
-                            else AirwallexClient.new_request_id())
+        # Same explicit-`None` guard as every other mutating call, so the
+        # fallback rule is stated once and read identically everywhere.
+        if request_id is None:
+            request_id = (_reserve_request_id(db_session, plan_step)
+                          if plan_step is not None
+                          else AirwallexClient.new_request_id())
+        rid = request_id
         body = {
             "request_id": rid,
             "country_code": country_code,

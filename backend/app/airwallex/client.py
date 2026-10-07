@@ -220,8 +220,16 @@ def _reserve_request_id(db_session, plan_step) -> str:
 
     If the step already has one (a prior in-flight attempt), REUSE it — that is
     exactly the same-operation retry path Airwallex's 7-day dup window expects.
+
+    With no plan_step (a one-off call such as creating a beneficiary from a
+    script) there is nowhere to persist an id, so mint a fresh one. That is
+    safe because such calls are not retried automatically — the retry path
+    that actually matters always has a row.
     """
     from sqlalchemy import update
+
+    if plan_step is None:
+        return AirwallexClient.new_request_id()
 
     if not plan_step.request_id:
         rid = AirwallexClient.new_request_id()
