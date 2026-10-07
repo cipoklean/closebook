@@ -79,15 +79,18 @@ def main() -> int:
     print(f"  needs_approval={step.needs_approval}")
 
     client = AirwallexClient()
-    # 2. Persist the spine BEFORE any money moves.
+    # 2. Persist the spine BEFORE any money moves. persist_plan converges on an
+    #    existing row for the same (payable, action) — it does not mint a new
+    #    identity each run, which is what let a duplicate payout through before.
+    from app.domain.plan_store import is_already_paid, new_run_id, persist_plan
+
     with session_scope() as s:
-        row = PlanStep(type=StepType.TRANSFER,
-                       payload_json=json.dumps({"payable_number": target,
-                                                "supplier": step.supplier}),
-                       status=StepStatus.PROPOSED)
-        s.add(row)
-        s.commit()
-        step_row_id = row.id
+        if is_already_paid(s, step):
+            print("\n  This payable already has a live transfer — "
+                  "not planning or paying it again.")
+        rows, skipped = persist_plan(s, new_run_id(), [step])
+        step_row_id = rows[0].id
+        print(f"  persisted plan_step id={step_row_id} (skipped={len(skipped)})")
 
     def build_executor(session):
         return Executor(
