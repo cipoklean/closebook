@@ -20,7 +20,7 @@ help:
 setup:
 	@if [ ! -d .venv ]; then python3 -m venv .venv; fi
 	$(PIP) install -r requirements.txt
-	@if [ ! -f .env ]; then cp .env.example .env && echo "Created .env from .env.example — fill in Airwallex + Anthropic credentials."; fi
+	@if [ ! -f .env ]; then cp .env.example .env && echo "Created .env from .env.example — fill in the Airwallex credentials (an LLM key is optional)."; fi
 	@echo "setup complete."
 
 dev:

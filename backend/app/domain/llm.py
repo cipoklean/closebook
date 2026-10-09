@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
@@ -29,6 +28,7 @@ log = logging.getLogger("closebook.llm")
 
 # Any OpenAI-compatible chat-completions endpoint works. Left unset, Closebook
 # runs fully deterministically — this is a supported mode, not a degraded one.
+# Values come from `config.Settings` (LLM_BASE_URL); these are the fallbacks.
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 # Small and cheap on purpose: the job is reading one line of text, and a large
 # model would only make the same deterministic decision more slowly.
@@ -56,13 +56,27 @@ class LLMConfig:
     timeout_s: int = 20
 
     @classmethod
-    def from_env(cls) -> "LLMConfig":
-        key = os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY")
+    def from_settings(cls) -> "LLMConfig":
+        """Read config through `config.Settings`, which loads `.env`.
+
+        NOT `os.environ`. Two reasons: `.env` on disk is the documented place
+        for these values, and pydantic-settings is already doing the parsing —
+        reading the environment separately means the two can disagree, and the
+        code that bypasses it silently ignores a configured key.
+        """
+        from ..config import get_settings
+        s = get_settings()
+        key = s.llm_api_key.get_secret_value().strip()
         return cls(
             api_key=key or None,
-            base_url=os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL),
-            model=os.environ.get("LLM_MODEL", DEFAULT_MODEL),
+            base_url=s.llm_base_url,
+            model=s.llm_model,
         )
+
+    @classmethod
+    def from_env(cls) -> "LLMConfig":
+        """Backwards-compatible alias for `from_settings`."""
+        return cls.from_settings()
 
     @property
     def available(self) -> bool:

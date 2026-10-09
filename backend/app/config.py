@@ -35,9 +35,14 @@ class Settings(BaseSettings):
             raise ValueError(f"AWX_BASE_URL must be the Airwallex sandbox ({host} is not allowed)")
         return v
 
-    # LLM
-    anthropic_api_key: SecretStr = Field(default=SecretStr(""))
-    claude_model: str = Field(default="claude-sonnet-4-20250514")
+    # LLM — OpenAI-compatible endpoint. Optional: with no key the deterministic
+    # tiers carry everything and `propose()` returns None.
+    llm_api_key: SecretStr = Field(default=SecretStr(""))
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_model: str = "gpt-4o-mini"
+
+    # Demo: shared PIN gating the approval endpoints.
+    demo_approver_pin: SecretStr = Field(default=SecretStr(""))
 
     # App
     closebook_hmac_secret: SecretStr = Field(default=SecretStr(""))
@@ -56,6 +61,13 @@ class Settings(BaseSettings):
             self.awx_client_id.get_secret_value().strip()
             and self.awx_api_key.get_secret_value().strip()
         )
+
+    def llm_ready(self) -> bool:
+        """True when an OpenAI-compatible LLM endpoint is configured.
+
+        Deliberately NOT required: Closebook is fully deterministic without it.
+        """
+        return bool(self.llm_api_key.get_secret_value().strip())
 
 
 @lru_cache

@@ -21,17 +21,16 @@ def _cands():
 
 
 # --- offline is a supported mode, not a degraded one ---------------------
-def test_no_key_means_no_model_and_no_error(monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("LLM_API_KEY", raising=False)
-    m = OpenAICompatibleMatcher(LLMConfig.from_env())
+def test_no_key_means_no_model_and_no_error():
+    """Config now comes from Settings, not the environment. An empty key is the
+    offline mode, and it must not error."""
+    m = OpenAICompatibleMatcher(LLMConfig(api_key=None))
     assert m.available() is False
     assert m.propose({"amount": 12000, "currency": "USD"}, []) is None
 
 
-def test_matching_works_with_no_model_at_all(monkeypatch):
+def test_matching_works_with_no_model_at_all():
     """The demo must not depend on a paid key."""
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     result = match_inflow(1_200_000, "USD",
                           {"reference": "INV-0041", "payer_name": "Brightline Retail"},
                           _cands(), llm=None)
@@ -39,10 +38,8 @@ def test_matching_works_with_no_model_at_all(monkeypatch):
     assert result.confidence >= 0.9
 
 
-def test_explanation_falls_back_to_the_deterministic_reason(monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("LLM_API_KEY", raising=False)
-    e = Explanation()
+def test_explanation_falls_back_to_the_deterministic_reason():
+    e = Explanation(OpenAICompatibleMatcher(LLMConfig(api_key=None)))
     out = e.explain({"invoice": "INV-0041"}, "held: dependency unmet", {})
     assert out == "held: dependency unmet"
 
@@ -120,3 +117,38 @@ def test_a_raising_model_does_not_break_the_deterministic_result(monkeypatch):
 
 def test_default_model_is_small_and_cheap():
     assert DEFAULT_MODEL == "gpt-4o-mini"
+
+
+def test_config_is_read_through_settings_not_os_environ():
+    """Audit 5: `llm.py` must not read `os.environ` directly.
+
+    Note pydantic-settings legitimately reads the environment as a source (env
+    vars override .env), so the fix is NOT "ignore the environment" — it is
+    "go through Settings like everything else", so there is one parsing path.
+    This asserts the module-level invariant: no direct environ access, and
+    from_settings() mirrors Settings.
+    """
+    import ast
+    import inspect
+
+    from app.domain import llm as llm_module
+    from app.config import get_settings
+
+    # Walk the AST for real `os.environ` access rather than grepping the source,
+    # which also matches the docstrings explaining why we do NOT do this.
+    tree = ast.parse(inspect.getsource(llm_module))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "environ":
+            raise AssertionError("llm.py reads the environment directly, "
+                                 "bypassing Settings")
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert alias.name != "os", "llm.py imports os"
+    assert "get_settings" in inspect.getsource(llm_module)
+
+    # from_settings must agree with the Settings object, field for field.
+    s = get_settings()
+    cfg = LLMConfig.from_settings()
+    assert cfg.base_url == s.llm_base_url
+    assert cfg.model == s.llm_model
+    assert cfg.available == bool(s.llm_api_key.get_secret_value().strip())
