@@ -35,17 +35,36 @@ demo:
 test:
 	$(PY) -m pytest -q tests/
 
-# Print a fresh public URL for the webhook receiver (Settings > Developer > Webhooks in the sandbox app).
+# Public URL for the webhook receiver (Settings > Developer > Webhooks in the
+# sandbox app).
+#
+# This uses ngrok pinned to a RESERVED STATIC DOMAIN, so the URL does not change
+# on restart. That matters: the Airwallex subscription and PUBLIC_BASE_URL both
+# point at it, and a rotating URL silently breaks webhook delivery.
+#
+# ngrok lives at ~/.config/ngrok/ngrok on this box (not on PATH); override with
+#   make webhook-url NGROK=/path/to/ngrok
+NGROK ?= $(HOME)/.config/ngrok/ngrok
+# Reserved static domain — also mirrored in PUBLIC_BASE_URL in .env.
+NGROK_DOMAIN ?= debunk-create-headboard.ngrok-free.dev
+# Must match WEBHOOK_PATH in .env; the subscription URL is domain + this path.
+WEBHOOK_PATH ?= /webhooks/airwallex
+
 webhook-url:
-	@if ! command -v cloudflared >/dev/null 2>&1; then echo "cloudflared not found: ~/.local/bin/cloudflared or install from https://developers.cloudflare.com/cloudflare-one/connections/cloudflare-warp/"; exit 1; fi
-	@cd /tmp && cloudflared tunnel --url http://localhost:8000 2>&1 | tee closebook-tunnel.log & \
-	 pid=$$!; \
-	 for i in $$(seq 1 30); do \
-	   url=$$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/closebook-tunnel.log | head -n1); \
-	   [ -n "$$url" ] && break; sleep 1; done; \
-	 echo ""; echo "Webhook notification URL: $$url$(WEBHOOK_PATH)"; \
-	 echo "Sandbox source IPs to whitelist: 35.240.211.132 35.187.239.216 34.87.139.23 136.110.35.143 34.142.189.194 35.197.128.86"; \
-	 echo "(tunnel runs in background, pid $$pid — kill it when done)"
+	@if [ ! -x "$(NGROK)" ]; then echo "ngrok not found at $(NGROK) — set NGROK=/path/to/ngrok"; exit 1; fi
+	@if curl -s -m 3 http://127.0.0.1:4040/api/tunnels >/dev/null 2>&1; then \
+	  echo "An ngrok agent is already running on :4040."; \
+	  curl -s -m 3 http://127.0.0.1:4040/api/tunnels | grep -o '"public_url":"[^"]*"' | head -2; \
+	  echo "(stop it first, or it already owns $(NGROK_DOMAIN))"; exit 1; fi
+	@mkdir -p logs
+	@nohup "$(NGROK)" http --url=$(NGROK_DOMAIN) 8000 --log logs/ngrok.log >/dev/null 2>&1 &
+	@for i in $$(seq 1 30); do \
+	  code=$$(curl -s -o /dev/null -w '%{http_code}' -m 5 -H 'ngrok-skip-browser-warning: 1' https://$(NGROK_DOMAIN)/healthz || true); \
+	  [ "$$code" = "200" ] && break; sleep 1; done; \
+	 echo ""; \
+	 echo "Webhook notification URL: https://$(NGROK_DOMAIN)$(WEBHOOK_PATH)"; \
+	 echo "Verified: HTTP $$code from our app (not an ngrok page)."; \
+	 echo "Register that URL in the Airwallex sandbox: Settings > Developer > Webhooks."
 
 clean:
 	rm -rf .venv .pytest_cache
