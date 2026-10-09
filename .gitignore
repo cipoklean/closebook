@@ -27,3 +27,7 @@ NOTES.local.md
 # Never commit .env backups — they contain live credentials.
 .env.bak*
 data/*.bak*
+
+# Engineering log and scratch notes — kept locally, not shipped in the public repo.
+AGENTS.md
+NOTES.md
