@@ -1,5 +1,6 @@
 # secrets — never commit
 .env
+.env.bak*
 *.key
 
 # python
@@ -12,22 +13,21 @@ venv/
 
 # databases
 *.db
+*.sqlite
 *.sqlite3
-!backend/app/data/.gitkeep
+data/
 
-# frontend build
-frontend/dist/
-node_modules/
+# local docs — kept on disk, not shipped in the public repo
+AGENTS.md
+NOTES.md
 
 # logs / scratch
 logs/
-NOTES.local.md
 *.log
+*~
 
-# Never commit .env backups — they contain live credentials.
-.env.bak*
-data/*.bak*
-
-# Engineering log and scratch notes — kept locally, not shipped in the public repo.
-AGENTS.md
-NOTES.md
+# os / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
