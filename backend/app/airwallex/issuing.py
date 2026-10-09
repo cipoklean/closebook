@@ -67,25 +67,32 @@ class Issuing:
             limits.append({"interval": "ALL_TIME",
                            "amount": to_major_str(all_time_limit_minor, currency)})
 
-        # Shape verified against the Airwallex docs MCP after the flat
-        # `limits` object and a bare `program` string were both rejected with a
-        # generic BAD_REQUEST. `program` is an OBJECT, `form_factor` is
-        # mandatory, and limits nest under authorization_controls with a
-        # currency beside them.
+        # Shape confirmed against the Airwallex docs MCP plus live probing.
+        # `program` is a mandatory OBJECT and the field that matters is
+        # `program.purpose`: a BUSINESS sandbox rejects purpose=CONSUMER with
+        # "CONSUMER program is not allowed for this account". COMMERCIAL is the
+        # right value. `purpose` at the TOP level means something else (what the
+        # card is for) and is only accepted alongside issue_to=ORGANISATION.
+        #
+        # `primary_contact_details` is documented in the MCP examples but is
+        # REJECTED live: "primary_contact_details is no longer supported, please
+        # use cardholder_id instead". The docs are stale here; the error wins.
+        #
+        # With this exact shape the sandbox still returns
+        # `invalid_request: Invalid issuance details` — an account-level issuing
+        # restriction (the same account also returns "Admin permissions
+        # required" for /issuing/balances and /issuing/programs). Cardholder
+        # creation succeeds, so the credentials and endpoint are fine; only card
+        # issuance is gated. That needs Airwallex to enable it.
         body: dict = {
             "request_id": request_id,
             "cardholder_id": cardholder_id,
             "form_factor": "VIRTUAL",
-            # Consumer cards must be personalised; the error says so explicitly.
-            "is_personalized": True,
-            # `created_by` is mandatory and names the operator, not the
-            # cardholder. Found by a live error after the payload shape was
-            # finally accepted.
+            "issue_to": "ORGANISATION",
             "created_by": "Closebook",
+            "is_personalized": True,
             "program": {
-                "purpose": "CONSUMER",
-                "type": "CREDIT",
-                "sub_type": "GOOD_FUNDS_CREDIT",
+                "purpose": "COMMERCIAL",
             },
             "authorization_controls": {
                 "allowed_transaction_count": "MULTIPLE",

@@ -48,12 +48,20 @@ than a policy check that could be mis-ordered or bypassed.
 ### Honest scope on beat 4
 
 Beat 4 reports **Closebook's policy verdict**, not a real card-network decline.
-Issuing a live virtual card was attempted against the sandbox and is blocked at
-the account level — Airwallex returns *"CONSUMER program is not allowed for this
-account"*, which is an entitlement rather than a payload error. No card was
-issued, so no authorisation was simulated and no decline was returned by
-Airwallex. A synthetic decline would not be evidence that our policy is
-enforced, so it is not described as one.
+Live card issuance was retried with the commercial program after an earlier
+`CONSUMER` rejection, and the payload is now correct: `program.purpose:
+COMMERCIAL`, `issue_to: ORGANISATION`, `is_personalized`, limits nested under
+`authorization_controls`, and no `primary_contact_details` (the docs still show
+it, but the API rejects it as unsupported). **Cardholder creation succeeds** and
+returns `READY`, so credentials and the endpoint are fine.
+
+Card creation still fails with `invalid_request: Invalid issuance details`, and
+the same account returns *"Admin permissions required"* for `/issuing/balances`
+and `/issuing/programs` — an account-level issuing restriction, not a payload
+bug. The simulation endpoint requires a real `card_id`, so there is nothing to
+authorise against. No card was issued and no decline was returned by Airwallex. A
+synthetic decline would not be evidence that our policy is enforced, so it is not
+described as one.
 
 ---
 

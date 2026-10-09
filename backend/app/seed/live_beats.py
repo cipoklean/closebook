@@ -290,14 +290,25 @@ class LiveDemo:
         """Authorize 7,000.01 against a 7,000 limit.
 
         HONEST SCOPE: this beat reports CLOSEBOOK'S POLICY VERDICT. It is not a
-        real card-network decline. Creating a live virtual card was attempted
-        against the sandbox and is blocked at the account level — Airwallex
-        returns "CONSUMER program is not allowed for this account", which is an
-        entitlement, not a payload error. No card exists, so no authorization
-        was simulated and no decline was returned by Airwallex.
+        live card-network decline, because no card can be created on this
+        sandbox.
 
-        This is stated plainly rather than dressed up as a real decline: a
-        synthetic decline is not evidence that our policy is enforced.
+        Live card issuance was retried with the commercial program after the
+        earlier CONSUMER rejection. The payload is now correct —
+        `program.purpose: COMMERCIAL`, `issue_to: ORGANISATION`,
+        `is_personalized`, limits nested under `authorization_controls`, and
+        NO `primary_contact_details` (the docs still show it but the API
+        rejects it as unsupported). Cardholder creation SUCCEEDS and returns
+        READY, so credentials and the endpoint are fine.
+
+        Card creation still fails with `invalid_request: Invalid issuance
+        details`, and the same account returns "Admin permissions required" for
+        /issuing/balances and /issuing/programs — an account-level issuing
+        restriction, not a payload bug. The simulation endpoint requires a real
+        card_id, so there is nothing to authorise against.
+
+        Stated plainly rather than dressed up: a synthetic decline is not
+        evidence that our policy is enforced.
         """
         beat = "beat 4 (card guardrail)"
         over = 700_001  # USD 7,000.01
@@ -309,8 +320,9 @@ class LiveDemo:
                      f"{'ALLOWS (BUG)' if allowed else 'DECLINES'}; "
                      f"USD {within/100:,.2f} would be allowed "
                      f"(limit is inclusive per transaction). "
-                     f"No live card: the sandbox blocks card creation for this "
-                     f"account (CONSUMER program not allowed).")
+                     f"No live card: the sandbox blocks card issuance for this "
+                     f"account (invalid_request 'Invalid issuance details' with "
+                     f"the correct commercial payload; cardholders create fine).")
 
     # ---- beat 5: failure recovery on a real transfer -------------------
     def beat_failure_recovery(self) -> None:

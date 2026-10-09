@@ -103,8 +103,19 @@ duplicate replacement payment.
   array, not the top-level message.
 - `transfers/create` needs both `source_currency` and `transfer_currency`, plus a
   non-empty `reason`.
-- `issuing/cards/create` needs `program` as an **object**, plus `form_factor`,
-  `is_personalized` and `created_by`. A flat `limits` object is rejected.
+- `issuing/cards/create` needs `program` as an **object** with
+  `purpose: COMMERCIAL` (a business account rejects `CONSUMER`), plus
+  `issue_to: ORGANISATION`, `form_factor`, `is_personalized` and `created_by`.
+  Do **not** send `primary_contact_details` — the docs still show it, but the
+  API rejects it as unsupported in favour of `cardholder_id`.
+- **Commercial card issuance is blocked for this sandbox account.** Cardholder
+  creation returns `READY` fine, but card creation fails with
+  `invalid_request: Invalid issuance details`, and `/issuing/balances` and
+  `/issuing/programs` return "Admin permissions required" — an account-level
+  entitlement, not a payload bug. Beat 4 therefore reports Closebook's policy
+  verdict and says so, rather than claiming a card-network decline that never
+  happened. The docs MCP example for a business card is stale; live errors beat
+  documentation every time.
 
 ### Python and SQLAlchemy
 
