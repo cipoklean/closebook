@@ -28,6 +28,7 @@ from typing import Optional
 
 from ..db import DB
 from ..domain import incidents as inc_mod
+from ..domain.agent_tools import ToolCall
 from ..domain.ledger import apply_inflow_to_receivables, reconcile
 from ..domain.matching import Candidate, match_inflow
 from ..domain.policy import load_budget, usd_value_minor
@@ -74,6 +75,118 @@ def _inflow_exists(db: DB, amount_minor: int, currency: str,
         reference_raw=reference,
     ).first()
     return row is not None
+
+
+def _matcher_or_none():
+    """The LLM matcher when a key is configured, else None.
+
+    Offline is a supported mode: with no key the deterministic tiers carry the
+    match and the model's column in the trace simply shows no proposal.
+    """
+    from ..domain.llm import LLMConfig, OpenAICompatibleMatcher
+    cfg = LLMConfig.from_settings()
+    return OpenAICompatibleMatcher(cfg) if cfg.available else None
+
+
+def build_agent(db: DB):
+    """Wire the five tools the agent is allowed to call.
+
+    Note what is NOT here: no tool that creates a transfer, books a conversion,
+    or touches the executor. The agent has no way to express a payment, so it
+    cannot make one — a stronger guarantee than checking a policy after the
+    fact. Money still moves only through `domain/executor.py`, and only after
+    the approval gates.
+    """
+    import uuid
+
+    from ..domain.agent_tools import Agent, ToolResult, Trace, Verdict
+    from ..domain.llm import Explanation, LLMConfig, candidate_payloads
+    from ..models import InvoiceReceivable, PlanStep
+
+    trace = Trace(run_id=str(uuid.uuid4()))
+    matcher = _matcher_or_none()
+    explainer = Explanation(matcher) if matcher else None
+
+    def list_open_invoices() -> dict:
+        s = db.session()
+        rows = []
+        for r in s.query(InvoiceReceivable).order_by(InvoiceReceivable.number).all():
+            open_minor = max(0, r.amount_minor - r.amount_paid_minor)
+            if open_minor > 0:
+                rows.append({"number": r.number, "currency": r.currency,
+                             "amount_open": open_minor / 100})
+        return {"invoices": rows}
+
+    def propose_match(*, amount_minor: int, currency: str, payer_name: str = "",
+                      reference: str = "", **_ignored) -> ToolResult:
+        """The model's PROPOSAL. The verdict here is only whether it could make
+        one; the numbers are re-validated separately by `match_inflow`."""
+        if matcher is None:
+            return ToolResult("propose_match", ok=True,
+                              verdict=Verdict.ESCALATED,
+                              output={"_inputs": {"amount": amount_minor,
+                                                  "currency": currency,
+                                                  "payer": payer_name}},
+                              detail="no LLM key configured — deterministic "
+                                     "tiers only")
+        from ..domain.matching import Candidate
+        s = db.session()
+        cands = []
+        for r in s.query(InvoiceReceivable).all():
+            if r.currency == currency:
+                cust = s.query(Customer).filter_by(id=r.customer_id).first()
+                cands.append(Candidate(
+                    invoice_id=r.id, number=r.number,
+                    customer_name=cust.name if cust else "",
+                    currency=r.currency,
+                    amount_open_minor=max(0, r.amount_minor - r.amount_paid_minor),
+                    amount_original_minor=r.amount_minor))
+        proposal = matcher.propose(
+            {"amount": amount_minor / 100, "currency": currency,
+             "payer": payer_name, "reference": reference},
+            candidate_payloads(cands))
+        if proposal is None:
+            return ToolResult("propose_match", ok=False,
+                              verdict=Verdict.ESCALATED,
+                              detail="model returned no usable proposal")
+        return ToolResult(
+            "propose_match", ok=True, verdict=Verdict.ACCEPTED,
+            output={"_inputs": {"amount": amount_minor / 100,
+                                "currency": currency, "payer": payer_name,
+                                "reference": reference},
+                    "model_proposed": proposal},
+            detail="proposal recorded — re-validated in code before use")
+
+    def explain_decision(*, decision: str, evidence: dict | None = None) -> dict:
+        if explainer is None:
+            # The deterministic reason verbatim: honest, and it means the
+            # explanation is never a different answer from the code.
+            return {"explanation": decision}
+        return {"explanation": explainer.explain(
+            {"decision": decision}, decision, evidence or {})}
+
+    def request_approval(*, payable_number: str, reason: str = "") -> dict:
+        return {"approval_requested_for": payable_number,
+                "reason": reason,
+                "note": "a human must approve; the agent cannot self-approve"}
+
+    def read_plan() -> dict:
+        s = db.session()
+        steps = (s.query(PlanStep)
+                 .filter(PlanStep.airwallex_object_id.isnot(None))
+                 .order_by(PlanStep.id.desc()).limit(20).all())
+        return {"recent_steps": [{"id": st.id, "type": st.type.value,
+                                  "status": st.status.value}
+                                 for st in steps]}
+
+    agent = Agent({
+        "list_open_invoices": list_open_invoices,
+        "propose_match": propose_match,
+        "explain_decision": explain_decision,
+        "request_approval": request_approval,
+        "read_plan": read_plan,
+    }, trace=trace, run_id=trace.run_id)
+    return agent, trace
 
 
 @dataclass
@@ -172,12 +285,18 @@ class LiveDemo:
                      f"=> INV-0042 {inv42.status.value}, GBP {short/100:,.2f} "
                      f"short; dependent payables still unpaid={still_held}")
 
-    # ---- beat 4: card decline at the policy limit -----------------------
+    # ---- beat 4: card guardrail ---------------------------------------
     def beat_card_decline(self) -> None:
-        """Authorize 7,000.01 against a 7,000 limit -> must decline.
+        """Authorize 7,000.01 against a 7,000 limit.
 
-        The check that matters is OUR limit matching the decline: a real card
-        network decline is not evidence that our policy is right, and a
+        HONEST SCOPE: this beat reports CLOSEBOOK'S POLICY VERDICT. It is not a
+        real card-network decline. Creating a live virtual card was attempted
+        against the sandbox and is blocked at the account level — Airwallex
+        returns "CONSUMER program is not allowed for this account", which is an
+        entitlement, not a payload error. No card exists, so no authorization
+        was simulated and no decline was returned by Airwallex.
+
+        This is stated plainly rather than dressed up as a real decline: a
         synthetic decline is not evidence that our policy is enforced.
         """
         beat = "beat 4 (card guardrail)"
@@ -185,10 +304,13 @@ class LiveDemo:
         within = 700_000
         allowed = over <= int(CARD_LIMIT_USD * 100)
         self._record(beat, not allowed,
-                     f"USD {over/100:,.2f} against a USD {CARD_LIMIT_USD:,.0f} "
-                     f"limit -> policy {'ALLOWS (BUG)' if allowed else 'DECLINES'}; "
-                     f"USD {within/100:,.2f} would be allowed. "
-                     f"(limit is inclusive per transaction)")
+                     f"POLICY VERDICT (not a live decline): USD {over/100:,.2f} "
+                     f"against a USD {CARD_LIMIT_USD:,.0f} limit -> "
+                     f"{'ALLOWS (BUG)' if allowed else 'DECLINES'}; "
+                     f"USD {within/100:,.2f} would be allowed "
+                     f"(limit is inclusive per transaction). "
+                     f"No live card: the sandbox blocks card creation for this "
+                     f"account (CONSUMER program not allowed).")
 
     # ---- beat 5: failure recovery on a real transfer -------------------
     def beat_failure_recovery(self) -> None:
@@ -239,8 +361,14 @@ class LiveDemo:
 
     # ---- beat 6: ambiguous inflow escalates ---------------------------
     def beat_ambiguous_inflow(self) -> None:
-        """USD 4,400 from 'L. Stores' matches nothing confidently."""
-        beat = "beat 6 (ambiguous inflow)"
+        """USD 4,400 from 'L. Stores' matches nothing confidently.
+
+        This is the beat that shows the agent working: the model PROPOSES a
+        reading, deterministic code RE-VALIDATES every number, and a
+        sub-threshold result is escalated to a human. All three are shown side
+        by side so the boundary is visible rather than asserted.
+        """
+        beat = "beat 6 (ambiguous inflow — agent proposes, code decides)"
         amount = 440_000
         if _inflow_exists(self.db, amount, "USD", ""):
             self._record(beat, True,
@@ -252,21 +380,36 @@ class LiveDemo:
         s = self.db.session()
         s.add(inflow)
         s.commit()
+        candidates = _candidates(self.db)
+
+        # The model's turn: it may only CALL tools. None of them can pay.
+        agent, trace = build_agent(self.db)
+        proposal = agent.call(ToolCall(
+            "propose_match",
+            {"inflow_id": inflow.id, "amount_minor": amount,
+             "currency": "USD", "payer_name": "L. Stores", "reference": ""}))
+
+        # Code's turn: re-validate the proposal against the database.
         result = match_inflow(amount, "USD",
                               {"reference": "", "payer_name": "L. Stores"},
-                              _candidates(self.db))
+                              candidates, llm=_matcher_or_none())
+        agent.call(ToolCall("explain_decision",
+                            {"decision": result.reason or result.status,
+                             "evidence": result.evidence}))
         apply_inflow_to_receivables(s, inflow, result)
         s.commit()
         s.refresh(inflow)
-        # Assert on what was PERSISTED, not on the matcher's own verdict. The
-        # matcher returns its best reading (OVERPAID here); the ledger is what
-        # decides whether that reading is allowed to settle. Checking
-        # `result.status` tested the wrong system and reported a false BUG.
+
+        # Assert on what was PERSISTED, not on the matcher's own verdict.
         escalated = inflow.match_status in (MatchStatus.AMBIGUOUS,
                                             MatchStatus.UNMATCHED)
+        print("\n  --- agent trace ---")
+        print(trace.summary())
+        trace.persist(self.db.session())
         self._record(beat, escalated,
-                     f"USD {amount/100:,.2f} from 'L. Stores' -> "
-                     f"matcher said {result.method}/{result.status} "
+                     f"USD {amount/100:,.2f} from 'L. Stores' — model proposed "
+                     f"({proposal.tool}: {proposal.detail or 'a match'}); "
+                     f"code re-validated to {result.method}/{result.status} "
                      f"conf={result.confidence:.2f}; recorded as "
                      f"{inflow.match_status.value} -> "
                      f"{'ESCALATED to a human' if escalated else 'settled (BUG)'}")

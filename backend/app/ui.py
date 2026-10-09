@@ -15,6 +15,7 @@ decided it.
 from __future__ import annotations
 
 import html
+import json
 from typing import Any, Iterable
 
 CSS = """
@@ -62,6 +63,19 @@ tr:last-child td{border-bottom:none}
 .num{font-variant-numeric:tabular-nums; white-space:nowrap}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.8rem;
   color:var(--muted)}
+button{font:inherit; cursor:pointer; border-radius:999px; padding:.4rem 1.1rem;
+  border:1px solid var(--line); background:var(--card); color:var(--ink);
+  transition:background .15s ease}
+button:hover{background:var(--accent-soft)}
+button.approve{background:var(--good-soft); border-color:var(--good);
+  color:var(--good)}
+button.reject{background:var(--crit-soft); border-color:var(--crit);
+  color:var(--crit)}
+input[type=password]{font:inherit; padding:.35rem .7rem;
+  border:1px solid var(--line); border-radius:999px; background:var(--card);
+  color:var(--ink); width:9rem}
+.terms{font-size:.84rem; line-height:1.7}
+.terms b{font-weight:600}
 .muted{color:var(--muted)}
 .empty{color:var(--muted); font-style:italic; padding:.5rem 0}
 .note{background:var(--accent-soft); border-left:3px solid var(--accent);
@@ -218,6 +232,49 @@ def render(ctx: dict[str, Any]) -> str:
                  f'{_e(", ".join(f"{k} {v/100:,.2f}" for k, v in sorted(susp.items())))}</p>'
                  if susp else "")
 
+    # --- approval queue: bound terms + Approve/Reject ----------------
+    appr_queue = []
+    for a in (ctx.get("approval_queue") or []):
+        amt = a.get("amount_minor")
+        ccy = a.get("currency") or ""
+        appr_queue.append(f"""
+      <div class="terms">
+        <div><b>{_e(a.get("payable_number") or "step %s" % a.get("step_id"))}</b>
+          &mdash; {_money(amt, ccy)} to <b>{_e(a.get("counterparty") or "?")}</b>
+          {_pill("approved", "good") if a.get("already_approved") else ""}</div>
+        <div class="mono">hash {_e(a.get("hash_prefix") or "—")}
+          &middot; FX quote {_e(a.get("fx_quote_id") or "—")}
+          &middot; rate {_e(a.get("fx_rate") or "—")}</div>
+        <div class="muted">{_e((a.get("reason") or "")[:160])}</div>
+        <div style="margin-top:.5rem">
+          <input type="password" id="pin-{a.get('step_id')}" placeholder="demo PIN">
+          <button class="approve" onclick="decide({a.get('step_id')}, 'approve')">Approve</button>
+          <button class="reject" onclick="decide({a.get('step_id')}, 'reject')">Reject</button>
+        </div>
+      </div>""")
+
+    trace_rows = []
+    for t in (ctx.get("agent_trace") or []):
+        verdict = str(t.get("verdict") or "").upper()
+        if verdict == "REFUSED":
+            kind = "crit"
+        elif verdict in {"REJECTED", "ESCALATED"}:
+            kind = "warn"
+        else:
+            kind = "good"
+        inp = t.get("inputs") or {}
+        out = t.get("outputs") or {}
+        proposed = out.get("model_proposed") if isinstance(out, dict) else None
+        trace_rows.append([
+            f'<span class="mono">{_e(t.get("tool"))}</span>',
+            _pill(verdict, kind),
+            f'<span class="mono">{_e(json.dumps(inp, default=str)[:120])}</span>',
+            (f'<span class="muted">model proposed: '
+             f'{_e(json.dumps(proposed, default=str)[:120])}</span>'
+             if proposed else
+             f'<span class="muted">{_e((t.get("detail") or "")[:120])}</span>'),
+        ])
+
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -262,6 +319,27 @@ def render(ctx: dict[str, Any]) -> str:
   </div>
 
   <div class="card wide">
+    <h2>Approval queue — a human decides, code still enforces</h2>
+    {("".join(appr_queue)) if appr_queue else '<p class="empty">Nothing waiting on a human.</p>'}
+    <p class="sub" style="margin-top:.75rem">Approving records a human decision.
+      It does <strong>not</strong> move money: execution re-verifies the bound
+      hash, amount, counterparty and FX rate through the executor. The endpoint
+      is PIN-gated and closed entirely if no PIN is configured.</p>
+  </div>
+
+  <div class="card wide">
+    <h2>Agent trace — what the model asked, and what code decided</h2>
+    {_table(["Tool called", "Verdict", "Model's inputs", "Proposal / reason"],
+            trace_rows,
+            "No tool calls yet — run `python -m app.seed.live_beats`.")}
+    <p class="sub" style="margin-top:.75rem">The agent may only call these five
+      tools: <code>list_open_invoices</code>, <code>propose_match</code>,
+      <code>explain_decision</code>, <code>request_approval</code>,
+      <code>read_plan</code>. There is no payment tool, so it cannot express a
+      payment. Every verdict above is decided by code.</p>
+  </div>
+
+  <div class="card wide">
     <h2>Receivables</h2>
     {_table(["Invoice", "Customer", "Ccy", "Amount", "Paid", "Open", "State"],
             rec_rows)}
@@ -287,6 +365,20 @@ def render(ctx: dict[str, Any]) -> str:
 </footer>
 </div>
 <script>
+async function decide(stepId, action) {{
+  var el = document.getElementById('pin-' + stepId);
+  var pin = el ? el.value : '';
+  var body = {{pin: pin}};
+  if (action === 'approve') {{ body.approved_by = 'dashboard'; }}
+  else {{ body.rejected_by = 'dashboard'; body.reason = 'rejected in dashboard'; }}
+  var r = await fetch('/approvals/' + stepId + '/' + action, {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify(body)
+  }});
+  var out = await r.json();
+  if (out.error) {{ alert(out.error); }} else {{ location.reload(); }}
+}}
 setTimeout(function(){{location.reload();}},5000);
 </script>
 </body></html>"""

@@ -11,15 +11,24 @@ from typing import Any
 from .db import DB
 from .domain.ledger import reconcile
 from .domain.policy import load_budget
+from .domain.approval_api import describe_for_ui, terms_from_step
 from .models import (
-    Approval, ApprovalStatus, Customer, Inflow, InvoicePayable, InvoiceReceivable,
-    MatchStatus, PlanStep, StepStatus, Supplier,
+    AgentTrace, Approval, ApprovalStatus, Customer, Inflow, InvoicePayable,
+    InvoiceReceivable, MatchStatus, PlanStep, StepStatus, Supplier,
 )
 
 
 def _payload(step: PlanStep) -> dict:
     try:
         data = json.loads(step.payload_json or "{}")
+        return data if isinstance(data, dict) else {}
+    except ValueError:
+        return {}
+
+
+def _loads(text) -> dict:
+    try:
+        data = json.loads(text or "{}")
         return data if isinstance(data, dict) else {}
     except ValueError:
         return {}
@@ -92,6 +101,43 @@ def build_context(db: DB, incidents: list | None = None) -> dict[str, Any]:
     ambiguous = [i for i in s.query(Inflow).all()
                  if i.match_status in (MatchStatus.AMBIGUOUS, MatchStatus.UNMATCHED)]
 
+    trace_rows = (s.query(AgentTrace)
+                  .order_by(AgentTrace.id.desc()).limit(30).all())
+    agent_trace = [{
+        "tool": t.tool,
+        "verdict": t.verdict,
+        "inputs": _loads(t.inputs_json),
+        "outputs": _loads(t.outputs_json),
+        "detail": t.detail,
+        "run_id": t.run_id,
+    } for t in trace_rows]
+
+    # Approval queue: steps a human must decide, with the terms they bind.
+    queue = []
+    pending_steps = (s.query(PlanStep)
+                     .filter(PlanStep.airwallex_object_id.is_(None))
+                     .order_by(PlanStep.id.desc()).limit(25).all())
+    for st in pending_steps:
+        row = s.query(Approval).filter_by(plan_step_id=st.id).first()
+        if row is not None and row.status == ApprovalStatus.APPROVED:
+            continue
+        item = describe_for_ui(row, st) if row is not None else None
+        if item is None:
+            terms = terms_from_step(st)
+            item = {
+                "step_id": st.id,
+                "payable_number": terms.payable_number,
+                "amount_minor": terms.amount_minor,
+                "currency": terms.currency,
+                "counterparty": terms.counterparty,
+                "hash_prefix": "—",
+                "fx_quote_id": terms.fx_quote_id,
+                "fx_rate": str(terms.fx_rate) if terms.fx_rate else None,
+                "already_approved": False,
+            }
+        item["reason"] = st.reason
+        queue.append(item)
+
     rep = reconcile(s)
 
     return {
@@ -110,6 +156,8 @@ def build_context(db: DB, incidents: list | None = None) -> dict[str, Any]:
         "receivables": receivables,
         "payables": payables,
         "ambiguous_inflows": ambiguous,
+        "agent_trace": agent_trace,
+        "approval_queue": queue,
     }
 
 
