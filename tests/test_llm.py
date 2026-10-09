@@ -81,6 +81,23 @@ def test_model_proposal_cannot_exceed_an_open_balance():
     assert result.confidence < 0.9 or result.status != "MATCHED"
 
 
+def test_model_returning_none_escalates_instead_of_crashing():
+    """A provider that returns None (no key, or a dead gateway) must not 500.
+
+    `propose()` signals 'nothing usable' by returning None rather than raising,
+    and `try_llm` used to call `.get()` on it directly — which crashed mid-beat
+    the first time a key was present but the provider was down.
+    """
+    class Silent:
+        def propose(self, inflow, candidates):
+            return None
+
+    result = match_inflow(1_200_000, "USD", {"reference": "zzz", "payer_name": "?"},
+                          _cands(), llm=Silent())
+    assert result.status == "AMBIGUOUS"
+    assert result.confidence == 0.0
+
+
 def test_model_cannot_invent_an_invoice():
     class Fabricator:
         def propose(self, inflow, candidates):

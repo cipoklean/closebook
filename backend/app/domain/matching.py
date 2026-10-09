@@ -398,6 +398,18 @@ def try_llm(inflow_amount_minor: int, inflow_currency: str,
             reason="model unavailable; escalated rather than guessed",
         )
 
+    # `propose()` returns None (rather than raising) when no key is configured or
+    # the gateway fails — that is the offline path, and it is a normal outcome,
+    # not an error. Guarding it here is what keeps the demo running with a key
+    # present but a provider that is down; without this it crashed mid-beat.
+    if raw is None:
+        return MatchResult(
+            status="AMBIGUOUS", confidence=0.0, method="LLM",
+            evidence={"rule": "LLM returned no proposal"},
+            reason="model proposed nothing (offline or provider unavailable); "
+                   "escalated rather than guessed",
+        )
+
     allocations = raw.get("allocations") or {}
     conf = float(raw.get("confidence") or 0.0)
     rationale = raw.get("rationale") or ""
