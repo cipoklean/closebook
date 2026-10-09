@@ -151,8 +151,12 @@ BEATS: list[DemoBeat] = [
     DemoBeat(
         "guardrail",
         inject='card USD 7000 limit; authorize 7000.01',
-        expect="Decline LIMIT_EXCEEDED. UI shows the decline matches policy "
-               "(inclusive per-transaction limit).",
+        expect="Policy verdict: the 7,000.01 authorization is DECLINED by "
+               "Closebook's inclusive per-transaction limit (7,000.00 would "
+               "pass). NOTE: this is our policy verdict, not a live card "
+               "decline — the sandbox blocks virtual-card creation for this "
+               "account ('CONSUMER program is not allowed'), so no card was "
+               "issued and no authorization was simulated against Airwallex.",
     ),
     DemoBeat(
         "failure_recovery",
