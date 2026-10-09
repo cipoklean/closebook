@@ -14,44 +14,46 @@ customers in USD and GBP who pays suppliers in EUR and USD.
 
 ---
 
-## What it actually does
+## What the agent does vs what code enforces
+
+| | The agent (model) | Code (deterministic) |
+|---|---|---|
+| **Invoices** | May *propose* which invoice a payment belongs to | `matching.py` re-derives every allocation and escalates on any mismatch |
+| **Amounts** | Never sets one | `policy.py` owns every value; minor units internally |
+| **Approvals** | May *request* one; can never self-approve | `approvals.py` binds a SHA-256 hash of exact terms, HMAC-signed |
+| **Payments** | Has **no tool that can pay** | `executor.py` is the only module that moves money |
+| **Failures** | May explain one to a human | `incidents.py` looks the transfer up on Airwallex before deciding |
+| **Reserve floor** | Never sees or changes it | `policy.py` defers, never trims, a payout that breaches it |
+| **Duplicates** | — | `plan_store.py` makes `(payable, action)` a payment's identity |
+
+The agent is given five tools — `list_open_invoices`, `propose_match`,
+`explain_decision`, `request_approval`, `read_plan`. There is no payment tool, so
+it cannot express a payment even if it wanted to. That is a stronger guarantee
+than a policy check that could be mis-ordered or bypassed.
+
+---
+
+## What each beat demonstrates
 
 | Beat | What happens |
 |---|---|
 | 1 | Plan the day. Real planner, real budget. Small USD payouts auto-pay; the big EUR payout needs a human. |
 | 2 | A USD 12,000 deposit arrives with a typo'd reference (`inv 0O41 brightline`) and matches `INV-0041` anyway. That unlocks `PO-7001`. |
 | 3 | A GBP 4,800 part-payment matches partially — and the dependent payable **stays held**. A part payment is not a settlement. |
-| 4 | A card authorisation of 7,000.01 against a 7,000 limit declines, and the decline matches our policy. |
+| 4 | Policy verdict: a 7,000.01 authorisation is declined by the inclusive 7,000 limit. **Not a live card decline** — see the caveat below. |
 | 5 | A payout fails. Closebook looks the transfer up on Airwallex before deciding anything, and proposes a **replacement under a duplicate lock with a new request id**. It never auto-pays twice. |
-| 6 | An ambiguous USD 4,400 from `L. Stores` scores 0.70 and escalates to a human with the evidence side by side. |
+| 6 | An ambiguous USD 4,400 from `L. Stores` scores 0.70 and escalates to a human, with the model's proposal, the deterministic re-validation and the escalation shown side by side. |
 | 7 | Reconciled double-entry ledger, unapplied cash shown, reserve floor respected. |
 
-### The parts that matter most
+### Honest scope on beat 4
 
-**Money movement is idempotent by construction.** Every payout has a durable
-`plan_step` row whose `request_id` is written to the database *before* the API
-call. A step that already carries an `airwallex_object_id` is never sent again.
-A step left `SUBMITTED` by a crash is resolved by **looking the request up on
-Airwallex**, not by re-sending it.
-
-**Approvals are bound to exact terms.** The SHA-256 hash covers amount,
-currency, counterparty, supplier, invoice ids, quote id and the normalised FX
-rate, and is HMAC-signed so we can prove *this* Closebook issued it. Change any
-bound term by a single cent and the approval is void.
-
-**A failure webhook is a claim, not proof.** `payout.transfer.failed` triggers
-a lookup. If the transfer is still `PROCESSING`, Closebook watches it and
-creates **nothing** — because a replacement could double-pay a transfer that has
-not settled yet.
-
-**The treasury runs on its own committed-cash budget, not the sandbox balance.**
-Airwallex prefunding is *capacity*. Policy is measured against
-`settings/committed_cash.json`. This is why a payout can be correctly refused
-for breaching the reserve floor while the sandbox still shows millions.
-
-**No paid LLM is required.** `backend/app/domain/llm.py` is optional. With no
-API key set, matching runs fully deterministically and explanations fall back to
-the deterministic reason. Offline is a supported mode, not a degraded one.
+Beat 4 reports **Closebook's policy verdict**, not a real card-network decline.
+Issuing a live virtual card was attempted against the sandbox and is blocked at
+the account level — Airwallex returns *"CONSUMER program is not allowed for this
+account"*, which is an entitlement rather than a payload error. No card was
+issued, so no authorisation was simulated and no decline was returned by
+Airwallex. A synthetic decline would not be evidence that our policy is
+enforced, so it is not described as one.
 
 ---
 
@@ -60,51 +62,61 @@ the deterministic reason. Offline is a supported mode, not a degraded one.
 Requires Python 3.11+.
 
 ```bash
-git clone <your-fork> closebook && cd closebook
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-cp .env.example .env      # then fill it in — see below
+git clone https://github.com/cipoklean/closebook.git
+cd closebook
+make setup          # venv + deps; copies .env.example -> .env on first run
 ```
 
-### `.env`
-
-All values are **yours**; none are committed.
-
-```
-AWX_CLIENT_ID=...            # Airwallex sandbox client id
-AWX_API_KEY=...              # Airwallex sandbox API key
-AWX_WEBHOOK_SECRET=...       # optional; see "Webhooks" below
-CLOSEBOOK_HMAC_SECRET=...    # generate: python -c "import secrets;print(secrets.token_hex(32))"
-OPENAI_API_KEY=...           # OPTIONAL. No LLM key is needed to run the demo.
-```
-
-`CLOSEBOOK_HMAC_SECRET` signs approvals. **If it is empty, approval signing
-raises at the first live use** while unit tests still pass — fill it in.
-
-Nothing in this repository ever contacts a live Airwallex environment; the
-client refuses any non-sandbox host.
-
----
-
-## Run it
+Then fill in `.env` (see below). **An LLM key is optional** — with none set,
+matching, policy and planning run fully deterministically.
 
 ```bash
-make setup     # venv + deps
-make seed      # seed the scenario; creates sandbox accounts and deposits funds
-make dev       # dashboard on http://127.0.0.1:8000
-make demo      # the seven beats, deterministic decisions only (no network)
-make test      # the full suite
+make test           # 302 tests, hermetic — no secrets or network needed
+make seed           # creates sandbox global accounts, deposits scenario cash
+make dev            # dashboard on http://127.0.0.1:8000
+make demo           # the 7 beats, deterministic decisions only
 ```
 
-### Going live against the sandbox
+### Environment variables
+
+Exactly as `backend/app/config.py` reads them (pydantic-settings loads `.env`):
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `AWX_CLIENT_ID` | for live | Airwallex sandbox client id |
+| `AWX_API_KEY` | for live | Airwallex sandbox API key |
+| `AWX_BASE_URL` | no | Fixed to the sandbox host; non-sandbox values are rejected at startup |
+| `AWX_WEBHOOK_SECRET` | to accept webhooks | HMAC secret. **If empty, every webhook is rejected (400)** — deliberate: an unauthenticated webhook endpoint is a payment-injection risk |
+| `AWX_ALLOW_TEST_EVENTS` | no | `true` accepts sandbox test events that carry the secret in a `client-secret-key` header. Default `false` |
+| `CLOSEBOOK_HMAC_SECRET` | to sign approvals | Signs the approval-bundle hashes. **An empty value fails at first real use** while unit tests still pass |
+| `DEMO_APPROVER_PIN` | to use the approval UI | Shared PIN for `POST /approvals/...`. If unset the endpoint is **closed**, not open |
+| `LLM_API_KEY` | no | Any OpenAI-compatible endpoint |
+| `LLM_BASE_URL` | no | Defaults to `https://api.openai.com/v1` |
+| `LLM_MODEL` | no | Defaults to `gpt-4o-mini` |
+| `PUBLIC_BASE_URL` | for webhooks | Where FastAPI is reachable |
+| `WEBHOOK_PATH` | no | Defaults to `/webhooks/airwallex` |
+| `LOG_LEVEL` | no | Defaults to `INFO` |
+
+`CLOSEBOOK_HMAC_SECRET` can be generated with:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+### Does `make demo` need the network?
+
+**No.** `make demo` prints the deterministic decisions for all seven beats and
+works offline. It does not call Airwallex.
+
+To execute the beats against the sandbox instead:
 
 ```bash
 cd backend
-../.venv/bin/python -m app.seed.live_beats   # beats 2-7 execute for real
+../.venv/bin/python -m app.seed.live_beats
 ```
 
-Beats are **idempotent** — running twice gives identical balances. That is
-checked on purpose; a demo you can only run once cannot be verified.
+That needs `AWX_CLIENT_ID` and `AWX_API_KEY`. Beats are **idempotent** — running
+twice gives identical balances, which is checked on purpose.
 
 ### The probes
 
@@ -118,17 +130,82 @@ Each of these proved a real API assumption rather than assuming one:
 
 ---
 
-## Webhooks
+## Architecture
 
-Webhooks are **optional**. Polling is the supported fallback.
+```mermaid
+flowchart LR
+    subgraph inbound["Inbound money"]
+        WH["Airwallex webhook<br/>verify -> 200 fast -> claim"]
+        POLL["Polling fallback"]
+        WH --> INC["incidents.py<br/>look up before acting"]
+        POLL --> INC
+    end
 
-With `AWX_WEBHOOK_SECRET` unset, the receiver still works: it honours
-Airwallex's sandbox `client-secret-key` test-event header, which carries the
-secret per request.
+    subgraph deterministic["Deterministic core (no model, no I/O)"]
+        MATCH["matching.py<br/>5 tiers, re-validated"]
+        LEDGER["ledger.py<br/>double-entry, idempotent"]
+        POLICY["policy.py<br/>floor, limits, priority"]
+        PLANNER["planner.py<br/>pure function"]
+        APPR["approvals.py<br/>hash-bound + HMAC"]
+        STORE["plan_store.py<br/>(payable, action) identity"]
+    end
 
-Delivery is at-least-once, so events are deduped on `event_id` and processed
-oldest-first. The endpoint acknowledges immediately and processes in the
-background.
+    subgraph agent["Agent layer"]
+        LLM["llm.py<br/>optional, offline-safe"]
+        TOOLS["agent_tools.py<br/>5 tools, none can pay"]
+        LLM -.proposal only.-> MATCH
+        TOOLS --> TRACE[("agent_trace")]
+    end
+
+    subgraph money["Money movement"]
+        EXEC["executor.py<br/>ONLY module that pays"]
+        AWX["Airwallex sandbox"]
+    end
+
+    INC --> MATCH
+    MATCH --> LEDGER
+    LEDGER --> POLICY
+    POLICY --> PLANNER
+    PLANNER --> APPR
+    APPR --> EXEC
+    STORE --> EXEC
+    EXEC --> AWX
+    TOOLS --> POLICY
+    EXEC -.verdict.-> TRACE
+```
+
+The important edge is the one that does **not** exist: the agent layer has no
+arrow into `executor.py`. Money moves only when deterministic code says so.
+
+---
+
+## The parts that matter most
+
+**Money movement is idempotent by construction.** Every payout has a durable
+`plan_step` row whose `request_id` is written to the database *before* the API
+call. A step that already carries an `airwallex_object_id` is never sent again. A
+step left `SUBMITTED` by a crash is resolved by **looking the request up on
+Airwallex**, not by re-sending it.
+
+**Approvals are bound to exact terms.** The SHA-256 hash covers amount, currency,
+counterparty, supplier, invoice ids, quote id and the normalised FX rate, and is
+HMAC-signed so we can prove *this* Closebook issued it. Change any bound term by
+a single cent and the approval is void.
+
+**A failure webhook is a claim, not proof.** `payout.transfer.failed` triggers a
+lookup. If the transfer is still `PROCESSING`, Closebook watches it and creates
+**nothing** — because a replacement could double-pay a transfer that has not
+settled yet. Webhooks are also rejected unless the timestamp is within five
+minutes, and an event with no id is refused so dedupe cannot be bypassed.
+
+**The treasury runs on its own committed-cash budget, not the sandbox balance.**
+Airwallex prefunding is *capacity*. Policy is measured against
+`settings/committed_cash.json`. This is why a payout can be correctly refused
+for breaching the reserve floor while the sandbox still shows millions.
+
+**No paid LLM is required.** `backend/app/domain/llm.py` is optional. With no
+API key set, matching runs fully deterministically and explanations fall back to
+the deterministic reason. Offline is a supported mode, not a degraded one.
 
 ---
 
@@ -145,14 +222,33 @@ backend/app/
     approvals.py    hash-bound, HMAC-signed approvals
     plan_store.py   plan-step identity (payable, action)
     incidents.py    failure classification and recovery decisions
+    agent_tools.py  the 5-tool agent and its trace
     llm.py          optional, offline-safe model layer
+    approval_api.py PIN-gated human approval
   airwallex/      one module per API surface, each verified live
   seed/           the demo scenario and its two drivers
   ui.py           the dashboard (hand-written, no build step)
+  dashboard.py    one read-only context pass
+docs/
+  ENGINEERING_NOTES.md   key decisions and gotchas
+scripts/          live probes that verify real API assumptions
+tests/            302 tests
 ```
 
-`tests/` is 240 tests. `AGENTS.md` is the engineering log: every decision,
-every live-verified correction, and every bug found by running the real thing.
+---
+
+## Webhooks
+
+Webhooks are **optional**; polling is the supported fallback.
+
+With `AWX_WEBHOOK_SECRET` unset the receiver rejects everything, which is
+correct. Set it, or set `AWX_ALLOW_TEST_EVENTS=true` to accept sandbox test
+events that carry the secret per request.
+
+Delivery is at-least-once, so events are deduped on `event_id`, bounded by a
+five-minute replay window, and **claimed atomically** so two background tasks
+cannot both process the same event. The endpoint acknowledges immediately and
+processes in the background.
 
 ---
 
@@ -161,6 +257,12 @@ every live-verified correction, and every bug found by running the real thing.
 **"The dashboard could not read state."** Check `make test` still passes, then
 check the DB. The page falls back deliberately rather than showing wrong numbers.
 
+**"DEMO_APPROVER_PIN is not configured."** The approval endpoint is closed until
+you set it. That is the secure default, not a bug.
+
+**Every webhook is rejected.** `AWX_WEBHOOK_SECRET` is empty. Set it, or use
+`AWX_ALLOW_TEST_EVENTS=true` for sandbox test events.
+
 **A payout says it is already done.** That is the duplicate guard working. Look
 at `/state` and the plan table.
 
@@ -168,10 +270,17 @@ at `/state` and the plan table.
 USD 40,000 committed and a USD 5,000 floor, a USD 36,000 payout is correctly
 refused. That is the point.
 
+**Approval signing raises.** `CLOSEBOOK_HMAC_SECRET` is empty. Unit tests pass
+anyway because `conftest.py` supplies its own, so this only appears on a live
+path.
+
 ---
 
 ## Notes
 
-- Airwallex **sandbox only**. No real funds can move.
+- Airwallex **sandbox only**. No real funds can move; a non-sandbox host is
+  rejected at startup.
 - Internal money is integer **minor units**; Airwallex receives major-unit strings.
 - Raw sandbox balances are capacity. Policy runs on the committed-cash budget.
+
+[![tests](https://github.com/cipoklean/closebook/actions/workflows/test.yml/badge.svg)](https://github.com/cipoklean/closebook/actions/workflows/test.yml)
