@@ -6,6 +6,8 @@ deterministic and doesn't re-hit the sandbox mid-plan.
 from __future__ import annotations
 
 from datetime import datetime
+
+from ..timeutils import utcnow
 from decimal import Decimal
 
 from ..money import to_minor
@@ -62,11 +64,11 @@ class Balances:
                 db_session.add(BalanceSnapshot(
                     currency=ccy,
                     available_minor=to_minor(amt, ccy),
-                    fetched_at=datetime.utcnow(),
+                    fetched_at=utcnow(),
                 ))
             else:
                 row.available_minor = to_minor(amt, ccy)
-                row.fetched_at = datetime.utcnow()
+                row.fetched_at = utcnow()
         db_session.commit()
 
     def cached_available(self, db_session, currency: str) -> int:

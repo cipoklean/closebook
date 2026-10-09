@@ -59,16 +59,41 @@ class Issuing:
         if request_id is None:
             request_id = _reserve_request_id(db_session, plan_step)
 
-        limits = {
-            "PER_TRANSACTION": to_major_str(per_transaction_limit_minor, currency),
-        }
+        limits = [
+            {"interval": "PER_TRANSACTION",
+             "amount": to_major_str(per_transaction_limit_minor, currency)},
+        ]
         if all_time_limit_minor is not None:
-            limits["ALL_TIME"] = to_major_str(all_time_limit_minor, currency)
+            limits.append({"interval": "ALL_TIME",
+                           "amount": to_major_str(all_time_limit_minor, currency)})
+
+        # Shape verified against the Airwallex docs MCP after the flat
+        # `limits` object and a bare `program` string were both rejected with a
+        # generic BAD_REQUEST. `program` is an OBJECT, `form_factor` is
+        # mandatory, and limits nest under authorization_controls with a
+        # currency beside them.
         body: dict = {
             "request_id": request_id,
             "cardholder_id": cardholder_id,
-            "currency": currency,
-            "limits": limits,
+            "form_factor": "VIRTUAL",
+            # Consumer cards must be personalised; the error says so explicitly.
+            "is_personalized": True,
+            # `created_by` is mandatory and names the operator, not the
+            # cardholder. Found by a live error after the payload shape was
+            # finally accepted.
+            "created_by": "Closebook",
+            "program": {
+                "purpose": "CONSUMER",
+                "type": "CREDIT",
+                "sub_type": "GOOD_FUNDS_CREDIT",
+            },
+            "authorization_controls": {
+                "allowed_transaction_count": "MULTIPLE",
+                "transaction_limits": {
+                    "currency": currency,
+                    "limits": limits,
+                },
+            },
         }
         if card_number:
             body["card_number"] = card_number

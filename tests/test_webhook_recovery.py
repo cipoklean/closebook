@@ -6,6 +6,7 @@ behaviour is covered rather than assumed.
 import hashlib
 import hmac
 import json
+import time
 
 import pytest
 
@@ -23,8 +24,15 @@ def _real_secret(receiver) -> str:
     return receiver._webhooks._secret
 
 
+def _now() -> str:
+    """x-timestamp must be a unix epoch inside the replay window (audit SEC 2).
+    The constant ts this file used before is now correctly rejected."""
+    return str(int(time.time()))
+
+
 def _signed_body(event: dict, secret: str = SECRET,
-                 ts: str = "1700000000") -> tuple[bytes, str, str]:
+                 ts: str | None = None) -> tuple[bytes, str, str]:
+    ts = ts or _now()
     raw = json.dumps(event).encode()
     sig = hmac.new(secret.encode(), ts.encode() + raw, hashlib.sha256).hexdigest()
     return raw, ts, sig
@@ -32,6 +40,21 @@ def _signed_body(event: dict, secret: str = SECRET,
 
 @pytest.fixture
 def receiver(monkeypatch):
+    """The app module, with a webhook secret that is ACTUALLY configured.
+
+    Audit SEC 1 made an empty AWX_WEBHOOK_SECRET reject every webhook — which
+    is correct, and is the state of this machine's .env. These tests exercise
+    the ACCEPTED path.
+
+    `app.main` constructs its WebhookHandler at import time from settings, so
+    setting the env var afterwards is too late: the handler already captured an
+    empty secret. Rebuild it here so the fixture actually controls the secret.
+    """
+    from app.airwallex.webhooks import WebhookHandler
+    import importlib
+
+    main = importlib.import_module("app.main")
+    main._webhooks = WebhookHandler(main._db, "integration-test-secret")
     main.INCIDENTS.clear()
     return main
 

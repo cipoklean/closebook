@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
+
+from .timeutils import utcnow
 from typing import Optional
 
 from sqlalchemy import (
@@ -147,7 +149,7 @@ class Inflow(Base):
     amount_minor: Mapped[int] = mapped_column(BigInteger)
     payer_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     reference_raw: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     match_status: Mapped[MatchStatus] = mapped_column(Enum(MatchStatus), default=MatchStatus.UNMATCHED)
 
 
@@ -174,9 +176,31 @@ class PlanStep(Base):
     status: Mapped[StepStatus] = mapped_column(Enum(StepStatus), default=StepStatus.PROPOSED)
     airwallex_object_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     __table_args__ = (UniqueConstraint("request_id", name="uq_plan_step_request_id"),)
+
+
+class AgentTrace(Base):
+    """One tool call made by the agent, and the deterministic verdict on it.
+
+    The point of this table is that a judge can audit exactly what the model
+    was allowed to do. A model may CALL a tool; it may not move money, set an
+    amount, or decide a match. Every row records the inputs it supplied, the
+    output the tool returned, and what the deterministic code concluded — so
+    the proposal and the enforcement are visible side by side rather than
+    implied.
+    """
+    __tablename__ = "agent_trace"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    tool: Mapped[str] = mapped_column(String(64))
+    inputs_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    outputs_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    verdict: Mapped[str] = mapped_column(String(32))
+    # "accepted" | "rejected" | "escalated" — decided by CODE, never the model.
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Approval(Base):
@@ -218,7 +242,7 @@ class AgentRun(Base):
     __tablename__ = "agent_run"
     id: Mapped[int] = mapped_column(primary_key=True)
     trigger: Mapped[str] = mapped_column(String(64))
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
@@ -229,4 +253,4 @@ class BalanceSnapshot(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     currency: Mapped[str] = mapped_column(String(3))
     available_minor: Mapped[int] = mapped_column(BigInteger)
-    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

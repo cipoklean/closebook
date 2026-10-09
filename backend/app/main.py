@@ -1,12 +1,18 @@
-"""FastAPI app — webhook receiver + API + static dashboard (Phase 5).
+"""FastAPI app — webhook receiver, API, approval endpoints and the dashboard.
 
-Endpoints wired now:
-  GET  /healthz            liveness + sandbox-readiness flag
-  GET  /state              read-only snapshot of balances/receivables/payables
-  POST {webhook_path}     Airwallex webhook: verify -> 200 fast -> process later
+Endpoints:
+  GET  /healthz                     liveness + sandbox-readiness flag
+  GET  /state                       read-only snapshot of receivables/payables
+  GET  /                            the one-page dashboard
+  GET  /incidents                   incidents raised by verified webhooks
+  GET  /approvals/pending           steps awaiting a human decision
+  POST /approvals/{id}/approve      record a HUMAN approval (PIN-gated)
+  POST /approvals/{id}/reject       record a human rejection (PIN-gated)
+  POST {webhook_path}               Airwallex webhook: verify -> 200 fast -> process later
 
-The dashboard HTML (inflow feed, plan board, approval queue, ledger tab,
-"run demo step" button) lands in Phase 5; this returns a minimal index today.
+Approving records a decision; it never moves money. Every payout still goes
+through `domain/executor.py`, which is the only module permitted to call Airwallex
+for money movement, and which re-verifies the bound approval on every path.
 """
 from __future__ import annotations
 
@@ -60,10 +66,10 @@ def healthz() -> dict:
 def state() -> dict:
     """Read-only snapshot for the dashboard (balances come from the cache,
     not a live API call, so the view stays deterministic)."""
-    s = _db.session()
-    recs = s.query(InvoiceReceivable).all()
-    pays = s.query(InvoicePayable).all()
-    return {
+    with _db.session() as s:
+        recs = s.query(InvoiceReceivable).all()
+        pays = s.query(InvoicePayable).all()
+        return {
         "receivables": [
             {"number": r.number, "currency": r.currency,
              "amount_minor": r.amount_minor, "paid_minor": r.amount_paid_minor,
@@ -90,6 +96,69 @@ def incidents() -> list[dict]:
     return [i.to_dict() for i in INCIDENTS]
 
 
+@app.get("/approvals/pending")
+def pending_approvals() -> list[dict]:
+    """Steps awaiting a human decision, with the terms they would bind."""
+    from .models import Approval, ApprovalStatus, PlanStep
+
+    with _db.session() as s:
+        steps = (s.query(PlanStep)
+                 .filter(PlanStep.airwallex_object_id.is_(None))
+                 .order_by(PlanStep.id.desc()).limit(25).all())
+        out = []
+        for st in steps:
+            row = s.query(Approval).filter_by(plan_step_id=st.id).first()
+            out.append({
+                "step_id": st.id,
+                "type": st.type.value,
+                "status": st.status.value,
+                "reason": st.reason,
+                "already_approved": (row.status == ApprovalStatus.APPROVED
+                                     if row else False),
+            })
+        return out
+
+
+@app.post("/approvals/{step_id}/approve")
+def approve(step_id: int, body: dict) -> dict:
+    """Record a HUMAN approval. Does not move money.
+
+    Execution still re-verifies the bound hash, amount, counterparty and FX
+    rate through the executor — approving here only records the decision.
+    """
+    from .domain.approval_api import ApprovalRefused, approve_step
+
+    pin = str(body.get("pin") or "")
+    by = str(body.get("approved_by") or "dashboard")
+    configured = _settings.demo_approver_pin.get_secret_value()
+    if not configured:
+        return {"error": "DEMO_APPROVER_PIN is not configured — the approval "
+                         "endpoint is closed rather than open."}
+    try:
+        return approve_step(_db, step_id, pin=pin, approved_by=by,
+                            configured_pin=configured)
+    except ApprovalRefused as exc:
+        return {"error": str(exc)}
+
+
+@app.post("/approvals/{step_id}/reject")
+def reject(step_id: int, body: dict) -> dict:
+    from .domain.approval_api import ApprovalRefused, reject_step
+
+    pin = str(body.get("pin") or "")
+    by = str(body.get("rejected_by") or "dashboard")
+    reason = str(body.get("reason") or "")
+    configured = _settings.demo_approver_pin.get_secret_value()
+    if not configured:
+        return {"error": "DEMO_APPROVER_PIN is not configured — the approval "
+                         "endpoint is closed rather than open."}
+    try:
+        return reject_step(_db, step_id, pin=pin, rejected_by=by,
+                           reason=reason, configured_pin=configured)
+    except ApprovalRefused as exc:
+        return {"error": str(exc)}
+
+
 @app.post(_settings.webhook_path)
 async def webhook(request: Request, background: BackgroundTasks) -> Response:
     """Ack-fast (200) so Airwallex never retries on a slow handler, then
@@ -113,8 +182,13 @@ def _process_pending() -> None:
     Every failure event is looked up on Airwallex BEFORE a recovery is chosen:
     a `payout.transfer.failed` webhook is a claim about a transfer, not proof of
     one, and treating the claim as fact is how you pay twice.
+
+    Each event is CLAIMED atomically (`claim_all_pending`), not merely read, so
+    two background tasks cannot both process the same event. Airwallex retries
+    on a slow handler, and a duplicate `transfer.failed` processed twice is a
+    duplicate incident — and potentially a duplicate replacement payment.
     """
-    for ev in _webhooks.pending_events():
+    for ev in _webhooks.claim_all_pending():
         log.info("processing webhook %s (%s)", ev.event_id, ev.name)
         payload = parse_payload(ev.payload)
         live_status = None
@@ -131,7 +205,6 @@ def _process_pending() -> None:
         if incident.recovery is not Recovery.IGNORE:
             log.warning("INCIDENT %s", incident.describe())
             INCIDENTS.append(incident)
-        _webhooks.mark_processed(ev.event_id)
 
 
 @app.get("/", response_class=HTMLResponse)
