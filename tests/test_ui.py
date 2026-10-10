@@ -14,13 +14,17 @@ cannot pass by relying on rows another test left behind.
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.db import reset_default_db
+from app.db import reset_default_db, session_scope
 from app.dashboard import build_context, incidents_block, steps_block
+from app.domain.plan_store import new_run_id, persist_plan
+from app.domain.planner import ACT_PAY, Step
 from app.main import app
+from app.models import StepStatus
 from app.ui import e, money, render_app, render_landing
 
 
@@ -145,6 +149,18 @@ class TestLanding:
     def test_stylesheet_is_linked_with_a_cache_buster(self):
         assert "/static/closebook.css?v=" in render_landing()
 
+    def test_primary_button_label_is_white_on_the_accent(self):
+        """The nav's `.x-l-links a` outranks `.x-btn--primary`, so a primary
+        button inside the nav inherited the muted link colour and rendered at
+        1.10:1 — unreadable. Assert the rule that fixes it is present."""
+        css = open(os.path.join(os.path.dirname(__file__), "..", "backend",
+                                "app", "static", "closebook.css"),
+                   encoding="utf-8").read()
+        assert ".x-l-links a.x-btn--primary" in css
+        # the nested rule must actually set white, not just exist
+        m = re.search(r"\.x-l-links a\.x-btn--primary[^{]*\{([^}]*)\}", css)
+        assert m and "color: #fff" in m.group(1)
+
 
 # ---------------------------------------------------------------- app shell
 class TestAppShell:
@@ -261,6 +277,8 @@ class TestProblemsNotApprovable:
         assert ctx["approvable"] == []
         assert len(ctx["problems"]) >= 1
         assert "validation_failed" in (ctx["problems"][0]["reason"] or "")
+        # plain English, not a raw API string
+        assert ctx["problems"][0]["plain_reason"].startswith("The bank rejected")
         assert "Nothing needs your OK" in render_app(ctx, tab="ok")
 
     def test_duplicate_failures_collapse_to_one_problem(self, db):
@@ -283,6 +301,124 @@ class TestProblemsNotApprovable:
         html = render_app(build_context([]), tab="money-out")
         assert "Problems" in html
         assert "re-plan" in html.lower()
+
+    def test_raw_error_is_available_but_not_silently_truncated(self, db):
+        """A cut-off 'field=reason c' is neither readable nor honest."""
+        _cancelled_step(db, reason=("api error: [validation_failed] The request "
+                                    "failed our schema validation. Refer to the "
+                                    "errors object for erroneous fields, codes "
+                                    "and messages. field=reason c"))
+        p = build_context([])["problems"][0]
+        assert "schema validation" in p["reason"]     # full, unabridged
+        assert p["reason"].endswith("reason c")       # not re-cut here
+        assert p["plain_reason"] != p["reason"]       # a summary is provided
+        # and the summary is what the page shows as the headline
+        html = render_app(build_context([]), tab="money-out")
+        assert "a required field was missing" in html
+        # the raw error is still present, but only behind Details
+        assert "<summary>Details</summary>" in html
+        i = html.find("<summary>Details</summary>")
+        assert "field=reason c" in html[i:i + 900]      # unabridged, expandable
+        assert "field=reason c" not in html[:i]         # not the headline
+
+
+class TestProblemClassification:
+    """A banner must never contradict the list under it, and a successful
+    payment must never be filed as a failure."""
+
+    def test_banner_reflects_the_problem_count(self, db):
+        _cancelled_step(db)
+        html = render_app(build_context([]), tab="home")
+        assert "Nothing needs you right now" not in html
+        assert "but 1 payment failed" in html
+
+    def test_all_clear_banner_when_nothing_is_wrong(self, db):
+        html = render_app(build_context([]), tab="home")
+        assert "Nothing needs you right now" in html
+        assert "payment failed" not in html
+
+    def test_a_successful_payment_is_not_a_problem(self, db):
+        """SUBMITTED + settled + plan prose is a payment that went through."""
+        _write_step(db, payable="PO-7003", amount=180000, reason="ok",
+                    object_id="1010946e-ok", status=StepStatus.SUBMITTED)
+        ctx = build_context([])
+        assert ctx["problems"] == []
+        assert ctx["past_attempts"] == []
+
+    def test_a_successful_payment_is_not_a_past_attempt(self, db):
+        """Listing a settled success under 'Past attempts' reads as a recovered
+        failure, which is a lie."""
+        _write_step(db, payable="PO-7003", amount=180000,
+                    reason="USD 1,800.00 is within the auto-pay limit",
+                    object_id="1010946e-ok", status=StepStatus.SUBMITTED)
+        ctx = build_context([])
+        assert all(p["payable_number"] != "PO-7003"
+                   for p in ctx["past_attempts"])
+
+    def test_a_failure_is_not_hidden_behind_a_later_success(self, db):
+        """Rows arrive newest-first; the failure must still win for its PO."""
+        _payable(db, number="PO-7003")
+        with session_scope() as s:
+            persist_plan(s, new_run_id(), [Step(
+                payable_number="PO-7003", action=ACT_PAY,
+                amount_minor=180000, currency="USD", reason="sent ok")])
+        # now cancel it, as the executor would
+        _cancelled_step(db, payable="PO-7003")
+        ctx = build_context([])
+        assert any(p["payable_number"] == "PO-7003"
+                   for p in ctx["problems"]), "failure was dropped"
+
+    def test_a_problem_payable_is_not_also_submitted_in_the_checklist(self, db):
+        """SUBMITTED in the checklist plus a Problem card was the contradiction."""
+        _payable(db, number="PO-7003")
+        with session_scope() as s:
+            persist_plan(s, new_run_id(), [Step(
+                payable_number="PO-7003", action=ACT_PAY,
+                amount_minor=180000, currency="USD", reason="sent ok")])
+        _cancelled_step(db, payable="PO-7003")
+        html = render_app(build_context([]), tab="home")
+        seg = html[html.find("checklist"):]
+        assert "failed" in seg
+        assert "SUBMITTED" not in seg
+
+    def test_past_attempts_are_collapsed_not_listed_as_problems(self, db):
+        from app.models import PlanStep
+        # A failure from an older run is history.
+        with session_scope() as s:
+            persist_plan(s, "run_old", [Step(
+                payable_number="PO-7009", action=ACT_PAY,
+                amount_minor=1000, currency="USD", reason="api error")])
+            s.query(PlanStep).filter_by().update(
+                {"status": StepStatus.CANCELLED}, synchronize_session=False)
+        with session_scope() as s:
+            persist_plan(s, "run_new", [Step(
+                payable_number="PO-7001", action=ACT_PAY,
+                amount_minor=900000, currency="EUR", reason="ok")])
+        ctx = build_context([])
+        assert any(p["payable_number"] == "PO-7009"
+                   for p in ctx["past_attempts"])
+        assert not any(p["payable_number"] == "PO-7009"
+                       for p in ctx["problems"])
+
+
+class TestPlainReasons:
+    def test_validation_error_becomes_plain_english(self):
+        from app.dashboard import _plain_reason
+        assert _plain_reason("api error: [validation_failed] field=source_currency"
+                             ).startswith("The bank rejected")
+
+    def test_an_empty_reason_still_says_something(self):
+        from app.dashboard import _plain_reason
+        assert _plain_reason("") == "It failed. No reason was recorded."
+        assert _plain_reason(None) == "It failed. No reason was recorded."
+
+    def test_unknown_reasons_are_capped_on_a_word_boundary(self):
+        from app.dashboard import _plain_reason
+        long = "word " * 60
+        out = _plain_reason(long)
+        assert len(out) < 130
+        assert not out.endswith("wor")   # never cut mid-word
+        assert out.endswith("…")
 
 
 # ------------------------------------------------------------- incidents

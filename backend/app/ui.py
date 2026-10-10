@@ -332,7 +332,7 @@ def render_landing() -> str:
     <div class="x-l-eyebrow">Safety</div>
     <h2 class="x-l-h2">Four ways a wrong move is impossible.</h2>
   </div>
-  <div class="x-l-grid x-l-grid--3" style="margin-bottom:48px">
+  <div class="x-l-grid x-l-grid--4" style="margin-bottom:48px">
     <div class="x-card x-l-card">
       <span class="x-todo-ico is-good">''' + _I["shield"] + '''</span>
       <h3>Nothing pays itself twice</h3>
@@ -344,6 +344,12 @@ def render_landing() -> str:
       <h3>Terms are locked at approval</h3>
       <p>A human approves a hash of the exact amount, currency, supplier and rate.
         Change any of them and the approval stops being valid.</p>
+    </div>
+    <div class="x-card x-l-card">
+      <span class="x-todo-ico is-good">''' + _I["scale"] + '''</span>
+      <h3>No money without a reserve</h3>
+      <p>Payments that would breach the floor you set are deferred in full — never
+        quietly trimmed to fit.</p>
     </div>
     <div class="x-card x-l-card">
       <span class="x-todo-ico is-good">''' + _I["users"] + '''</span>
@@ -612,33 +618,58 @@ def _home(c: dict) -> str:
         '<div class="x-statnote">Per payment</div>'
     )))
 
-    # banner
+    # banner — must agree with the Problems list, never contradict it.
     n_ok = len(c["approvable"])
     n_prob = len(c["problems"])
+    n_past = len(c.get("past_attempts") or [])
     if n_ok:
-        banner = _card(inner=(
-            f'<div class="x-banner-ico">{_I["ok"]}</div>'
-            f'<div><h2>{n_ok} payment'
-            f'{"s" if n_ok != 1 else ""} waiting for your OK</h2>'
-            f'<p>Over your automatic limit, or unclear. Approving needs your PIN and '
-            f'does not itself move money.</p></div>'))
-        banner = (f'<div class="x-card x-span-12"><div class="x-banner">'
-                  f'<div class="x-banner-l">{banner}</div>'
-                  f'<a class="x-btn x-btn--primary" href="/app?tab=ok">Review them'
-                  f'{_I["arrow"]}</a></div></div>')
+        banner_head = (f'{n_ok} payment{"s" if n_ok != 1 else ""} '
+                       f'waiting for your OK')
+        banner_sub = ('Over your automatic limit, or unclear. Approving needs '
+                      'your PIN and does not itself move money.')
+        banner_icon = _I["ok"]
+        banner_href = '/app?tab=ok'
+        banner_cta = 'Review them'
+    elif n_prob:
+        banner_head = (f'Nothing needs your OK, but {n_prob} payment'
+                       f'{"s" if n_prob != 1 else ""} failed')
+        banner_sub = ('These are not waiting on you — they need a new plan. '
+                      'They will not be retried automatically.')
+        banner_icon = _I["warn"]
+        banner_href = '/app?tab=money-out'
+        banner_cta = 'See what failed'
     else:
-        banner = _card(inner=(
-            '<div class="x-banner"><div class="x-banner-l">'
-            f'<span class="x-banner-ico">{_I["check"]}</span>'
-            '<div><h2>Nothing needs you right now</h2>'
-            '<p>Every payment is inside your limits and explained. '
-            'Closebook will surface anything it cannot prove.</p></div>'
-            '</div></div>'))
+        banner_head = 'Nothing needs you right now'
+        banner_sub = ('Every payment is inside your limits and explained. '
+                      'Closebook will surface anything it cannot prove.')
+        banner_icon = _I["check"]
+        banner_href = None
+        banner_cta = None
+    banner = _card(inner=(
+        f'<div class="x-banner"><div class="x-banner-l">'
+        f'<span class="x-banner-ico">{banner_icon}</span>'
+        f'<div><h2>{e(banner_head)}</h2><p>{e(banner_sub)}</p></div></div>'
+        + (f'<a class="x-btn x-btn--primary" href="{banner_href}">'
+           f'{banner_cta}{_I["arrow"]}</a>' if banner_href else '')
+        + '</div>'))
 
     # today's checklist — real plan steps as sentences
     todo = []
+    problem_payables = {p["payable_number"] for p in c["problems"]}
     for p in c["payables"]:
         st = p["display_status"]
+        # A payable with a current failure reads as failed, never as moving:
+        # SUBMITTED here plus a Problem card elsewhere was the contradiction.
+        if p["number"] in problem_payables:
+            icon, cls = _I["x"], "is-bad"
+            head = f'{p["number"]} ({p["supplier"] or "supplier"}) failed'
+            body = (next((q["plain_reason"] for q in c["problems"]
+                          if q["payable_number"] == p["number"]), "")
+                    or "Check the problem list.")
+            todo.append(f'<li><span class="x-todo-ico {cls}">{icon}</span>'
+                        f'<div><b>{e(head)}</b><p>{e(body)}</p></div>'
+                        f'<span class="x-pill x-pill--bad">Problem</span></li>')
+            continue
         if st in ("PAID", "SUBMITTED", "APPROVED"):
             icon, cls = _I["check"], "is-good"
             head = f'{p["number"]} ({p["supplier"] or "supplier"}) is moving'
@@ -653,7 +684,8 @@ def _home(c: dict) -> str:
             head = f'{p["number"]} ({p["supplier"] or "supplier"}) is held'
             body = p.get("step_reason") or "Waiting on policy."
         pill = ('<span class="x-pill x-pill--bad">Problem</span>' if cls == "is-bad"
-                else f'<span class="x-pill x-pill--{"good" if cls == "is-good" else "warn"}">'
+                else f'<span class="x-pill x-pill--'
+                     f'{"good" if cls == "is-good" else "warn"}">'
                      f'{e(st)}</span>')
         todo.append(f'<li><span class="x-todo-ico {cls}">{icon}</span>'
                     f'<div><b>{e(head)}</b><p>{e(body)}</p></div>{pill}</li>')
@@ -665,19 +697,31 @@ def _home(c: dict) -> str:
         f'<ul class="x-todo">{todo_html}</ul>'
     ))
 
+    # Problems (current, actionable) + Past attempts (history, collapsed).
+    prob_items = "".join(
+        f'<li><span class="x-todo-ico is-bad">{_I["x"]}</span>'
+        f'<div><b>{e(p["payable_number"] or "Unknown step")}</b>'
+        f'<p>{e(p["plain_reason"])}</p></div>'
+        f'<span class="x-pill x-pill--bad">Problem</span></li>'
+        for p in c["problems"])
+    past_items = "".join(
+        f'<li><span class="x-todo-ico is-good">{_I["check"]}</span>'
+        f'<div><b>{e(p["payable_number"] or "Unknown step")}</b>'
+        f'<p>{e(p["plain_reason"])}</p></div>'
+        f'<span class="x-pill x-pill--off">{e(p["status"])}</span></li>'
+        for p in c.get("past_attempts") or [])
+
     prob_inner = ""
-    if n_prob:
-        items = "".join(
-            f'<li><span class="x-todo-ico is-bad">{_I["warn"]}</span>'
-            f'<div><b>{e(p["payable_number"] or "Unknown step")}</b>'
-            f'<p>{e((p["reason"] or "Failed")[:140])}</p></div></li>'
-            for p in c["problems"][:4])
+    if prob_items or past_items:
         prob_inner = _card(span="x-span-4", inner=(
             '<div class="x-cardhead"><div><h3>Problems</h3>'
             '<p class="x-help">Payments that failed and will not be retried '
             'automatically.</p></div></div>'
-            f'<ul class="x-todo">{items}</ul>'
-            f'<p class="x-help">These cannot be approved. They need a new plan.</p>'))
+            f'<ul class="x-todo">{prob_items}</ul>'
+            f'<p class="x-help">These cannot be approved. They need a new plan.</p>'
+            + (f'<details class="x-hist"><summary>Past attempts '
+               f'({n_past})</summary><ul class="x-todo">{past_items}</ul></details>'
+               if past_items else '')))
 
     inc = c["incidents"]
     inc_inner = ""
@@ -718,13 +762,17 @@ def _money_in(c: dict) -> str:
     rows = []
     for r in c["receivables"]:
         done = r["status"] in ("PAID", "OVERPAID")
+        # "USD 0.00 of 4,500.00" is accurate but reads like a rendering bug;
+        # name the state instead.
+        paid_label = (f'{r["currency"]} {money(r["paid_minor"])} of '
+                      f'{money(r["amount_minor"])}' if r["paid_minor"]
+                      else "Nothing paid yet")
         rows.append(
             '<div class="x-inv">'
             f'<div class="x-inv-who"><b>{e(r["number"])}</b>'
             f'<small>{e(r["customer"] or "Unknown customer")}</small></div>'
             '<div><div class="x-inv-amt">'
-            f'<span>{e(r["currency"])} {money(r["paid_minor"])} of '
-            f'{money(r["amount_minor"])}</span>'
+            f'<span>{paid_label}</span>'
             f'<b>{r["pct"]}%</b></div>'
             f'<div class="x-bar{_flag(done, "x-bar--done")}">'
             f'<span style="width:{max(2, r["pct"])}%"></span></div></div>'
@@ -762,6 +810,8 @@ def _money_in(c: dict) -> str:
         else:
             reasons.append("no open invoice matched the proposal")
             reasons.append("the model could not name a real invoice")
+        conf = float(prop.get("confidence", 0) or 0)
+        conf_label = f'{conf:.2f} confident' if conf else "No guess to stand behind"
         un.append(
             '<div class="x-card x-l-card" style="box-shadow:none;background:var(--x-bg)">'
             f'<div class="x-cardhead" style="margin-bottom:8px"><div>'
@@ -772,7 +822,7 @@ def _money_in(c: dict) -> str:
             '<div class="x-cols" style="margin-bottom:0">'
             f'<div class="x-col x-col--ai"><div class="x-col-h">{_I["ai"]}The model guessed</div>'
             f'<ul><li>{_I["x"]}{e(what)}</li>'
-            f'<li>Confidence {float(prop.get("confidence", 0)):.2f}</li></ul></div>'
+            f'<li>{e(conf_label)}</li></ul></div>'
             f'<div class="x-col x-col--rules"><div class="x-col-h">{_I["scale"]}Code refused</div>'
             + "".join(f'<li>{_I["x"]}{e(r)}</li>' for r in reasons)
             + '</div></div></div>')
@@ -865,19 +915,34 @@ def _money_out(c: dict) -> str:
 
     # problems block
     probs = c["problems"]
+    past = c.get("past_attempts") or []
     prob = ""
     if probs:
         items = "".join(
-            f'<li><span class="x-todo-ico is-bad">{_I["warn"]}</span>'
+            f'<li><span class="x-todo-ico is-bad">{_I["x"]}</span>'
             f'<div><b>{e(p["payable_number"] or "Unknown")}</b>'
-            f'<p>{e((p["reason"] or "Failed")[:160])}</p></div>'
+            f'<p>{e(p["plain_reason"])}</p>'
+            f'<details class="x-hist"><summary>Details</summary>'
+            f'<pre class="x-raw">{e(p["reason"] or "no raw error recorded")}</pre>'
+            f'</details></div>'
             f'<span class="x-pill x-pill--bad">Problem</span></li>'
             for p in probs)
+        past_block = ""
+        if past:
+            past_items = "".join(
+                f'<li><span class="x-todo-ico is-good">{_I["check"]}</span>'
+                f'<div><b>{e(p["payable_number"] or "Unknown")}</b>'
+                f'<p>{e(p["plain_reason"])}</p></div>'
+                f'<span class="x-pill x-pill--off">{e(p["status"])}</span></li>'
+                for p in past)
+            past_block = (f'<details class="x-hist"><summary>Past attempts '
+                          f'({len(past)})</summary>'
+                          f'<ul class="x-todo">{past_items}</ul></details>')
         prob = _card(inner=(
             '<div class="x-cardhead"><div><h3>Problems</h3>'
             '<p class="x-help">These failed and are deliberately not retried. '
             'Re-plan them to try again.</p></div></div>'
-            f'<ul class="x-todo">{items}</ul>'))
+            f'<ul class="x-todo">{items}</ul>{past_block}'))
 
     return head + prob
 
@@ -980,26 +1045,31 @@ def _ai(c: dict) -> str:
                          if prop else '.'))
             rule_msg = (t["detail"] or outs.get("explanation") or
                         "Checked every number against the open invoices.")
-            items.append((what, ai_msg, rule_msg, t["verdict"]))
+            conf = float(prop.get("confidence", 0) or 0) if prop else 0
+            conf_label = f'{conf:.2f} confident' if conf else "No guess"
+            items.append((what, ai_msg, rule_msg, t["verdict"], conf_label))
         elif t["tool"] == "explain_decision":
             items.append((outs.get("explanation") or "Explained a decision.",
                           "I only explain. I do not decide.",
                           "The reason is whatever the code recorded.",
-                          t["verdict"]))
+                          t["verdict"], ""))
         else:
             items.append((f'Tool: {e(t["tool"])}',
                           "Checked the books and answered.",
-                          t["detail"] or "No further detail.", t["verdict"]))
+                          t["detail"] or "No further detail.", t["verdict"], ""))
 
     feed = []
-    for what, ai_msg, rule_msg, verdict in items:
+    for what, ai_msg, rule_msg, verdict, conf in items:
         good = verdict == "accepted"
+        conf_pill = (f'<span class="x-pill x-pill--off">{e(conf)}</span>'
+                     if conf else "")
         feed.append(
             '<li>'
             f'<div class="x-msg x-msg--ai"><span class="x-av x-av--ai">{_I["ai"]}</span>'
             f'<div><span class="x-bubble"><b class="x-who">The model</b>{ai_msg}</span>'
-            f'<div class="x-aifoot"><span class="x-pill x-pill--{"accent" if good else "warn"}">'
-            f'{e(verdict)}</span><span>about {e(what)}</span></div></div></div>'
+            f'<div class="x-aifoot"><span class="x-pill x-pill--'
+            f'{"accent" if good else "warn"}">{e(verdict)}</span>{conf_pill}'
+            f'<span>about {e(what)}</span></div></div></div>'
             f'<div class="x-msg x-msg--rules"><span class="x-av x-av--rules">{_I["scale"]}</span>'
             f'<div><span class="x-bubble"><b class="x-who">The rules</b>{e(rule_msg)}</span></div></div>'
             '</li>')

@@ -185,6 +185,9 @@ a { color: inherit; }
 .x-arrived { display: flex; align-items: center; gap: 16px; padding: 16px 20px; border-radius: 14px; background: var(--x-bg); margin-bottom: 24px; flex-wrap: wrap; }
 .x-arrived .x-fig { font-size: 26px; }
 .x-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+/* Money in's held-payment cards sit in a narrow column, where two halves wrap
+   to one word per line. Inside those cards the columns stack. */
+.x-stack .x-cols { grid-template-columns: 1fr; }
 .x-col { border-radius: 16px; padding: 20px; border: 1px solid var(--x-line); }
 .x-col--ai { background: var(--x-accent-t); border-color: #e0e0f8; }
 .x-col--rules { background: var(--x-warn-t); border-color: #f6e6c4; }
@@ -272,9 +275,17 @@ a { color: inherit; }
 .x-l-nav .x-l-wrap { display: flex; align-items: center; justify-content: space-between; gap: 24px; height: 72px; }
 .x-l-nav .x-word { padding: 0; }
 .x-l-links { display: flex; gap: 4px; }
+/* Landing nav links.
+   `.x-l-links a` (0,1,1) outranks `.x-btn--primary` (0,1,0), so a primary
+   button inside the nav would inherit the muted link colour and end up with a
+   1.10:1 contrast against its own purple fill — unreadable. The nested selector
+   restores white explicitly and keeps the button's own hover behaviour. */
 .x-l-links a { text-decoration: none; }
 .x-l-links a { box-sizing: border-box; display: inline-flex; align-items: center; min-height: 44px; padding: 0 16px; border-radius: 999px; font-weight: 500; color: var(--x-muted); cursor: pointer; }
 .x-l-links a:hover { background: var(--x-card); color: var(--x-ink); }
+.x-l-links a.x-btn--primary,
+.x-l-links a.x-btn--primary:hover { background: var(--x-accent); border-color: var(--x-accent); color: #fff; }
+.x-l-links a.x-btn--primary:hover { background: var(--x-accent-ink); }
 
 .x-l-hero { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 56px; align-items: center; padding: 80px 0 96px; }
 .x-l-hero h1 { font-size: 58px; line-height: 1.04; font-weight: 600; letter-spacing: -0.035em; }
@@ -296,6 +307,16 @@ a { color: inherit; }
 .x-l-grid { display: grid; gap: 24px; }
 .x-l-grid--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .x-l-grid--4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+/* A "Past attempts" / "Details" expander. Native <details> so it works with JS
+   off; the raw error inside is never truncated — the summary above it is. */
+.x-hist { margin-top: 12px; border-top: 1px solid var(--x-line); padding-top: 8px; }
+.x-hist > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 6px; min-height: 32px; font-size: 13px; font-weight: 500; color: var(--x-muted); }
+.x-hist > summary::-webkit-details-marker { display: none; }
+.x-hist > summary:hover { color: var(--x-accent-ink); }
+.x-hist > summary .x-ico { width: 14px; height: 14px; transition: transform 0.15s ease; }
+.x-hist[open] > summary .x-ico { transform: rotate(180deg); }
+.x-hist .x-todo li:first-child { padding-top: 12px; }
+.x-raw { margin: 8px 0 0; padding: 12px 14px; border-radius: 10px; background: var(--x-bg); border: 1px solid var(--x-line); font-family: var(--x-mono); font-size: 12px; line-height: 1.5; color: var(--x-muted); white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
 .x-l-grid--5 { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; }
 .x-l-card { display: flex; flex-direction: column; gap: 10px; }
 .x-l-card p { color: var(--x-muted); font-size: 15px; }
@@ -338,7 +359,7 @@ a { color: inherit; }
 @media (max-width: 1100px) {
   .x-span-3 { grid-column: span 6; }
   .x-span-8, .x-span-4 { grid-column: span 12; }
-  .x-l-grid--5 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .x-l-grid--5, .x-l-grid--4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .x-l-hero h1 { font-size: 50px; }
 }
 @media (max-width: 960px) {

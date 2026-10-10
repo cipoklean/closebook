@@ -61,13 +61,77 @@ def _is_approvable(step: PlanStep, payload: dict) -> bool:
     return True
 
 
+def _plain_reason(reason: str) -> str:
+    """A one-line plain-English summary of a failure reason.
+
+    The raw Airwallex error is kept and shown behind a Details expander, but the
+    visible line must be something a person can act on — a truncated
+    "field=reason c" is neither. Never truncate silently: either summarise it or
+    show it whole.
+    """
+    r = (reason or "").strip()
+    low = r.lower()
+    if "validation_failed" in low or "schema validation" in low:
+        return "The bank rejected the request: a required field was missing or invalid."
+    if "source_currency" in low:
+        return "The bank rejected the request: the currency to debit was missing."
+    if "unauthorized" in low or "admin permissions" in low:
+        return "Not permitted: this account is not allowed to do that."
+    if "insufficient" in low:
+        return "Not enough money in that currency."
+    if "invalid beneficiary" in low or "beneficiary" in low and "invalid" in low:
+        return "The beneficiary details were rejected by the bank."
+    if "compliance" in low or "hold" in low:
+        return "The payment is on a compliance hold."
+    if not r:
+        return "It failed. No reason was recorded."
+    # First sentence only, capped, and never cut mid-word.
+    first = r.split(". ")[0].rstrip(".")
+    if len(first) > 120:
+        first = first[:117].rsplit(" ", 1)[0] + "…"
+    return first[0].upper() + first[1:] if first else r
+
+
+def _latest_run_id(s) -> str | None:
+    """The newest run that actually wrote a step.
+
+    "Current plan" means the latest run, so a cancelled step from three plans
+    ago is history rather than something a person must act on now.
+    """
+    row = (s.query(PlanStep.run_id)
+           .filter(PlanStep.run_id.isnot(None))
+           .order_by(PlanStep.id.desc()).first())
+    return row[0] if row else None
+
+
+def _is_current(st: PlanStep, latest_run: str | None = None) -> bool:
+    """True when this step belongs to the newest plan run.
+
+    Rows written before `run_id` existed have `None`, and they are the legacy
+    CANCELLED rows from the early beneficiary bug. Treating a missing run_id as
+    "not current" would hide every historical failure, which is exactly what the
+    Problems list is for. Only a DIFFERENT, newer run makes a step historical.
+    """
+    if latest_run is None:
+        return True
+    if st.run_id is None:
+        return True
+    return st.run_id == latest_run
+
+
 def steps_block(s) -> dict:
-    """Plan steps, split into approvable vs problems.
+    """Plan steps, split into approvable, current problems and past attempts.
 
     Also the source of truth for a payable's displayed state, so the payables
     table and the plan cannot disagree.
+
+    Only the CURRENT plan's unresolved problems surface as problems. Stale
+    CANCELLED rows from earlier plans are kept as history behind a toggle —
+    without that split, a banner saying "nothing needs you" sat directly above a
+    list of three dead payments, and a payable read as both SUBMITTED and failed.
     """
-    steps = s.query(PlanStep).order_by(PlanStep.id.desc()).limit(60).all()
+    steps = s.query(PlanStep).order_by(PlanStep.id.desc()).limit(200).all()
+    latest_run = _latest_run_id(s)
 
     payable_state: dict[str, dict] = {}
     approvable: list[dict] = []
@@ -115,24 +179,66 @@ def steps_block(s) -> dict:
                 "payable_number": payable,
                 "status": st.status.value,
                 "reason": reason,
+                "plain_reason": _plain_reason(reason),
                 "currency": pl.get("currency"),
                 "amount_minor": pl.get("amount_minor"),
+                # A step that already reached the bank is history, not a problem
+                # needing action: it may still settle.
+                "settled": bool(st.airwallex_object_id),
+                "current": _is_current(st, latest_run),
             })
 
-    # One card per real problem: the three PO-7003 rows share a payable, status
-    # and reason, and repeating them made one failure look like three.
-    seen: set[tuple] = set()
-    unique_problems = []
+    # One entry per payable, but a FAILURE outranks a success: a payable whose
+    # newest step succeeded is fine, while one that failed is a problem even if
+    # a later row for it exists. Rows arrive newest-first, so the default pick
+    # would otherwise be the newest and a failure could be silently dropped.
+    _rank = {"FAILED": 0, "CANCELLED": 1}
+    by_payable: dict[str, dict] = {}
     for p in problems:
-        key = (p["payable_number"], p["status"], (p["reason"] or "")[:120])
-        if key in seen:
+        key = p["payable_number"] or "unknown"
+        cur = by_payable.get(key)
+        if cur is None:
+            by_payable[key] = p
             continue
-        seen.add(key)
-        unique_problems.append(p)
+        if _rank.get(p["status"], 9) < _rank.get(cur["status"], 9):
+            by_payable[key] = p
+
+    current_problems: list[dict] = []
+    past_attempts: list[dict] = []
+    for p in by_payable.values():
+        # A SUCCESS is not a past attempt at all. A settled step whose reason is
+        # ordinary plan prose ("within the auto-pay limit") is a payment that
+        # went through — listing it under "Past attempts" reads as a failure
+        # that happened to recover, which is a lie.
+        if p["settled"] and p["status"] in ("SUBMITTED", "APPROVED", "PAID"):
+            continue
+        if p["status"] in ("CANCELLED", "FAILED"):
+            # Still-current failures are actionable; superseded ones are history.
+            (current_problems if p["current"] else past_attempts).append(p)
+        elif p["settled"]:
+            past_attempts.append(p)
+        # PROPOSED and other non-terminal, non-money states are neither.
+
+    # A payable already shown as a current problem is not repeated in history.
+    current_keys = {p["payable_number"] for p in current_problems}
+    past_attempts = [p for p in past_attempts
+                     if p["payable_number"] not in current_keys]
+
+    def _dedupe(rows: list[dict]) -> list[dict]:
+        seen: set[tuple] = set()
+        out = []
+        for p in rows:
+            k = (p["payable_number"], p["status"], (p["reason"] or "")[:120])
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(p)
+        return out
 
     return {
         "approvable": approvable,
-        "problems": unique_problems,
+        "problems": _dedupe(current_problems),
+        "past_attempts": _dedupe(past_attempts),
         "payable_state": payable_state,
     }
 
@@ -276,6 +382,7 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
             "payables": payables,
             "approvable": steps["approvable"],
             "problems": steps["problems"],
+            "past_attempts": steps["past_attempts"],
             "incidents": incidents_block(incidents),
             "agent_trace": trace_block(s),
             "unmatched": unmatched_block(s),
