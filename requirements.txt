@@ -1,5 +1,6 @@
 # Closebook backend — pinned loosely; exact pins recorded by `pip freeze` at build time.
 fastapi>=0.115
+python-multipart>=0.0.9   # form parsing for the approve/decline POST
 uvicorn[standard]>=0.30
 pydantic>=2.7
 pydantic-settings>=2.3

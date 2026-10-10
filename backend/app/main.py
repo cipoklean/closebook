@@ -17,11 +17,13 @@ for money movement, and which re-verifies the bound approval on every path.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Optional
 
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from .airwallex.webhooks import WebhookHandler
 from .config import get_settings
@@ -32,7 +34,13 @@ from .models import InvoicePayable, InvoiceReceivable
 log = logging.getLogger("closebook")
 logging.basicConfig(level="INFO", force=True)
 
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+os.makedirs(_STATIC_DIR, exist_ok=True)
+
 app = FastAPI(title="Closebook", version="0.1.0")
+# Serve the stylesheet. `html=False` is deliberately omitted so the page is
+# usable with JS off; the only script is a small enhancement layer.
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 _db = DB()
 _settings = get_settings()
 _webhooks = WebhookHandler(_db, _settings.awx_webhook_secret.get_secret_value())
@@ -119,44 +127,75 @@ def pending_approvals() -> list[dict]:
         return out
 
 
+async def _read_body(request: Request) -> dict:
+    """Read the request body as JSON or as a form.
+
+    The dashboard posts a plain HTML form; API clients post JSON. Accepting both
+    means the choice of UI is never the reason an approval silently fails.
+    """
+    ctype = request.headers.get("content-type", "")
+    if "application/json" in ctype:
+        try:
+            return await request.json()
+        except ValueError:
+            return {}
+    if "application/x-www-form-urlencoded" in ctype or "multipart/form-data" in ctype:
+        form = await request.form()
+        return {k: v for k, v in form.items()}
+    try:
+        return await request.json()
+    except ValueError:
+        return {}
+
+
 @app.post("/approvals/{step_id}/approve")
-def approve(step_id: int, body: dict) -> dict:
+async def approve(step_id: int, request: Request) -> dict:
     """Record a HUMAN approval. Does not move money.
 
     Execution still re-verifies the bound hash, amount, counterparty and FX
     rate through the executor — approving here only records the decision.
+
+    Accepts JSON or a form post so the dashboard's plain form works.
     """
     from .domain.approval_api import ApprovalRefused, approve_step
 
+    body = await _read_body(request)
     pin = str(body.get("pin") or "")
     by = str(body.get("approved_by") or "dashboard")
-    configured = _settings.demo_approver_pin.get_secret_value()
+    # A missing SecretStr is not an empty one; treat both as "closed".
+    _pin_field = _settings.demo_approver_pin
+    configured = (_pin_field.get_secret_value()
+                   if _pin_field is not None else "")
     if not configured:
-        return {"error": "DEMO_APPROVER_PIN is not configured — the approval "
-                         "endpoint is closed rather than open."}
+        return {"detail": "DEMO_APPROVER_PIN is not configured — the approval "
+                          "endpoint is closed rather than open."}
     try:
         return approve_step(_db, step_id, pin=pin, approved_by=by,
                             configured_pin=configured)
     except ApprovalRefused as exc:
-        return {"error": str(exc)}
+        return {"detail": str(exc)}
 
 
 @app.post("/approvals/{step_id}/reject")
-def reject(step_id: int, body: dict) -> dict:
+async def reject(step_id: int, request: Request) -> dict:
     from .domain.approval_api import ApprovalRefused, reject_step
 
+    body = await _read_body(request)
     pin = str(body.get("pin") or "")
     by = str(body.get("rejected_by") or "dashboard")
     reason = str(body.get("reason") or "")
-    configured = _settings.demo_approver_pin.get_secret_value()
+    # A missing SecretStr is not an empty one; treat both as "closed".
+    _pin_field = _settings.demo_approver_pin
+    configured = (_pin_field.get_secret_value()
+                   if _pin_field is not None else "")
     if not configured:
-        return {"error": "DEMO_APPROVER_PIN is not configured — the approval "
-                         "endpoint is closed rather than open."}
+        return {"detail": "DEMO_APPROVER_PIN is not configured — the rejection "
+                          "endpoint is closed rather than open."}
     try:
         return reject_step(_db, step_id, pin=pin, rejected_by=by,
                            reason=reason, configured_pin=configured)
     except ApprovalRefused as exc:
-        return {"error": str(exc)}
+        return {"detail": str(exc)}
 
 
 @app.post(_settings.webhook_path)
@@ -208,20 +247,31 @@ def _process_pending() -> None:
 
 
 @app.get("/", response_class=HTMLResponse)
-def index() -> str:
-    """The dashboard. Everything on it was decided by the deterministic layer
-    before this function ran — the page only presents."""
+def landing() -> str:
+    """The landing page. Illustrative copy only — no live figures."""
+    from .ui import render_landing
+    return render_landing()
+
+
+@app.get("/app", response_class=HTMLResponse)
+def app_page(tab: str = "home") -> str:
+    """The operator app. Everything on it was decided by the deterministic layer
+    before this function ran — the page only presents.
+
+    Falls back to a plain page with links to the JSON endpoints rather than an
+    error, so a rendering fault never hides the state.
+    """
     from .dashboard import build_context
-    from .ui import render
+    from .ui import render_app
     try:
-        ctx = build_context(_db, INCIDENTS)
+        ctx = build_context(INCIDENTS)
     except Exception:
         log.exception("dashboard context failed")
         return ("<html><body style='font-family:system-ui;padding:2rem'>"
-                "<h1>Closebook</h1><p>The dashboard could not read state. "
+                "<h1>Closebook</h1><p>The app could not read state. "
                 "Try <a href='/state'>/state</a> or <a href='/healthz'>/healthz</a>."
                 "</p></body></html>")
-    return render(ctx)
+    return render_app(ctx, tab=tab, health=healthz())
 
 
 if __name__ == "__main__":

@@ -79,10 +79,11 @@ Then fill in `.env` (see below). **An LLM key is optional** — with none set,
 matching, policy and planning run fully deterministically.
 
 ```bash
-make test           # 302 tests, hermetic — no secrets or network needed
+make test           # 324 tests, hermetic — no secrets or network needed
 make seed           # creates sandbox global accounts, deposits scenario cash
-make dev            # dashboard on http://127.0.0.1:8000
+make dev            # site on http://127.0.0.1:8000/ and app on /app
 make demo           # the 7 beats, deterministic decisions only
+make webhook-url    # ngrok pinned to the reserved static domain
 ```
 
 ### Environment variables
@@ -235,12 +236,14 @@ backend/app/
     approval_api.py PIN-gated human approval
   airwallex/      one module per API surface, each verified live
   seed/           the demo scenario and its two drivers
-  ui.py           the dashboard (hand-written, no build step)
+  ui.py           server-rendered pages (hand-written, no build step)
   dashboard.py    one read-only context pass
+  static/         the stylesheet (design tokens)
 docs/
   ENGINEERING_NOTES.md   key decisions and gotchas
+  design/                the approved mockup, treated as the visual spec
 scripts/          live probes that verify real API assumptions
-tests/            302 tests
+tests/            324 tests
 ```
 
 ---
@@ -260,9 +263,53 @@ processes in the background.
 
 ---
 
+## The UI
+
+Two server-rendered pages, no build step and no JS framework:
+
+| URL | What it is |
+|---|---|
+| `/` | The landing page — hero, problems, how it works, safety, features, who it's for, built on, closing CTA, footer. Illustrative copy; **no live figures.** |
+| `/app` | The operator app — Home, Money in, Money out, Needs your OK (with a live count badge), AI activity. Sidebar on desktop, bottom tab bar under 768px. |
+
+The visual spec is `docs/design/closebook-mockup.html`: `#F6F7F9` ground, white
+cards, `#5B5BD6` accent, Inter, with system-font fallback so a blocked Google
+Fonts never leaves the page unstyled. Tokens live in
+`backend/app/static/closebook.css` and are shared by both pages.
+
+**Every number on `/app` comes from the dashboard context** (`build_context()`),
+which reads the same ledger, plan, incident and trace rows the JSON endpoints
+expose. The page never computes a decision — it renders what code already
+decided. Labels map onto the real fields:
+
+| On screen | Source |
+|---|---|
+| Cash you have | ledger cash |
+| Cash set aside | committed cash, with the reserve floor |
+| Money we couldn't match | unapplied / suspense |
+| Automatic limit | the auto-pay limit |
+| Today's checklist | treasury plan rows, as sentences |
+| The step tracker | each payable's real plan-step state |
+| AI activity | `agent_trace` rows |
+
+A few deliberate UI rules, each of which is a bug that shipped once:
+
+- **A failed or stale step is never shown as approvable.** Terminal steps, and
+  steps naming no amount, render as a **Problem** with the reason — not as a
+  0.00 "approve" card.
+- **Incidents are grouped by transfer.** One transfer is one card with its
+  events listed inside; the newest event sets the header, so a transfer that
+  failed and then settled reads as settled.
+- **An action with no endpoint is disabled and says "Coming soon."** The UI does
+  not invent endpoints that move money.
+- **Approve/Decline posts to the existing `/approvals/{id}/approve|reject`**
+  and shows the real result, including a refused PIN.
+
+---
+
 ## Troubleshooting
 
-**"The dashboard could not read state."** Check `make test` still passes, then
+**"The app could not read state."** Check `make test` still passes, then
 check the DB. The page falls back deliberately rather than showing wrong numbers.
 
 **"DEMO_APPROVER_PIN is not configured."** The approval endpoint is closed until
