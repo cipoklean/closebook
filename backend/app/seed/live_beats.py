@@ -446,21 +446,27 @@ class LiveDemo:
         inv43 = (s.query(InvoiceReceivable)
                  .filter_by(number="INV-0043").first())
         band = classify_confidence(result.confidence)
-        still_due = ((inv43.amount_minor - inv43.amount_paid_minor) / 100
-                     if inv43 else 0)
-        outcome = (
-            f"applied to INV-0043, but {still_due:,.2f} USD of the 4,500.00 "
-            f"invoice is still outstanding, so the payment is HELD for a human"
-            if inv43 and still_due > 0 else
-            "fully applied and settled")
+        # Say what the LEDGER says, not what the matcher proposed. An
+        # AMBIGUOUS result is recorded but never applied, so claiming an
+        # application there would be a money claim nothing backs.
+        if inv43 and inv43.amount_paid_minor > 0:
+            due = (inv43.amount_minor - inv43.amount_paid_minor) / 100
+            outcome = (f"{inv43.amount_paid_minor/100:,.2f} applied to INV-0043, "
+                       f"leaving {due:,.2f} USD still outstanding, so the "
+                       f"payment is HELD for a human")
+        elif inv43:
+            outcome = ("nothing was applied — the reading was too weak to "
+                       "prove, so it is held for a human to decide")
+        else:
+            outcome = "no invoice was affected"
         self._record(beat, escalated,
                      f"USD {amount/100:,.2f} from 'L. Stores' (no reference) — "
-                     f"the model proposed {result.status} at "
+                     f"the model proposed {result.status} and claimed "
                      f"{result.evidence.get('model_claimed_confidence', 0):.2f} "
-                     f"confidence, which is its own claim; code re-validated "
-                     f"every number and pinned the band to {band} "
-                     f"(model results never auto-apply). Outcome: {outcome}. "
-                     f"Recorded as {inflow.match_status.value}.")
+                     f"confidence, which is its claim, not a verdict; code "
+                     f"re-validated every number and pinned the band to {band} "
+                     f"(a model result can never auto-apply). Outcome: "
+                     f"{outcome}. Recorded as {inflow.match_status.value}.")
 
     # ---- beat 7: reconcile -------------------------------------------
     def beat_close(self) -> None:
