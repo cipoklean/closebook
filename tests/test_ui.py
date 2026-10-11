@@ -13,6 +13,7 @@ cannot pass by relying on rows another test left behind.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -23,8 +24,9 @@ from app.db import reset_default_db, session_scope
 from app.dashboard import build_context, incidents_block, steps_block
 from app.domain.plan_store import new_run_id, persist_plan
 from app.domain.planner import ACT_PAY, Step
+from app.domain.matching import Candidate
 from app.main import app
-from app.models import StepStatus
+from app.models import AgentTrace, StepStatus
 from app.ui import e, money, render_app, render_landing
 
 
@@ -419,6 +421,215 @@ class TestPlainReasons:
         assert len(out) < 130
         assert not out.endswith("wor")   # never cut mid-word
         assert out.endswith("…")
+
+
+class TestReasonIsRecordedNotRecomputed:
+    """The view must display what code decided.
+
+    The two old strings ("too small to be a deliberate part-payment" / "too large
+    to be a bank fee") were appended unconditionally for any matched proposal,
+    while the comment claimed they were derived from the numbers. They were not.
+    """
+
+    def _unmatched(self, db, *, decided=None, reference="", proposed=None):
+        """An AMBIGUOUS inflow plus its trace, shaped like the live rows."""
+        from app.db import session_scope
+        from app.models import Inflow, MatchStatus
+
+        with session_scope() as s:
+            inf = Inflow(currency="USD", amount_minor=440000,
+                         payer_name="L. Stores", reference_raw=reference)
+            s.add(inf)
+            s.flush()
+            inflow_id = inf.id
+
+        with session_scope() as s:
+            s.add(AgentTrace(
+                run_id="r1", tool="propose_match",
+                inputs_json=f'{{"inflow_id": {inflow_id}}}',
+                outputs_json=json.dumps({"model_proposed": proposed or {
+                    "allocations": [{"invoice_number": "INV-0043",
+                                     "amount": 4400.0}],
+                    "confidence": 0.6, "rationale": "L. Stores matches"}}),
+                verdict="accepted", detail="proposal recorded"))
+
+        if decided is not None:
+            with session_scope() as s:
+                s.add(AgentTrace(
+                    run_id="r1", tool="decide_match",
+                    inputs_json=f'{{"inflow_id": {inflow_id}}}',
+                    outputs_json=json.dumps(decided),
+                    verdict="escalated", detail=decided.get("reason")))
+
+        with session_scope() as s:
+            s.query(Inflow).filter_by(id=inflow_id).update(
+                {"match_status": MatchStatus.AMBIGUOUS},
+                synchronize_session=False)
+
+    def test_displays_the_shortfall_reason_the_rule_recorded(self, db):
+        self._unmatched(db, decided={
+            "status": "AMBIGUOUS", "confidence": 0.70, "band": "ESCALATE",
+            "reason": "amount is 100.00 short of INV-0043 (2.2%) — too large "
+                      "for a bank fee, too small to be a deliberate "
+                      "part-payment; needs a human",
+            "evidence": {"shortfall_minor": 10000, "short_fraction": 0.0222}})
+        html = render_app(build_context([]), tab="money-in")
+        assert "100.00 short of INV-0043" in html
+        assert "needs a human" in html
+        # the escalation line names the real threshold
+        assert "0.75 line" in html
+
+    def test_overpayment_is_reported_as_an_overpayment(self, db):
+        self._unmatched(db, decided={
+            "status": "OVERPAID", "confidence": 0.70, "band": "ESCALATE",
+            "reason": "overpayment of 50.00 against INV-0043; creates a refund "
+                      "obligation that needs a human",
+            "evidence": {"overpayment_minor": 5000}})
+        html = render_app(build_context([]), tab="money-in")
+        assert "overpayment of 50.00" in html.lower()
+        assert "refund" in html.lower()
+        assert "100.00 short" not in html          # no invented shortfall
+
+    def test_within_bank_fee_tolerance_is_stated_as_such(self, db):
+        self._unmatched(db, decided={
+            "status": "PARTIAL", "confidence": 0.93, "band": "APPROVAL",
+            "reason": "partial payment against INV-0043; 5.00 short, within "
+                      "bank-fee tolerance",
+            "evidence": {"shortfall_minor": 500}})
+        html = render_app(build_context([]), tab="money-in")
+        assert "within bank-fee tolerance" in html
+        assert "too large to be a bank fee" not in html
+        assert "Between 0.75 and 0.90" in html       # the real band
+
+    def test_below_threshold_reasons_name_the_real_thresholds(self, db):
+        self._unmatched(db, decided={
+            "status": "AMBIGUOUS", "confidence": 0.70, "band": "ESCALATE",
+            "reason": "no confident match; a human decides",
+            "evidence": {}})
+        html = render_app(build_context([]), tab="money-in")
+        assert "no confident match" in html.lower()
+        assert "0.75" in html
+        # and never the two invented claims
+        assert "too small to be a deliberate part-payment" not in html
+        assert "too large to be a bank fee" not in html
+
+    def test_no_recorded_decision_is_admitted_not_invented(self, db):
+        self._unmatched(db, decided=None)
+        html = render_app(build_context([]), tab="money-in")
+        assert "No decision was recorded" in html
+
+    def test_no_reference_is_stated(self, db):
+        self._unmatched(db, decided={
+            "status": "AMBIGUOUS", "confidence": 0.70, "band": "ESCALATE",
+            "reason": "amount is 100.00 short of INV-0043", "evidence": {}},
+            reference="")
+        html = render_app(build_context([]), tab="money-in")
+        assert "no reference" in html.lower()
+
+
+class StubLLM:
+    """Stands in for the OpenAI-compatible matcher."""
+
+    def __init__(self, response):
+        self.response = response
+
+    def propose(self, inflow, candidates):
+        return self.response
+
+
+def _c(inv_id, number, customer, currency, open_minor, original=None):
+    return Candidate(invoice_id=inv_id, number=number, customer_name=customer,
+                     currency=currency, amount_open_minor=open_minor,
+                     amount_original_minor=original or open_minor)
+
+
+class TestLlmAllocationUnitsAndShape:
+    """The LLM tier silently never worked.
+
+    Three separate contract mismatches between `try_llm` and the real client,
+    each of which made a CORRECT proposal look unusable while the beat recorded
+    "the model was offline" with a working key configured.
+    """
+
+    def _cands(self):
+        return [_c(1, "INV-0043", "Lumen Stores", "USD", 450_000)]
+
+    def test_model_allocations_in_major_units_are_accepted(self):
+        """The model answers 4400 for a 440000-minor inflow. Comparing them raw
+        made every correct proposal read as a 100x under-allocation."""
+        from app.domain.matching import match_inflow
+        r = match_inflow(
+            440_000, "USD", {"payer_name": "L. Stores", "reference_raw": ""},
+            self._cands(),
+            llm=StubLLM({"allocations": {"1": 4_400}, "confidence": 0.75,
+                         "rationale": "partial payment"}))
+        assert r.method == "LLM", r.reason
+        assert r.status != "AMBIGUOUS" or "under-allocate" not in (r.reason or "")
+
+    def test_a_list_of_allocations_is_accepted(self):
+        """The client returns a LIST of {invoice_number, amount}; try_llm
+        expected a dict keyed by invoice_id and discarded it."""
+        from app.domain.matching import match_inflow
+        r = match_inflow(
+            440_000, "USD", {"payer_name": "L. Stores", "reference_raw": ""},
+            self._cands(),
+            llm=StubLLM({"allocations": [{"invoice_number": "INV-0043",
+                                          "amount": 4_400}],
+                         "confidence": 0.75, "rationale": "partial"}))
+        assert "no allocations" not in (r.reason or ""), r.reason
+
+    def test_the_matcher_sends_the_keys_the_client_reads(self):
+        """KeyError: the payload used amount_minor/payer_name/amount_open_minor
+        while the client reads amount/payer/amount_open."""
+        from app.domain.llm import LLMConfig, OpenAICompatibleMatcher
+        seen = {}
+
+        class Recorder(OpenAICompatibleMatcher):
+            def _call(self, inflow, candidates):
+                seen["inflow"] = inflow
+                seen["cands"] = candidates
+                return {"allocations": {"1": 4_400}, "confidence": 0.75}
+
+        m = Recorder(LLMConfig.from_settings())
+        m.propose({"amount": "4400.00", "currency": "USD", "payer": "L. Stores",
+                   "reference": ""},
+                  [{"number": "INV-0043", "currency": "USD",
+                    "amount_open": "4500.00", "customer": "Lumen Stores"}])
+        assert seen["inflow"]["amount"] == "4400.00"
+        assert "amount_minor" not in seen["inflow"]
+        assert seen["cands"][0]["amount_open"] == "4500.00"
+
+
+class TestSandboxWording:
+    """No transfer in this project may be described as live money."""
+
+    def test_a_submitted_transfer_is_not_labelled_paid(self, db):
+        """SUBMITTED is what WE did; only the bank can say PAID."""
+        _payable(db, number="PO-7001")
+        _write_step(db, payable="PO-7001", amount=900000, currency="EUR",
+                    reason="sent", object_id="e4337039-abc",
+                    status=StepStatus.SUBMITTED)
+        ctx = build_context([])
+        po = next(p for p in ctx["payables"] if p["number"] == "PO-7001")
+        assert po["live_status"] is not None or po["live_status"] is None
+        html = render_app(ctx, tab="money-out")
+        assert "sandbox" in html
+        # the recorded status is shown, not a "Paid" claim
+        assert ">Paid<" not in html
+
+    def test_live_status_is_read_from_the_context(self, db):
+        _payable(db, number="PO-7001")
+        _write_step(db, payable="PO-7001", amount=900000, currency="EUR",
+                    reason="sent", object_id="e4337039-abc",
+                    status=StepStatus.SUBMITTED)
+        ctx = build_context([])
+        ctx["payables"][0]["live_status"] = "PROCESSING"
+        html = render_app(ctx, tab="money-out")
+        assert "PROCESSING" in html
+
+    def test_the_app_never_says_live_money(self):
+        from app.ui import render_landing
+        assert "live money" not in render_landing().lower()
 
 
 # ------------------------------------------------------------- incidents

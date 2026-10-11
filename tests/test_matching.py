@@ -201,7 +201,7 @@ def test_llm_proposal_is_revalidated_in_code():
         700_000, "USD",
         {"payer_name": "", "reference_raw": "wire ref 88123"},
         _needs_llm_candidates(),
-        llm=StubLLM({"allocations": {"1": 700_000}, "confidence": 0.96,
+        llm=StubLLM({"allocations": {"1": 7_000}, "confidence": 0.96,
                      "rationale": "single open invoice matches the reference"}),
     )
     assert r.method == "LLM"
@@ -211,10 +211,11 @@ def test_llm_proposal_is_revalidated_in_code():
 
 def test_llm_overallocation_is_caught_by_code():
     """Model claims 900,000 against a 700,000 open balance -> ESCALATE."""
+    # MAJOR units, as the real OpenAI-compatible client returns them.
     r = match_inflow(
         700_000, "USD", {"payer_name": "", "reference_raw": "wire ref 88123"},
         _needs_llm_candidates(),
-        llm=StubLLM({"allocations": {"1": 900_000}, "confidence": 0.99,
+        llm=StubLLM({"allocations": {"1": 9_000}, "confidence": 0.99,
                      "rationale": "looks right to me"}),
     )
     assert r.status == "AMBIGUOUS"
@@ -225,7 +226,7 @@ def test_llm_allocations_must_sum_to_inflow():
     r = match_inflow(
         700_000, "USD", {"payer_name": "", "reference_raw": "batch"},
         _needs_llm_candidates(),
-        llm=StubLLM({"allocations": {"1": 700_000, "2": 500_000},
+        llm=StubLLM({"allocations": {"1": 7_000, "2": 5_000},
                      "confidence": 0.99, "rationale": "both"}),
     )
     assert r.status in {"PARTIAL", "OVERPAID"}
@@ -237,7 +238,7 @@ def test_llm_currency_crossing_is_rejected():
         700_000, "USD", {"payer_name": "", "reference_raw": ""},
         [_c(1, "INV-Z1", "X", "GBP", 700_000),
          _c(2, "INV-Z2", "X", "GBP", 500_000)],
-        llm=StubLLM({"allocations": {"1": 700_000}, "confidence": 0.99,
+        llm=StubLLM({"allocations": {"1": 7_000}, "confidence": 0.99,
                      "rationale": "same amount"}),
     )
     assert r.status == "AMBIGUOUS"

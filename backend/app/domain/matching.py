@@ -24,9 +24,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Callable, Iterable, Optional, Protocol
+from typing import Any, Callable, Iterable, Optional, Protocol
 
-from ..money import minor_for
+from ..money import minor_for, to_major_str, to_minor
 from .policy import (
     MATCH_CONFIDENCE_AUTO, MATERIAL_SHORT_THRESHOLD, within_bank_fee_tolerance,
 )
@@ -378,15 +378,22 @@ def try_llm(inflow_amount_minor: int, inflow_currency: str,
             llm: LLMMatcher) -> MatchResult:
     """Ask the model for a reading, then re-validate every number in code."""
     payload = {
-        "amount_minor": inflow_amount_minor,
+        # MAJOR units, and the exact key names OpenAICompatibleMatcher reads:
+        # `amount`/`payer`/`reference` and, per candidate, `amount_open`/
+        # `customer`. try_llm previously sent `amount_minor`/`payer_name`/
+        # `amount_open_minor`, so every lookup raised KeyError, propose()
+        # swallowed it and returned None, and the beat recorded "the model was
+        # offline" while a key was configured and working. Minor units invite a
+        # 100x error that re-validation would then correctly reject anyway.
+        "amount": to_major_str(inflow_amount_minor, inflow_currency),
         "currency": inflow_currency,
-        "payer_name": inflow.get("payer_name"),
+        "payer": inflow.get("payer_name"),
         "reference": inflow.get("reference_raw"),
     }
     cands = [
         {"invoice_id": c.invoice_id, "number": c.number,
-         "customer_name": c.customer_name, "currency": c.currency,
-         "amount_open_minor": c.amount_open_minor}
+         "customer": c.customer_name, "currency": c.currency,
+         "amount_open": to_major_str(c.amount_open_minor, c.currency)}
         for c in candidates
     ]
     try:
@@ -410,16 +417,45 @@ def try_llm(inflow_amount_minor: int, inflow_currency: str,
                    "escalated rather than guessed",
         )
 
-    allocations = raw.get("allocations") or {}
+    # The model returns allocations as a LIST of
+    # {"invoice_number", "amount"} (that is the shape `_SYSTEM` asks for and
+    # what the OpenAI-compatible client parses). try_llm historically expected
+    # a DICT keyed by invoice_id, so a perfectly good proposal failed
+    # `isinstance(allocations, dict)` and was discarded as "nothing usable" —
+    # the agent saw a proposal while the matcher rejected the identical one.
+    # Accept both; normalise to the list form used below.
+    raw_allocs = raw.get("allocations")
+    if isinstance(raw_allocs, dict):
+        raw_allocs = [{"invoice_id": k, "amount": v}
+                      for k, v in raw_allocs.items()]
     conf = float(raw.get("confidence") or 0.0)
     rationale = raw.get("rationale") or ""
 
     # --- CODE RE-VALIDATION (the model does not get the last word) ---
-    if not isinstance(allocations, dict) or not allocations:
+    if not isinstance(raw_allocs, list) or not raw_allocs:
         return MatchResult(status="AMBIGUOUS", confidence=0.0, method="LLM",
                            evidence={"rule": "LLM returned no allocations",
                                      "rationale": rationale},
                            reason="model proposed nothing usable; escalated")
+
+    by_number = {c.number: c for c in candidates}
+    allocations: dict[int, Any] = {}
+    for a in raw_allocs:
+        if not isinstance(a, dict):
+            continue
+        cid = a.get("invoice_id")
+        if cid is None:
+            cand = by_number.get(a.get("invoice_number"))
+            cid = cand.invoice_id if cand else None
+        if cid is None:
+            continue
+        allocations[cid] = a.get("amount")
+
+    if not allocations:
+        return MatchResult(status="AMBIGUOUS", confidence=0.0, method="LLM",
+                           evidence={"rule": "model named no real invoice",
+                                     "rationale": rationale},
+                           reason="model referenced an unknown invoice; escalated")
 
     by_id = {c.invoice_id: c for c in candidates}
     cleaned: list[Allocation] = []
@@ -427,8 +463,13 @@ def try_llm(inflow_amount_minor: int, inflow_currency: str,
     for k, v in allocations.items():
         try:
             inv_id = int(k)
-            amt = int(v)
-        except (TypeError, ValueError):
+            # The model answers in MAJOR units (the prompt and `cands` use
+            # `to_major_str`). Comparing its 4400 against a 440000 minor inflow
+            # made every correct proposal read as a 100x under-allocation, and
+            # code rejected it — while re-validation was right to check and
+            # wrong about the units.
+            amt = to_minor(Decimal(str(v)), inflow_currency)
+        except (TypeError, ValueError, ArithmeticError):
             return MatchResult(status="AMBIGUOUS", confidence=0.0, method="LLM",
                                evidence={"rule": "non-integer allocation",
                                          "raw": str(allocations)[:200]},

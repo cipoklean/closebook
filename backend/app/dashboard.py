@@ -303,16 +303,29 @@ def trace_block(s) -> list[dict]:
 
 # ------------------------------------------------------- unmatched money
 def unmatched_block(s) -> list[dict]:
-    """Ambiguous/unmatched inflows with the model's proposal attached, so
-    'why is this held?' is answerable from the data rather than from prose."""
+    """Ambiguous/unmatched inflows with the model's proposal AND the reason code
+    actually recorded, so 'why is this held?' is answered by the deterministic
+    decision rather than recomputed by the view."""
     inflows = [i for i in s.query(Inflow).all()
                if i.match_status in (MatchStatus.AMBIGUOUS, MatchStatus.UNMATCHED)]
     out = []
     for i in inflows:
         trace = s.query(AgentTrace).filter(
             AgentTrace.inputs_json.like(f'%"inflow_id": {i.id}%')
-        ).order_by(AgentTrace.id.desc()).first()
-        proposed = _loads(trace.outputs_json).get("model_proposed") if trace else None
+        ).order_by(AgentTrace.id.desc()).all()
+        proposed, decided = None, None
+        for t in trace:
+            outs = _loads(t.outputs_json)
+            if t.tool == "decide_match" and decided is None:
+                decided = {
+                    "reason": outs.get("reason") or t.detail,
+                    "band": outs.get("band"),
+                    "confidence": outs.get("confidence"),
+                    "status": outs.get("status"),
+                    "evidence": outs.get("evidence") or {},
+                }
+            if t.tool == "propose_match":
+                proposed = outs.get("model_proposed") or proposed
         out.append({
             "inflow_id": i.id,
             "amount_minor": i.amount_minor,
@@ -321,7 +334,44 @@ def unmatched_block(s) -> list[dict]:
             "reference_raw": i.reference_raw,
             "match_status": i.match_status.value,
             "model_proposed": proposed,
+            # What CODE concluded. None when the beat that produced this inflow
+            # predates the trace; the UI must then say so rather than invent one.
+            "decided": decided,
         })
+    return out
+
+
+def live_transfer_statuses(s) -> dict[str, str]:
+    """Ask Airwallex what each referenced transfer actually is RIGHT NOW.
+
+    A `plan_step.status` says what WE did (SUBMITTED = we sent it). It says
+    nothing about whether the money moved, and calling a submitted sandbox
+    transfer "paid" is a claim about someone's money that no record supports.
+    The bank is the only authority, so ask it — and fall back to the stored
+    status, clearly labelled, if the call fails.
+    """
+    rows = (s.query(PlanStep)
+            .filter(PlanStep.airwallex_object_id.isnot(None))
+            .order_by(PlanStep.id.desc()).all())
+    ids = {r.airwallex_object_id: r for r in rows}
+    if not ids:
+        return {}
+
+    out: dict[str, str] = {}
+    try:
+        from .airwallex.client import AirwallexClient
+        from .airwallex.transfers import Transfers
+        transfers = Transfers(AirwallexClient())
+    except Exception as exc:  # no credentials, sandbox down
+        log.warning("live status lookup unavailable: %s", exc)
+        return {tid: "UNKNOWN" for tid in ids}
+
+    for tid in ids:
+        try:
+            out[tid] = transfers.status_of(tid) or "UNKNOWN"
+        except Exception as exc:
+            log.warning("status_of failed for %s: %s", tid, exc)
+            out[tid] = "UNKNOWN"
     return out
 
 
@@ -350,6 +400,7 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
 
         suppliers = {sup.id: sup for sup in s.query(Supplier).all()}
         steps = steps_block(s)
+        live_status = live_transfer_statuses(s)
 
         payables = []
         for p in s.query(InvoicePayable).order_by(InvoicePayable.number).all():
@@ -369,6 +420,10 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
                 "stored_status": p.status.value,
                 "step_reason": state.get("reason"),
                 "airwallex_object_id": state.get("airwallex_object_id"),
+                # What the BANK says, not what we recorded. These differ, and
+                # only one of them is a claim about money.
+                "live_status": live_status.get(
+                    state.get("airwallex_object_id") or ""),
             })
 
         rep = reconcile(s)
@@ -380,6 +435,7 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
             "ledger_balanced": rep.balanced,
             "receivables": receivables,
             "payables": payables,
+            "live_transfer_statuses": live_status,
             "approvable": steps["approvable"],
             "problems": steps["problems"],
             "past_attempts": steps["past_attempts"],

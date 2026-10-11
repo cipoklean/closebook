@@ -45,6 +45,16 @@ than a policy check that could be mis-ordered or bypassed.
 | 6 | An ambiguous USD 4,400 from `L. Stores` scores 0.70 and escalates to a human, with the model's proposal, the deterministic re-validation and the escalation shown side by side. |
 | 7 | Reconciled double-entry ledger, unapplied cash shown, reserve floor respected. |
 
+### Every transfer here is sandbox money
+
+Closebook really does move money through the Airwallex **sandbox** — a real API
+call, a real transfer object, a real status — but **no real funds are involved
+and no money can leave this demo**. Where the app shows a payment, it shows the
+status Airwallex reports *right now* (`dashboard.live_transfer_statuses()`),
+not what Closebook recorded. A step we submitted is `SUBMITTED`; only the bank
+can make it `PAID`. The EUR 9,012.85 Rotterdam Freight transfer currently reads
+**PROCESSING** in the sandbox.
+
 ### Honest scope on beat 4
 
 Beat 4 reports **Closebook's policy verdict**, not a real card-network decline.

@@ -16,6 +16,11 @@ from datetime import datetime, timezone
 
 _STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
+# Read for display only — the DECISION is made in domain/matching.py and
+# recorded in agent_trace. Importing the thresholds here lets the page name the
+# real numbers without re-deriving the verdict.
+from .domain.policy import MATCH_CONFIDENCE_AUTO, MATCH_CONFIDENCE_ESCALATE
+
 # --------------------------------------------------------------- helpers
 def e(v) -> str:
     """HTML-escape. Never interpolate a DB value raw."""
@@ -672,9 +677,25 @@ def _home(c: dict) -> str:
             continue
         if st in ("PAID", "SUBMITTED", "APPROVED"):
             icon, cls = _I["check"], "is-good"
-            head = f'{p["number"]} ({p["supplier"] or "supplier"}) is moving'
-            body = (f'{p["currency"]} {money(p["amount_minor"])} — '
-                    f'{st.lower()}. Nothing further needed.')
+            # Never say "paid" for a transfer we have merely sent. The bank's
+            # status is the only thing that settles whether money moved.
+            live = p.get("live_status")
+            if st == "PAID":
+                head = f'{p["number"]} ({p["supplier"] or "supplier"}) is paid'
+                body = (f'{p["currency"]} {money(p["amount_minor"])} — settled '
+                        f'in sandbox.')
+                pill = '<span class="x-pill x-pill--good">Paid</span>'
+            else:
+                head = (f'{p["number"]} ({p["supplier"] or "supplier"}) '
+                        f'is moving')
+                body = (f'{p["currency"]} {money(p["amount_minor"])} sandbox '
+                        f'transfer sent'
+                        + (f' — the bank says {live}.' if live else '.'))
+                pill = (f'<span class="x-pill x-pill--info">{e(live or st)}'
+                        f'</span>')
+            todo.append(f'<li><span class="x-todo-ico {cls}">{icon}</span>'
+                        f'<div><b>{e(head)}</b><p>{e(body)}</p></div>{pill}</li>')
+            continue
         elif st in ("CANCELLED", "FAILED"):
             icon, cls = _I["x"], "is-bad"
             head = f'{p["number"]} ({p["supplier"] or "supplier"}) failed'
@@ -795,23 +816,36 @@ def _money_in(c: dict) -> str:
         what = ", ".join(f'{a.get("invoice_number")} '
                          f'{money(int(float(a.get("amount", 0)) * 100))}'
                          for a in allocs) or "nothing specific"
-        # The reason, derived from the numbers rather than asserted: a shortfall
-        # under the bank-fee tolerance is ambiguous, over it is a part-payment.
-        matched = next((r for r in c["receivables"]
-                        if any(a.get("invoice_number") == r["number"]
-                               for a in allocs)), None)
-        reasons = []
-        if matched:
-            got = int(float((allocs[0].get("amount") or 0) if allocs else 0) * 100)
-            short = matched["amount_minor"] - got
-            reasons.append(f'{money(short)} {matched["currency"]} still outstanding')
-            reasons.append("too small to be a deliberate part-payment")
-            reasons.append("too large to be a bank fee")
-        else:
-            reasons.append("no open invoice matched the proposal")
-            reasons.append("the model could not name a real invoice")
+        # The reasons come from the decision code actually recorded in
+        # agent_trace — NOT recomputed here. A view that re-derives policy is a
+        # second source of truth, and it drifts from the rule that decided.
         conf = float(prop.get("confidence", 0) or 0)
         conf_label = f'{conf:.2f} confident' if conf else "No guess to stand behind"
+
+        decided = u.get("decided") or {}
+        recorded = (decided.get("reason") or "").strip()
+        reasons: list[str] = []
+        if recorded:
+            # The rule's own words, including the shortfall maths it computed.
+            reasons.append(recorded[0].upper() + recorded[1:])
+            if decided.get("band") == "ESCALATE":
+                reasons.append(
+                    f'Below the {MATCH_CONFIDENCE_ESCALATE:.2f} line where a '
+                    f'person must decide.')
+            elif decided.get("band") == "APPROVAL":
+                reasons.append(
+                    f'Between {MATCH_CONFIDENCE_ESCALATE:.2f} and '
+                    f'{MATCH_CONFIDENCE_AUTO:.2f}: applied, but held for approval.')
+        else:
+            # No recorded decision (an inflow from before the trace existed).
+            # Say that. Inventing a reason here would be the exact failure this
+            # whole change exists to stop.
+            reasons.append(
+                "No decision was recorded for this payment — re-run the demo "
+                "beats to see why it was held.")
+        if not u.get("reference_raw"):
+            reasons.append("It arrived with no reference at all.")
+
         un.append(
             '<div class="x-card x-l-card" style="box-shadow:none;background:var(--x-bg)">'
             f'<div class="x-cardhead" style="margin-bottom:8px"><div>'
@@ -868,13 +902,20 @@ def _money_out(c: dict) -> str:
             mark = "✓" if i < idx else (str(i + 1))
             steps.append(f'<li class="{cls}"><i>{mark}</i>'
                          f'<span>{e(label)}</span></li>')
-        done = st in ("PAID",)
-        badge = ('<span class="x-pill x-pill--good">Paid</span>' if done else
-                 '<span class="x-pill x-pill--warn">Held</span>' if st in
-                 ("PROPOSED", "HELD") else
-                 '<span class="x-pill x-pill--bad">' + e(st) + '</span>' if st in
-                 ("FAILED", "CANCELLED") else
-                 f'<span class="x-pill x-pill--info">{e(st)}</span>')
+        done = st == "PAID"
+        live = p.get("live_status")
+        # The badge reports the BANK. A submitted transfer is not a paid one,
+        # and in this project every transfer is sandbox money.
+        if live in ("PAID", "COMPLETED", "SUCCESS"):
+            badge = '<span class="x-pill x-pill--good">Paid</span>'
+        elif live:
+            badge = f'<span class="x-pill x-pill--info">{e(live)}</span>'
+        elif st in ("CANCELLED", "FAILED"):
+            badge = f'<span class="x-pill x-pill--bad">{e(st)}</span>'
+        elif st in ("PROPOSED", "HELD"):
+            badge = '<span class="x-pill x-pill--warn">Held</span>'
+        else:
+            badge = f'<span class="x-pill x-pill--info">{e(st)}</span>'
 
         reason = (p.get("step_reason") or "").strip()
         note = ""
@@ -883,11 +924,19 @@ def _money_out(c: dict) -> str:
             note = (f'<div class="x-callnote" style="margin-top:20px">'
                     f'{_I["info"]}<span>{e(short)}</span></div>')
 
+        # Say what the BANK says. "SUBMITTED" is what we did; it is not a claim
+        # that money moved, and never render it as "paid".
         obj = p.get("airwallex_object_id")
         ref = ""
         if obj:
+            live = p.get("live_status") or "UNKNOWN"
             ref = (f'<div class="x-meta"><span class="x-label">On the bank</span>'
-                   f'<span class="x-tag x-mono">{e(str(obj)[:18])}…</span></div>')
+                   f'<span class="x-tag x-mono">{e(str(obj)[:18])}…</span>'
+                   f'<span class="x-pill x-pill--'
+                   f'{"good" if live in ("PAID", "COMPLETED", "SUCCESS") else ("warn" if live in ("PROCESSING", "PENDING", "SUBMITTED") else "info")}"'
+                   f'>{e(live)}</span></div>'
+                   f'<div class="x-meta"><span class="x-label">Environment</span>'
+                   f'<span class="x-tag">sandbox</span></div>')
 
         # criticality is an int 1-5 on the model; 1 is most urgent.
         crit = int(p["criticality"] or 3)

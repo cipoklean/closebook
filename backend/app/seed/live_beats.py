@@ -28,10 +28,10 @@ from typing import Optional
 
 from ..db import DB
 from ..domain import incidents as inc_mod
-from ..domain.agent_tools import ToolCall
+from ..domain.agent_tools import ToolCall, ToolResult, Verdict
 from ..domain.ledger import apply_inflow_to_receivables, reconcile
 from ..domain.matching import Candidate, match_inflow
-from ..domain.policy import load_budget, usd_value_minor
+from ..domain.policy import classify_confidence, load_budget, usd_value_minor
 from ..models import (
     Customer, Inflow, InvoicePayable, InvoiceReceivable, MatchStatus, PayStatus,
     RecStatus,
@@ -405,6 +405,25 @@ class LiveDemo:
         result = match_inflow(amount, "USD",
                               {"reference": "", "payer_name": "L. Stores"},
                               candidates, llm=_matcher_or_none())
+        # Record the DETERMINISTIC conclusion, not the model's guess. The UI
+        # reads this reason rather than re-deriving one: a view that recomputes
+        # policy is a second source of truth, and it will drift from the rule
+        # that actually decided.
+        trace.record(ToolResult(
+            "decide_match",
+            ok=True,
+            verdict=(Verdict.ESCALATED if result.status == "AMBIGUOUS"
+                     else Verdict.ACCEPTED),
+            output={
+                "status": result.status,
+                "confidence": result.confidence,
+                "band": classify_confidence(result.confidence),
+                "reason": result.reason,
+                "evidence": result.evidence,
+            },
+            inputs={"inflow_id": inflow.id, "amount_minor": amount},
+            detail=result.reason or result.status,
+        ))
         agent.call(ToolCall("explain_decision",
                             {"decision": result.reason or result.status,
                              "evidence": result.evidence}))
