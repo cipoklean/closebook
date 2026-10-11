@@ -499,7 +499,8 @@ class TestReasonIsRecordedNotRecomputed:
         html = render_app(build_context([]), tab="money-in")
         assert "within bank-fee tolerance" in html
         assert "too large to be a bank fee" not in html
-        assert "Between 0.75 and 0.90" in html       # the real band
+        # the band is named as CODE's decision, not the model's score
+        assert "Code: held for approval" in html
 
     def test_below_threshold_reasons_name_the_real_thresholds(self, db):
         self._unmatched(db, decided={
@@ -580,7 +581,14 @@ class TestLlmAllocationUnitsAndShape:
 
     def test_the_matcher_sends_the_keys_the_client_reads(self):
         """KeyError: the payload used amount_minor/payer_name/amount_open_minor
-        while the client reads amount/payer/amount_open."""
+        while the client reads amount/payer/amount_open.
+
+        Hermetic by construction: LLMConfig is built explicitly rather than via
+        from_settings(), so this passes in CI with no .env and no key. Using
+        from_settings() made the test read a developer's real key — present
+        locally, absent in CI, where propose() short-circuits on
+        `cfg.available` and `_call` is never reached.
+        """
         from app.domain.llm import LLMConfig, OpenAICompatibleMatcher
         seen = {}
 
@@ -590,7 +598,11 @@ class TestLlmAllocationUnitsAndShape:
                 seen["cands"] = candidates
                 return {"allocations": {"1": 4_400}, "confidence": 0.75}
 
-        m = Recorder(LLMConfig.from_settings())
+        cfg = LLMConfig(api_key="test-key-not-a-real-secret",
+                        base_url="https://example.invalid/v1",
+                        model="test-model")
+        assert cfg.available, "an explicit key must make the client available"
+        m = Recorder(cfg)
         m.propose({"amount": "4400.00", "currency": "USD", "payer": "L. Stores",
                    "reference": ""},
                   [{"number": "INV-0043", "currency": "USD",
@@ -598,6 +610,81 @@ class TestLlmAllocationUnitsAndShape:
         assert seen["inflow"]["amount"] == "4400.00"
         assert "amount_minor" not in seen["inflow"]
         assert seen["cands"][0]["amount_open"] == "4500.00"
+
+
+def _needs_llm_candidates():
+    """Candidates that deliberately defeat the deterministic tiers, so a match
+    can only come from the LLM tier."""
+    return [_c(1, "INV-9001", "Globex", "USD", 700_000),
+            _c(2, "INV-9002", "Globex", "USD", 500_000)]
+
+
+class TestModelNeverGradesItself:
+    """The model's self-reported confidence must never reach the AUTO band.
+
+    MATCH_CONFIDENCE_AUTO is 0.90 and the comparison is `>=`, so before the fix
+    a model claiming 0.95 (MATCHED) or 0.9 (PARTIAL) landed in AUTO and applied
+    money with no human — the model marking its own homework.
+    """
+
+    def test_the_llm_ceiling_is_strictly_below_the_auto_threshold(self):
+        from app.domain.matching import _LLM_MAX_CONFIDENCE
+        from app.domain.policy import MATCH_CONFIDENCE_AUTO
+        assert _LLM_MAX_CONFIDENCE < MATCH_CONFIDENCE_AUTO, (
+            "the LLM ceiling must stay below the auto threshold, or a model "
+            "can reach the AUTO band by grading itself")
+
+    def test_a_model_claiming_099_matched_is_held_for_approval(self):
+        from app.domain.matching import match_inflow
+        from app.domain.policy import (MATCH_CONFIDENCE_AUTO,
+                                       classify_confidence)
+        r = match_inflow(
+            700_000, "USD", {"payer_name": "", "reference_raw": "batch"},
+            _needs_llm_candidates(),
+            llm=StubLLM({"allocations": {"1": 7_000}, "confidence": 0.99,
+                         "rationale": "certain about this"}))
+        assert r.method == "LLM"
+        assert r.status == "MATCHED"
+        assert r.confidence < MATCH_CONFIDENCE_AUTO
+        assert classify_confidence(r.confidence) == "APPROVAL"
+
+    def test_a_model_claiming_09_partial_is_held_for_approval(self):
+        from app.domain.matching import match_inflow
+        from app.domain.policy import (MATCH_CONFIDENCE_AUTO,
+                                       classify_confidence)
+        r = match_inflow(
+            700_000, "USD", {"payer_name": "", "reference_raw": "batch"},
+            _needs_llm_candidates(),
+            llm=StubLLM({"allocations": {"1": 6_000}, "confidence": 0.9,
+                         "rationale": "close enough"}))
+        assert r.status == "PARTIAL"
+        assert r.confidence < MATCH_CONFIDENCE_AUTO
+        assert classify_confidence(r.confidence) == "APPROVAL"
+
+    def test_the_models_own_number_is_kept_as_a_separate_claim(self):
+        """The number is preserved for display, labelled as the model's claim."""
+        from app.domain.matching import match_inflow
+        r = match_inflow(
+            700_000, "USD", {"payer_name": "", "reference_raw": "batch"},
+            _needs_llm_candidates(),
+            llm=StubLLM({"allocations": {"1": 7_000}, "confidence": 0.99,
+                         "rationale": "certain"}))
+        assert r.evidence["model_claimed_confidence"] == 0.99
+        assert r.confidence != 0.99
+
+    def test_no_llm_result_of_any_confidence_reaches_auto(self):
+        """Sweep the whole plausible range, not just the two reported cases."""
+        from app.domain.matching import match_inflow
+        from app.domain.policy import classify_confidence
+        for claimed in (0.90, 0.91, 0.95, 0.99, 1.0):
+            r = match_inflow(
+                700_000, "USD", {"payer_name": "", "reference_raw": "batch"},
+                _needs_llm_candidates(),
+                llm=StubLLM({"allocations": {"1": 7_000},
+                             "confidence": claimed, "rationale": "r"}))
+            assert classify_confidence(r.confidence) == "APPROVAL", claimed
+            assert classify_confidence(claimed) == "AUTO", \
+                "the claim itself would have been AUTO — that is the bug"
 
 
 class TestSandboxWording:

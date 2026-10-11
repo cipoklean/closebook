@@ -42,8 +42,17 @@ than a policy check that could be mis-ordered or bypassed.
 | 3 | A GBP 4,800 part-payment matches partially — and the dependent payable **stays held**. A part payment is not a settlement. |
 | 4 | Policy verdict: a 7,000.01 authorisation is declined by the inclusive 7,000 limit. **Not a live card decline** — see the caveat below. |
 | 5 | A payout fails. Closebook looks the transfer up on Airwallex before deciding anything, and proposes a **replacement under a duplicate lock with a new request id**. It never auto-pays twice. |
-| 6 | An ambiguous USD 4,400 from `L. Stores` scores 0.70 and escalates to a human, with the model's proposal, the deterministic re-validation and the escalation shown side by side. |
+| 6 | A USD 4,400 deposit arrives from `L. Stores` with **no reference at all**. The model proposes it against `INV-0043` and asserts **0.85 confidence**. Code re-derives every number, applies it, and — because the invoice was 4,500 — leaves **100.00 USD still outstanding**. The result is pinned to the approval band: *a model's own score can never clear a payment.* The page shows the model's claim and code's decision side by side. |
 | 7 | Reconciled double-entry ledger, unapplied cash shown, reserve floor respected. |
+
+### The model does not grade its own work
+
+The model writes a confidence number. It is **its claim, not the verdict**, and
+it is displayed as such. `MATCH_CONFIDENCE_AUTO` is 0.90 and code caps *any*
+model-sourced result at **0.89** (`matching._LLM_MAX_CONFIDENCE`), so an LLM
+proposal can be applied and recorded but can never reach the automatic band —
+regardless of what number it asserts about itself. A test sweeps 0.90–1.00 to
+prove the claim alone would have been AUTO, while the actual result is not.
 
 ### Every transfer here is sandbox money
 

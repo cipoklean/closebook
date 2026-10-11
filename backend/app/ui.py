@@ -819,10 +819,35 @@ def _money_in(c: dict) -> str:
         # The reasons come from the decision code actually recorded in
         # agent_trace — NOT recomputed here. A view that re-derives policy is a
         # second source of truth, and it drifts from the rule that decided.
-        conf = float(prop.get("confidence", 0) or 0)
-        conf_label = f'{conf:.2f} confident' if conf else "No guess to stand behind"
-
         decided = u.get("decided") or {}
+        evidence = decided.get("evidence") or {}
+        conf = float(prop.get("confidence", 0) or 0)
+        # The model's number is ITS CLAIM, not the decision. Code's band is
+        # shown separately and always wins; a model asserting 0.99 about itself
+        # is exactly the thing this page must not present as a verdict.
+        claimed = float(evidence.get("model_claimed_confidence") or 0)
+        if conf:
+            conf_label = f'The model claims {conf:.2f}'
+        elif claimed:
+            conf_label = f'The model claims {claimed:.2f}'
+        else:
+            conf_label = "No guess to stand behind"
+        band = decided.get("band")
+        band_label = {
+            "AUTO": "Code: automatic",
+            "APPROVAL": "Code: held for approval",
+            "ESCALATE": "Code: escalated to a human",
+        }.get(band, "")
+
+        # What is still owed on the invoice this payment touched.
+        still_line = ""
+        for r in c["receivables"]:
+            if r["number"] in (a.get("invoice_number") for a in allocs) \
+                    and r["open_minor"] > 0:
+                still_line = (f'{money(r["open_minor"])} {r["currency"]} of '
+                              f'{r["number"]} is still outstanding')
+                break
+
         recorded = (decided.get("reason") or "").strip()
         reasons: list[str] = []
         if recorded:
@@ -834,8 +859,8 @@ def _money_in(c: dict) -> str:
                     f'person must decide.')
             elif decided.get("band") == "APPROVAL":
                 reasons.append(
-                    f'Between {MATCH_CONFIDENCE_ESCALATE:.2f} and '
-                    f'{MATCH_CONFIDENCE_AUTO:.2f}: applied, but held for approval.')
+                    f'Held for approval: code placed this in the approval band, '
+                    f'not the automatic one.')
         else:
             # No recorded decision (an inflow from before the trace existed).
             # Say that. Inventing a reason here would be the exact failure this
@@ -845,6 +870,8 @@ def _money_in(c: dict) -> str:
                 "beats to see why it was held.")
         if not u.get("reference_raw"):
             reasons.append("It arrived with no reference at all.")
+        if still_line:
+            reasons.append(still_line + ".")
 
         un.append(
             '<div class="x-card x-l-card" style="box-shadow:none;background:var(--x-bg)">'
@@ -854,10 +881,11 @@ def _money_in(c: dict) -> str:
             f'{"no reference" if not u["reference_raw"] else chr(34) + e(u["reference_raw"]) + chr(34)}.</p>'
             '</div><span class="x-pill x-pill--warn">Waiting for you</span></div>'
             '<div class="x-cols" style="margin-bottom:0">'
-            f'<div class="x-col x-col--ai"><div class="x-col-h">{_I["ai"]}The model guessed</div>'
+            f'<div class="x-col x-col--ai"><div class="x-col-h">{_I["ai"]}The model proposed</div>'
             f'<ul><li>{_I["x"]}{e(what)}</li>'
             f'<li>{e(conf_label)}</li></ul></div>'
-            f'<div class="x-col x-col--rules"><div class="x-col-h">{_I["scale"]}Code refused</div>'
+            f'<div class="x-col x-col--rules"><div class="x-col-h">{_I["scale"]}Code decided</div>'
+            + (f'<li>{_I["scale"]}{e(band_label)}</li>' if band_label else "")
             + "".join(f'<li>{_I["x"]}{e(r)}</li>' for r in reasons)
             + '</div></div></div>')
 

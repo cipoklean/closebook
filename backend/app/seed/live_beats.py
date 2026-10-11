@@ -437,13 +437,30 @@ class LiveDemo:
         print("\n  --- agent trace ---")
         print(trace.summary())
         trace.persist(self.db.session())
+
+        # Describe what ACTUALLY happened. The model's proposal was accepted as
+        # a MATCH but the allocation covers only part of INV-0043, so the
+        # invoice stays short and the payment is held for a human — it was not
+        # "escalated" in the sense of "rejected", and saying so would misstate
+        # both the outcome and the remaining balance.
+        inv43 = (s.query(InvoiceReceivable)
+                 .filter_by(number="INV-0043").first())
+        band = classify_confidence(result.confidence)
+        still_due = ((inv43.amount_minor - inv43.amount_paid_minor) / 100
+                     if inv43 else 0)
+        outcome = (
+            f"applied to INV-0043, but {still_due:,.2f} USD of the 4,500.00 "
+            f"invoice is still outstanding, so the payment is HELD for a human"
+            if inv43 and still_due > 0 else
+            "fully applied and settled")
         self._record(beat, escalated,
-                     f"USD {amount/100:,.2f} from 'L. Stores' — model proposed "
-                     f"({proposal.tool}: {proposal.detail or 'a match'}); "
-                     f"code re-validated to {result.method}/{result.status} "
-                     f"conf={result.confidence:.2f}; recorded as "
-                     f"{inflow.match_status.value} -> "
-                     f"{'ESCALATED to a human' if escalated else 'settled (BUG)'}")
+                     f"USD {amount/100:,.2f} from 'L. Stores' (no reference) — "
+                     f"the model proposed {result.status} at "
+                     f"{result.evidence.get('model_claimed_confidence', 0):.2f} "
+                     f"confidence, which is its own claim; code re-validated "
+                     f"every number and pinned the band to {band} "
+                     f"(model results never auto-apply). Outcome: {outcome}. "
+                     f"Recorded as {inflow.match_status.value}.")
 
     # ---- beat 7: reconcile -------------------------------------------
     def beat_close(self) -> None:

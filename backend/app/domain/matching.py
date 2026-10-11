@@ -28,8 +28,19 @@ from typing import Any, Callable, Iterable, Optional, Protocol
 
 from ..money import minor_for, to_major_str, to_minor
 from .policy import (
-    MATCH_CONFIDENCE_AUTO, MATERIAL_SHORT_THRESHOLD, within_bank_fee_tolerance,
+    MATCH_CONFIDENCE_AUTO, MATCH_CONFIDENCE_ESCALATE, MATERIAL_SHORT_THRESHOLD,
+    within_bank_fee_tolerance,
 )
+
+# The ceiling for ANY result sourced from the model.
+#
+# MATCH_CONFIDENCE_AUTO is 0.90 and the comparison is `>=`, so a model claiming
+# 0.95 (or a PARTIAL claiming 0.9) would land in the AUTO band and apply money
+# with no human — the model having graded its own homework. This must stay
+# STRICTLY BELOW the auto threshold, and it is asserted against the threshold in
+# `tests/test_matching.py` so a future policy change cannot quietly reopen the
+# hole.
+_LLM_MAX_CONFIDENCE = 0.89
 
 # ---- text normalisation --------------------------------------------------
 # Banks and humans corrupt identifiers: O/0, I/1/l, dashes/spaces/underscores.
@@ -496,29 +507,48 @@ def try_llm(inflow_amount_minor: int, inflow_currency: str,
         cleaned.append(Allocation(inv_id, amt))
         total += amt
 
+    # A MODEL NEVER GRADES ITS OWN WORK.
+
+    # `conf` is the number the model wrote about itself. It is not evidence: a
+    # model that says 0.99 about a wrong reading is still wrong, and letting
+    # its self-assessment reach MATCH_CONFIDENCE_AUTO (0.90, inclusive) means a
+    # fabricated 0.95 pays money with nobody looking.
+
+    # So every LLM-sourced result is pinned into the APPROVAL band: high enough
+    # to be applied and recorded, never high enough to move on its own. The
+    # model's number is kept as `model_confidence` — the CLAIM — while
+    # `confidence` is the band's decision, which code owns.
+    #
+    # This is the whole thesis in one line: the model proposes, code decides.
+    llm_band_conf = min(conf, _LLM_MAX_CONFIDENCE)   # 0.89 < 0.90 by construction
+
     if total != inflow_amount_minor:
         # Over-allocation becomes a recorded credit; under-allocation is a
         # partial. Neither is silently accepted as exact.
         if total > inflow_amount_minor:
-            status, conf = "OVERPAID", min(conf, 0.9)
+            status = "OVERPAID"
             credit = total - inflow_amount_minor
         else:
-            status, conf = "PARTIAL", min(conf, 0.9)
+            status = "PARTIAL"
             credit = 0
         return MatchResult(
-            status=status, allocations=cleaned, confidence=conf, method="LLM",
+            status=status, allocations=cleaned, confidence=llm_band_conf,
+            method="LLM",
             shortfall_minor=(inflow_amount_minor - total) if status == "PARTIAL" else 0,
             credit_minor=credit,
             evidence={"rule": "allocations do not sum to the inflow",
                       "allocated": total, "inflow": inflow_amount_minor,
+                      "model_claimed_confidence": conf,
                       "rationale": rationale},
             reason=f"model allocations {'over' if credit else 'under'}-allocate the inflow",
         )
 
     return MatchResult(
-        status="MATCHED", allocations=cleaned, confidence=min(conf, 0.95),
-        method="LLM", evidence={"rule": "LLM proposal re-validated in code",
-                                "rationale": rationale},
+        status="MATCHED", allocations=cleaned, confidence=llm_band_conf,
+        method="LLM",
+        evidence={"rule": "LLM proposal re-validated in code",
+                  "model_claimed_confidence": conf,
+                  "rationale": rationale},
         reason=rationale or "model reading confirmed by code re-validation",
     )
 
