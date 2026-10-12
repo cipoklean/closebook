@@ -67,30 +67,35 @@ class Issuing:
             limits.append({"interval": "ALL_TIME",
                            "amount": to_major_str(all_time_limit_minor, currency)})
 
-        # Shape confirmed against the Airwallex docs MCP plus live probing.
-        # `program` is a mandatory OBJECT and the field that matters is
-        # `program.purpose`: a BUSINESS sandbox rejects purpose=CONSUMER with
-        # "CONSUMER program is not allowed for this account". COMMERCIAL is the
-        # right value. `purpose` at the TOP level means something else (what the
-        # card is for) and is only accepted alongside issue_to=ORGANISATION.
+        # Shape confirmed against the Airwallex docs MCP, live probing, and
+        # finally by Airwallex Developer Help.
+        #
+        # The 400 `invalid_request: Invalid issuance details` was OURS, not an
+        # account entitlement. Airwallex Dev Help identified the cause: a
+        # DELEGATE cardholder cannot hold a PERSONALIZED card. `is_personalized`
+        # must be false for DELEGATE; personalized cards require an INDIVIDUAL
+        # cardholder. We keep DELEGATE (it is what the spend controls attach to),
+        # so the card is non-personalized.
+        #
+        # `program` carries ONLY `purpose`. COMMERCIAL is the value a BUSINESS
+        # sandbox accepts; purpose=CONSUMER is rejected with "CONSUMER program
+        # is not allowed for this account". A TOP-level `purpose` is a different
+        # field (what the card is for) and is only meaningful with issue_to,
+        # which is removed below.
+        #
+        # `issue_to` is omitted entirely: it is not required, and it was what
+        # forced the top-level `purpose` field that in turn produced
+        # "Purpose can only be set when card issue_to is set to ORGANISATION".
         #
         # `primary_contact_details` is documented in the MCP examples but is
         # REJECTED live: "primary_contact_details is no longer supported, please
         # use cardholder_id instead". The docs are stale here; the error wins.
-        #
-        # With this exact shape the sandbox still returns
-        # `invalid_request: Invalid issuance details` — an account-level issuing
-        # restriction (the same account also returns "Admin permissions
-        # required" for /issuing/balances and /issuing/programs). Cardholder
-        # creation succeeds, so the credentials and endpoint are fine; only card
-        # issuance is gated. That needs Airwallex to enable it.
         body: dict = {
             "request_id": request_id,
             "cardholder_id": cardholder_id,
             "form_factor": "VIRTUAL",
-            "issue_to": "ORGANISATION",
             "created_by": "Closebook",
-            "is_personalized": True,
+            "is_personalized": False,
             "program": {
                 "purpose": "COMMERCIAL",
             },

@@ -289,23 +289,30 @@ class LiveDemo:
     def beat_card_decline(self) -> None:
         """Authorize 7,000.01 against a 7,000 limit.
 
-        HONEST SCOPE: this beat reports CLOSEBOOK'S POLICY VERDICT. It is not a
-        live card-network decline, because no card can be created on this
-        sandbox.
+        HONEST SCOPE: this beat reports CLOSEBOOK'S POLICY VERDICT. It is NOT a
+        live card-network decline, because no card exists on this account.
 
-        Live card issuance was retried with the commercial program after the
-        earlier CONSUMER rejection. The payload is now correct —
-        `program.purpose: COMMERCIAL`, `issue_to: ORGANISATION`,
-        `is_personalized`, limits nested under `authorization_controls`, and
-        NO `primary_contact_details` (the docs still show it but the API
-        rejects it as unsupported). Cardholder creation SUCCEEDS and returns
-        READY, so credentials and the endpoint are fine.
+        Airwallex Dev Help attributed our 400 `Invalid issuance details` to
+        `is_personalized: true` on a DELEGATE cardholder, so the payload was
+        corrected to `is_personalized: false`, `program: {purpose: COMMERCIAL}`
+        only, and no `issue_to`. The error was UNCHANGED, and an INDIVIDUAL
+        cardholder — the type Dev Help said personalized cards require — fails
+        identically, so the cardholder type is not the cause.
 
-        Card creation still fails with `invalid_request: Invalid issuance
-        details`, and the same account returns "Admin permissions required" for
-        /issuing/balances and /issuing/programs — an account-level issuing
-        restriction, not a payload bug. The simulation endpoint requires a real
-        card_id, so there is nothing to authorise against.
+        What the probes did establish, by elimination:
+          - Every required field is read: removing one returns a NAMED error
+            (`created_by is mandatory`, `limits field is required`, ...), so the
+            body is being parsed field by field and is not malformed.
+          - `program: CONSUMER` is refused outright for this account.
+          - `COMMERCIAL` rejects both values of `is_personalized` with the same
+            generic error and an EMPTY `source`.
+          - `/issuing/programs`, `/issuing/balances` AND
+            `/issuing/cards/create/schema` all return "Admin permissions
+            required".
+
+        That pattern is an account-level issuing entitlement, not a payload bug.
+        The simulation endpoint needs a real card_id, so there is nothing to
+        authorise against and no decline was ever returned.
 
         Stated plainly rather than dressed up: a synthetic decline is not
         evidence that our policy is enforced.
@@ -320,9 +327,14 @@ class LiveDemo:
                      f"{'ALLOWS (BUG)' if allowed else 'DECLINES'}; "
                      f"USD {within/100:,.2f} would be allowed "
                      f"(limit is inclusive per transaction). "
-                     f"No live card: the sandbox blocks card issuance for this "
-                     f"account (invalid_request 'Invalid issuance details' with "
-                     f"the correct commercial payload; cardholders create fine).")
+                     f"No live card: card creation returns invalid_request "
+                     f"'Invalid issuance details'. The Dev Help fix "
+                     f"(is_personalized false, program COMMERCIAL only, no "
+                     f"issue_to) was applied and the error was unchanged, and "
+                     f"an INDIVIDUAL cardholder fails identically — so the "
+                     f"cardholder type is not the cause. Cardholders create "
+                     f"fine; every issuing-management endpoint returns 'Admin "
+                     f"permissions required'. Awaiting Airwallex.")
 
     # ---- beat 5: failure recovery on a real transfer -------------------
     def beat_failure_recovery(self) -> None:

@@ -153,11 +153,19 @@ BEATS: list[DemoBeat] = [
         inject='card USD 7000 limit; authorize 7000.01',
         expect="Policy verdict: the 7,000.01 authorisation is DECLINED by "
                "Closebook's inclusive per-transaction limit (7,000.00 would "
-               "pass). NOTE: this is our policy verdict, not a live card "
-               "decline — commercial card issuance is blocked for this sandbox "
-               "account ('Invalid issuance details'; the same account returns "
-               "'Admin permissions required' for /issuing/balances), so no card "
-               "exists and no authorisation was simulated against Airwallex.",
+               "pass). NOTE: this is our policy verdict, NOT a live card "
+               "decline. No card exists on this sandbox account, so nothing "
+               "was authorised against Airwallex and no decline was returned. "
+               "Card CREATION fails with 'Invalid issuance details'. Airwallex "
+               "Dev Help attributed that to is_personalized on a DELEGATE "
+               "cardholder; the payload was corrected and the error was "
+               "unchanged, and an INDIVIDUAL cardholder fails identically — so "
+               "the cardholder type is not the cause. /issuing/programs, "
+               "/issuing/balances and /issuing/cards/create/schema all return "
+               "'Admin permissions required', so this looks like an "
+               "account-level issuing entitlement that Airwallex must enable. "
+               "See docs/AIRWALLEX_CARD_ISSUING_REQUEST.md and "
+               "scripts/probe_card_create.py.",
     ),
     DemoBeat(
         "failure_recovery",

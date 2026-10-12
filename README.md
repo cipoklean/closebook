@@ -67,20 +67,31 @@ can make it `PAID`. The EUR 9,012.85 Rotterdam Freight transfer currently reads
 ### Honest scope on beat 4
 
 Beat 4 reports **Closebook's policy verdict**, not a real card-network decline.
-Live card issuance was retried with the commercial program after an earlier
-`CONSUMER` rejection, and the payload is now correct: `program.purpose:
-COMMERCIAL`, `issue_to: ORGANISATION`, `is_personalized`, limits nested under
-`authorization_controls`, and no `primary_contact_details` (the docs still show
-it, but the API rejects it as unsupported). **Cardholder creation succeeds** and
-returns `READY`, so credentials and the endpoint are fine.
+**Cardholder creation succeeds** and returns `READY`, so credentials and the
+endpoint are fine.
 
-Card creation still fails with `invalid_request: Invalid issuance details`, and
-the same account returns *"Admin permissions required"* for `/issuing/balances`
-and `/issuing/programs` — an account-level issuing restriction, not a payload
-bug. The simulation endpoint requires a real `card_id`, so there is nothing to
-authorise against. No card was issued and no decline was returned by Airwallex. A
-synthetic decline would not be evidence that our policy is enforced, so it is not
-described as one.
+Card creation fails with `invalid_request: Invalid issuance details`.
+Airwallex Dev Help attributed this to `is_personalized: true` on a `DELEGATE`
+cardholder, so the payload was corrected — `is_personalized: false`, `program`
+reduced to `{"purpose": "COMMERCIAL"}`, `issue_to` removed entirely. **The error
+was unchanged.** An `INDIVIDUAL` cardholder — the type Dev Help said
+personalized cards require — was then created and carded against, and it fails
+identically, so the cardholder type is not the cause.
+
+The payload is not malformed: removing any required field returns a *named*
+error (`created_by is mandatory`, `limits field is required`), so the body is
+parsed field by field. Every *management* endpoint is gated —
+`/issuing/balances`, `/issuing/programs` and `/issuing/cards/create/schema` all
+return *"Admin permissions required"*. That pattern is an account-level issuing
+entitlement, not a payload bug, and it is with Airwallex.
+
+The simulation endpoint requires a real `card_id`, so there is nothing to
+authorise against. No card was issued and **no decline was returned by
+Airwallex** — so the caveat stays. A synthetic decline would not be evidence
+that our policy is enforced, and is not described as one.
+
+Full evidence: `docs/AIRWALLEX_CARD_ISSUING_REQUEST.md`, reproducible with
+`scripts/probe_card_create.py` and `scripts/probe_card_fields.py`.
 
 ---
 
