@@ -559,6 +559,16 @@ def try_llm(inflow_amount_minor: int, inflow_currency: str,
             evidence={"rule": "allocations do not sum to the inflow",
                       "allocated": total, "inflow": inflow_amount_minor,
                       "model_claimed_confidence": conf,
+                      # What the model proposed, as re-validated. The AI-activity
+                      # screen reads this; without it a run whose allocation the
+                      # code just ACCEPTED was displayed as "the model proposed
+                      # nothing", which is the exact confusion that screen exists
+                      # to prevent.
+                      "allocations": [
+                          {"invoice": by_id[a.invoice_id].number,
+                           "amount": to_major_str(a.amount_minor, inflow_currency)}
+                          for a in cleaned
+                      ],
                       "rationale": rationale},
             reason=f"model allocations {'over' if credit else 'under'}-allocate the inflow",
         )
@@ -568,6 +578,14 @@ def try_llm(inflow_amount_minor: int, inflow_currency: str,
         method="LLM",
         evidence={"rule": "LLM proposal re-validated in code",
                   "model_claimed_confidence": conf,
+                  # What the model proposed, as re-validated. The AI-activity
+                  # screen reads this; without it a run whose allocation the code
+                  # just ACCEPTED displayed as "the model proposed nothing".
+                  "allocations": [
+                      {"invoice": by_id[a.invoice_id].number,
+                       "amount": to_major_str(a.amount_minor, inflow_currency)}
+                      for a in cleaned
+                  ],
                   "rationale": rationale},
         reason=rationale or "model reading confirmed by code re-validation",
     )

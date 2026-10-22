@@ -69,6 +69,7 @@ a { color: inherit; }
 .x-pill--bad { background: var(--x-bad-t); color: var(--x-bad); }
 .x-pill--info { background: var(--x-info-t); color: var(--x-info); }
 .x-pill--accent { background: var(--x-accent-t); color: var(--x-accent-ink); }
+.x-pill--plain { background: transparent; border: 1px solid var(--x-line-2); color: var(--x-soft); }
 .x-pill--off { background: transparent; border: 1px dashed var(--x-line-2); color: var(--x-faint); text-decoration: line-through; }
 .x-pills { display: flex; flex-wrap: wrap; gap: 8px; }
 

@@ -19,6 +19,7 @@ _STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 # Read for display only — the DECISION is made in domain/matching.py and
 # recorded in agent_trace. Importing the thresholds here lets the page name the
 # real numbers without re-deriving the verdict.
+from .domain.matching import _LLM_MAX_CONFIDENCE as _LLM_CAP
 from .domain.policy import MATCH_CONFIDENCE_AUTO, MATCH_CONFIDENCE_ESCALATE
 # ONE display formatter for every amount, so no view can invent its own shape
 # ("3200 GBP" vs "USD 2,500.00" both appeared on this page).
@@ -1473,51 +1474,90 @@ def _ai(c: dict) -> str:
         ins = t["inputs"]
         outs = t["outputs"]
         prop = outs.get("model_proposed")
-        if t["tool"] == "propose_match":
+        is_model_call = t["tool"] == "propose_match"
+        # WHICH model answered is not decoration: there is a primary and a
+        # fallback, and "the model said X" is worth much less if you cannot tell
+        # whether the one you configured is the one that replied. A trace that
+        # never calls a model (the code's own decisions) must not claim one is
+        # missing — that is a false alarm about the configuration.
+        item = {"verdict": t["verdict"], "model": (str(ins.get("model") or "")
+                                                   if is_model_call else "")}
+
+        if is_model_call:
+            # The amount is `amount_minor` on the trace. Reading `amount` (which
+            # is not there) rendered every call as "0.00 USD" — a wrong number on
+            # the page next to a right one.
+            amt = int(ins.get("amount_minor") or 0)
+            if not amt:
+                amt = int(float(ins.get("amount") or 0) * 100)
             what = "a payment that needs matching"
-            if ins.get("payer") or ins.get("amount"):
+            if ins.get("payer") or amt:
+                # ONE display formatter for money across the whole app —
+                # `money_str` renders "USD 4,400.00" everywhere else, so the
+                # AI feed must not be the one screen that says "4,400.00 USD".
                 what = (f'{e(ins.get("payer") or "a payer")} — '
-                        f'{money(int(float(ins.get("amount") or 0) * 100))} '
-                        f'{e(ins.get("currency") or "")}'.strip())
+                        f'{money_str(amt, ins.get("currency") or "USD")}').strip()
+            claim = float((prop or {}).get("confidence") or 0)
+
             if prop and prop.get("allocations"):
                 says = " · ".join(
                     f'{a.get("invoice_number")} '
                     f'{money(int(float(a.get("amount") or 0) * 100))}'
                     for a in prop["allocations"])
+                reply = (f'I think this is <b>{e(says)}</b> — about '
+                         f'{claim:.2f} confident.')
+                # WHAT THE MODEL CLAIMED IS NOT WHAT THE SYSTEM USED. The claim
+                # is capped below the AUTO band before it can matter, so showing
+                # only the claim put 0.90 on the page next to a decision made at
+                # 0.89 with nothing to explain the gap.
+                conf_label = (f'claimed {claim:.2f} · capped to {_LLM_CAP:.2f} by code'
+                              if claim > _LLM_CAP else f'{claim:.2f} confident')
             else:
-                says = outs.get("explanation") or "nothing it could stand behind"
-            ai_msg = (f'I think this is <b>{e(says)}</b>'
-                      + (f' — about {float(prop.get("confidence") or 0):.2f} confident.'
-                         if prop else '.'))
-            rule_msg = (t["detail"] or outs.get("explanation") or
-                        "Checked every number against the open invoices.")
-            conf = float(prop.get("confidence", 0) or 0) if prop else 0
-            conf_label = f'{conf:.2f} confident' if conf else "No guess"
-            items.append((what, ai_msg, rule_msg, t["verdict"], conf_label))
+                # A confidence number attached to "it could stand behind
+                # nothing" reads as a CONFIDENT REFUSAL, which is not what
+                # happened. Keep the number, drop the misreading.
+                reply = "<b>I cannot stand behind any reading of this one.</b>"
+                if claim:
+                    reply += f' It put its own certainty at {claim:.2f}.'
+                conf_label = f'claimed {claim:.2f}' if claim else "No guess"
+            item.update(what=what, ai=reply, rules=(
+                t["detail"] or outs.get("explanation")
+                or "Checked every number against the open invoices."),
+                conf=conf_label)
         elif t["tool"] == "explain_decision":
-            items.append((outs.get("explanation") or "Explained a decision.",
-                          "I only explain. I do not decide.",
-                          "The reason is whatever the code recorded.",
-                          t["verdict"], ""))
+            item.update(what=outs.get("explanation") or "Explained a decision.",
+                        ai="I only explain. I do not decide.",
+                        rules="The reason is whatever the code recorded.",
+                        conf="")
         else:
-            items.append((f'Tool: {e(t["tool"])}',
-                          "Checked the books and answered.",
-                          t["detail"] or "No further detail.", t["verdict"], ""))
+            item.update(what=f'Tool: {e(t["tool"])}',
+                        ai="Checked the books and answered.",
+                        rules=t["detail"] or "No further detail.", conf="")
+        items.append(item)
 
     feed = []
-    for what, ai_msg, rule_msg, verdict, conf in items:
-        good = verdict == "accepted"
-        conf_pill = (f'<span class="x-pill x-pill--off">{e(conf)}</span>'
-                     if conf else "")
+    for it in items:
+        good = it["verdict"] == "accepted"
+        conf_pill = (f'<span class="x-pill x-pill--plain">{e(it["conf"])}</span>'
+                     if it["conf"] else "")
+        if it["model"]:
+            model_pill = (f'<span class="x-pill x-pill--plain" title="model used">'
+                          f'{e(it["model"])}</span>')
+        elif it["what"].startswith("Tool:") or it["ai"].startswith("I only explain"):
+            model_pill = ""
+        else:
+            model_pill = ('<span class="x-pill x-pill--warn">no model configured'
+                          '</span>')
         feed.append(
             '<li>'
             f'<div class="x-msg x-msg--ai"><span class="x-av x-av--ai">{_I["ai"]}</span>'
-            f'<div><span class="x-bubble"><b class="x-who">The model</b>{ai_msg}</span>'
+            f'<div><span class="x-bubble"><b class="x-who">The model</b>{it["ai"]}</span>'
             f'<div class="x-aifoot"><span class="x-pill x-pill--'
-            f'{"accent" if good else "warn"}">{e(verdict)}</span>{conf_pill}'
-            f'<span>about {e(what)}</span></div></div></div>'
+            f'{"accent" if good else "warn"}">{e(it["verdict"])}</span>{conf_pill}'
+            f'{model_pill}<span>about {e(it["what"])}</span></div></div></div>'
             f'<div class="x-msg x-msg--rules"><span class="x-av x-av--rules">{_I["scale"]}</span>'
-            f'<div><span class="x-bubble"><b class="x-who">The rules</b>{e(rule_msg)}</span></div></div>'
+            f'<div><span class="x-bubble"><b class="x-who">The rules</b>'
+            f'{e(it["rules"])}</span></div></div>'
             '</li>')
 
     body = "".join(feed) if feed else '<p class="x-empty">No model calls yet.</p>'

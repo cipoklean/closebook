@@ -1527,3 +1527,135 @@ class TestAmountsAllReadTheSameWay:
         # and the display formatter is the opposite on both counts
         assert money_str(320_000, "GBP") == "GBP 3,200.00"
         assert money_str(123_456_789, "USD") == "USD 1,234,567.89"
+
+
+class TestAiActivityNamesTheModelAndTheCap:
+    """`0.90` on the page next to a decision made at `0.89` is a puzzle.
+
+    The model's self-reported confidence is capped below the AUTO band before it
+    can matter, so showing only the claim leaves a reader unable to explain the
+    gap. With a primary AND a fallback model configured, "the model said X" is
+    also worth much less if the page never says WHICH model replied.
+    """
+
+    def _trace(self, claimed: float, model: str, verdict="accepted",
+               allocations=None):
+        """A REAL proposal by default: the cap note belongs on a claim that
+        actually became a decision, which is the case that matters."""
+        if allocations is None:
+            allocations = [{"invoice_number": "INV-1003", "amount": 4400}]
+        with session_scope() as s:
+            s.add(AgentTrace(
+                tool="propose_match", verdict=verdict,
+                inputs_json=json.dumps({
+                    "inflow_id": 1, "amount_minor": 440_000, "currency": "USD",
+                    "payer": "Apex Factors Ltd",
+                    "reference_raw": "settling the lumen balance",
+                    "model": model}),
+                outputs_json=json.dumps({"model_proposed": {
+                    "allocations": allocations, "confidence": claimed,
+                    "rationale": "names lumen on INV-1003"}}),
+                detail="the model claimed %.2f. Code pinned it." % claimed))
+
+    def test_the_page_says_which_model_answered(self):
+        self._trace(0.9, "nvidia/nemotron-3.5-lightning-30b-a3b")
+        html = render_app(build_context([]), tab="ai")
+        assert "nvidia/nemotron-3.5-lightning-30b-a3b" in html
+
+    def test_a_claim_above_the_cap_shows_the_claim_AND_the_cap(self):
+        self._trace(0.9, "nvidia/nemotron-3.5-lightning-30b-a3b")
+        html = render_app(build_context([]), tab="ai")
+        assert "claimed 0.90" in html
+        assert "capped to 0.89" in html
+
+    def test_a_claim_below_the_cap_is_not_dressed_up_with_a_cap_note(self):
+        """Else the note becomes noise on every honest low-confidence answer."""
+        self._trace(0.55, "deepseek-ai/deepseek-v4.1-flash")
+        html = render_app(build_context([]), tab="ai")
+        assert "0.55 confident" in html
+        assert "capped to" not in html
+        assert "deepseek-ai/deepseek-v4.1-flash" in html
+
+    def test_a_call_with_no_model_named_says_so_rather_than_nothing(self):
+        self._trace(0.9, "")
+        html = render_app(build_context([]), tab="ai")
+        assert "no model configured" in html
+
+    def test_the_amount_shown_is_the_real_amount_not_zero(self):
+        """The trace carries `amount_minor`; reading a key that is not there
+        rendered every call as "0.00 USD" — a wrong number beside a right one."""
+        self._trace(0.9, "m")
+        html = render_app(build_context([]), tab="ai")
+        assert "USD 4,400.00" in html
+        assert "0.00 USD" not in html
+
+    def test_a_refusal_is_not_reported_as_a_confident_answer(self):
+        """No allocation + "about 0.90 confident" reads as a CONFIDENT REFUSAL,
+        which is not what happened. The claim is kept, the misreading dropped."""
+        self._trace(0.9, "m", allocations=[])
+        html = render_app(build_context([]), tab="ai")
+        assert "cannot stand behind any reading" in html
+        assert "about 0.90 confident" not in html
+        assert "It put its own certainty at 0.90" in html
+
+    def test_a_trace_that_never_calls_a_model_does_not_cry_missing_model(self):
+        """`decide_match` is the CODE deciding. Claiming "no model configured"
+        on it is a false alarm about the deployment."""
+        with session_scope() as s:
+            s.add(AgentTrace(
+                tool="decide_match", verdict="escalated",
+                inputs_json=json.dumps({"inflow_id": 1}),
+                outputs_json=json.dumps({"status": "AMBIGUOUS",
+                                         "confidence": 0.0,
+                                         "reason": "nothing to go on"}),
+                detail="nothing to go on"))
+        html = render_app(build_context([]), tab="ai")
+        assert "no model configured" not in html
+
+
+class TestTheTraceShowsWhatTheModelActuallyProposed:
+    """The AI screen reads `evidence["allocations"]`, which `try_llm` never set.
+
+    So a run whose allocation the code had just ACCEPTED was displayed as
+    "the model proposed nothing" — the exact confusion that screen exists to
+    prevent, and it made the accepted case look identical to the refused one.
+    """
+
+    def test_the_llm_success_evidence_carries_the_allocation(self):
+        from app.domain.matching import try_llm
+        from app.domain.matching import Candidate
+
+        class Stub:
+            last_error = None
+            def propose(self, inflow, cands):
+                return {"allocations": [{"invoice_number": "INV-1003",
+                                         "amount": 4400}],
+                        "confidence": 0.9,
+                        "rationale": "names lumen on INV-1003"}
+
+        r = try_llm(440_000, "USD",
+                    {"payer_name": "Apex Factors Ltd",
+                     "reference_raw": "settling the lumen balance"},
+                    [Candidate(3, "INV-1003", "Lumen Stores", "USD",
+                               amount_open_minor=440_000,
+                               amount_original_minor=440_000)],
+                    llm=Stub())
+        assert r.status == "MATCHED", r.reason
+        allocs = r.evidence.get("allocations")
+        assert allocs == [{"invoice": "INV-1003", "amount": "4400"}], \
+            "the screen reads this key; an absent key reads as 'proposed nothing'"
+
+    def test_a_refusal_records_no_allocation(self):
+        from app.domain.matching import try_llm, Candidate
+
+        class Stub:
+            last_error = None
+            def propose(self, inflow, cands):
+                return {"allocations": [], "confidence": 0.0, "rationale": "no idea"}
+
+        r = try_llm(440_000, "USD", {"payer_name": "?", "reference_raw": "?"},
+                    [Candidate(3, "INV-1003", "Lumen Stores", "USD",
+                               amount_open_minor=440_000,
+                               amount_original_minor=440_000)], llm=Stub())
+        assert r.status == "AMBIGUOUS"
+        assert not (r.evidence or {}).get("allocations")

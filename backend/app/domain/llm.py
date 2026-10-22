@@ -187,9 +187,21 @@ Reply with JSON only, in exactly this shape:
   "rationale": "one sentence"}}
 
 Rules:
-- `amount` values must sum EXACTLY to the payment amount.
+- An allocation's `amount` is what YOU believe that invoice was paid. It does NOT
+  have to equal the invoice's open amount. A PART-PAYMENT is normal, and
+  allocating LESS than the open amount is allowed and expected.
+- Only the allocations TOGETHER must sum EXACTLY to the payment amount. One
+  invoice paid in part is: a single allocation of the full payment amount.
+- Do not reject a payment merely because its amount differs from every open
+  balance. If the reference or the payer points at one invoice, say so and
+  allocate the whole payment to it. Reading a reference is the job.
 - Only use invoice numbers listed above.
-- If you are not confident, return {{"allocations": [], "confidence": 0.0}}.
+- `confidence` must be a number between 0 and 1. Use a low number when the only
+  evidence is one vague word; use a higher one when the reference names the
+  invoice or the payer is clearly that customer.
+- If nothing in the payment points at any invoice, return
+  {{"allocations": [], "confidence": 0.0}} — an honest "I cannot tell" is worth
+  more than a guess.
 - Never invent an invoice, an amount, or a currency."""
 
 
