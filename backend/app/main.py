@@ -29,7 +29,7 @@ from .airwallex.webhooks import WebhookHandler
 from .config import get_settings
 from .db import DB, get_db, get_default_db
 from .domain.incidents import Incident, Recovery, handle_event, parse_payload
-from .models import InvoicePayable, InvoiceReceivable
+from .models import Inflow, InvoicePayable, InvoiceReceivable
 
 log = logging.getLogger("closebook")
 logging.basicConfig(level="INFO", force=True)
@@ -41,15 +41,40 @@ app = FastAPI(title="Closebook", version="0.1.0")
 # Serve the stylesheet. `html=False` is deliberately omitted so the page is
 # usable with JS off; the only script is a small enhancement layer.
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
-_db = DB()
+# ONE handle to the book, resolved PER CALL.
+#
+# `_db = DB()` created a second engine alongside the module-level default, and
+# `_db = get_default_db()` at import time captured whatever existed then, so any
+# reset of the default (a script, a test) left the routes reading a different
+# database than the code they called. In production both pointed at the same
+# file so it never showed; in a test the routes saw an empty book and every
+# lookup answered "no longer exists".
 _settings = get_settings()
-_webhooks = WebhookHandler(_db, _settings.awx_webhook_secret.get_secret_value())
+# The webhook handler is long-lived, so it is rebuilt whenever the default DB
+# changes underneath it.
+_webhook_db = None
+_webhooks = None
 # Lazy: resolving the Airwallex client touches .env credentials, and importing
 # main.py must not require live credentials (tests import it).
 _transfers = None
 # Incidents raised by processed webhooks, newest last. In-memory on purpose —
 # this is a demo view; incidents are also written to plan_step/transfer state.
 INCIDENTS: list[Incident] = []
+
+
+def _database():
+    """The app's single database handle, resolved fresh each time."""
+    return get_default_db()
+
+
+def _webhook_handler() -> WebhookHandler:
+    global _webhooks, _webhook_db
+    db = _database()
+    if _webhooks is None or _webhook_db is not db:
+        _webhooks = WebhookHandler(
+            db, _settings.awx_webhook_secret.get_secret_value())
+        _webhook_db = db
+    return _webhooks
 
 
 def _transfer_client():
@@ -74,7 +99,7 @@ def healthz() -> dict:
 def state() -> dict:
     """Read-only snapshot for the dashboard (balances come from the cache,
     not a live API call, so the view stays deterministic)."""
-    with _db.session() as s:
+    with _database().session() as s:
         recs = s.query(InvoiceReceivable).all()
         pays = s.query(InvoicePayable).all()
         return {
@@ -109,7 +134,7 @@ def pending_approvals() -> list[dict]:
     """Steps awaiting a human decision, with the terms they would bind."""
     from .models import Approval, ApprovalStatus, PlanStep
 
-    with _db.session() as s:
+    with _database().session() as s:
         steps = (s.query(PlanStep)
                  .filter(PlanStep.airwallex_object_id.is_(None))
                  .order_by(PlanStep.id.desc()).limit(25).all())
@@ -170,7 +195,7 @@ async def approve(step_id: int, request: Request) -> dict:
         return {"detail": "DEMO_APPROVER_PIN is not configured — the approval "
                           "endpoint is closed rather than open."}
     try:
-        return approve_step(_db, step_id, pin=pin, approved_by=by,
+        return approve_step(_database(), step_id, pin=pin, approved_by=by,
                             configured_pin=configured)
     except ApprovalRefused as exc:
         return {"detail": str(exc)}
@@ -192,7 +217,7 @@ async def reject(step_id: int, request: Request) -> dict:
         return {"detail": "DEMO_APPROVER_PIN is not configured — the rejection "
                           "endpoint is closed rather than open."}
     try:
-        return reject_step(_db, step_id, pin=pin, rejected_by=by,
+        return reject_step(_database(), step_id, pin=pin, rejected_by=by,
                            reason=reason, configured_pin=configured)
     except ApprovalRefused as exc:
         return {"detail": str(exc)}
@@ -206,7 +231,7 @@ async def webhook(request: Request, background: BackgroundTasks) -> Response:
     ts = request.headers.get("x-timestamp", "")
     sig = request.headers.get("x-signature", "")
     client_secret = request.headers.get("client-secret-key")  # test events
-    status = _webhooks.receive(raw, ts, sig, client_secret)
+    status = _webhook_handler().receive(raw, ts, sig, client_secret)
     if status != 200:
         return Response("failed to verify the signature", status_code=400)
     # Defer the actual event handling; the demo's polling fallback covers the
@@ -227,7 +252,7 @@ def _process_pending() -> None:
     on a slow handler, and a duplicate `transfer.failed` processed twice is a
     duplicate incident — and potentially a duplicate replacement payment.
     """
-    for ev in _webhooks.claim_all_pending():
+    for ev in _webhook_handler().claim_all_pending():
         log.info("processing webhook %s (%s)", ev.event_id, ev.name)
         payload = parse_payload(ev.payload)
         live_status = None
@@ -251,7 +276,7 @@ def _process_pending() -> None:
                 for candidate in (inner, blob):
                     if not candidate or not candidate.get("id"):
                         continue
-                    res = ingest_deposit(_db, candidate)
+                    res = ingest_deposit(_database(), candidate)
                     if res is not None:
                         log.info("deposit webhook intake: %s %s (%.2f)",
                                  res.status, res.applied, res.confidence)
@@ -280,6 +305,71 @@ def _process_pending() -> None:
                     log.info("settlement: %s", o)
             except Exception:
                 log.exception("settlement failed for %s", transfer_id)
+
+
+@app.post("/inflows/{inflow_id}/approve")
+async def approve_inflow_route(inflow_id: int, request: Request):
+    """Apply a PROPOSED match. This is where a below-band match becomes real."""
+    from .domain.ledger import LedgerError, approve_inflow
+    from .money import money_str
+
+    b = await _read_body(request)
+    pin = str(b.get("pin") or "")
+    by = str(b.get("approved_by") or "dashboard")
+    _pin_field = _settings.demo_approver_pin
+    configured = (_pin_field.get_secret_value() if _pin_field is not None else "")
+    if not configured:
+        return _back(request, tab="ok",
+                     err="DEMO_APPROVER_PIN is not configured — the approval "
+                         "endpoint is closed rather than open.")
+    if pin != configured:
+        return _back(request, tab="ok", err="That PIN is not right.")
+
+    with _database().session_scope() as s:
+        inflow = s.get(Inflow, inflow_id)
+        if inflow is None:
+            return _back(request, tab="ok", err="That payment no longer exists.")
+        try:
+            matches = approve_inflow(s, inflow, approved_by=by)
+        except LedgerError as exc:
+            return _back(request, tab="ok", err=str(exc))
+        applied = ", ".join(str(m.invoice_receivable_id) for m in matches)
+        amount = inflow.amount_minor
+        ccy = inflow.currency
+    return _back(request, tab="ok", ok=(
+        f"Approved. {money_str(amount, ccy)} has been applied to invoice "
+        f"id(s) {applied}; the invoice and the ledger have both moved."))
+
+
+@app.post("/inflows/{inflow_id}/reject")
+async def reject_inflow_route(inflow_id: int, request: Request):
+    """Reject a proposal. The cash stays in suspense — we really did receive it."""
+    from .domain.ledger import LedgerError, reject_inflow
+
+    b = await _read_body(request)
+    pin = str(b.get("pin") or "")
+    by = str(b.get("rejected_by") or "dashboard")
+    reason = str(b.get("reason") or "")
+    _pin_field = _settings.demo_approver_pin
+    configured = (_pin_field.get_secret_value() if _pin_field is not None else "")
+    if not configured:
+        return _back(request, tab="ok",
+                     err="DEMO_APPROVER_PIN is not configured — the rejection "
+                         "endpoint is closed rather than open.")
+    if pin != configured:
+        return _back(request, tab="ok", err="That PIN is not right.")
+
+    with _database().session_scope() as s:
+        inflow = s.get(Inflow, inflow_id)
+        if inflow is None:
+            return _back(request, tab="ok", err="That payment no longer exists.")
+        try:
+            reject_inflow(s, inflow, rejected_by=by, reason=reason)
+        except LedgerError as exc:
+            return _back(request, tab="ok", err=str(exc))
+    return _back(request, tab="ok", ok=(
+        "Rejected. Nothing was applied and the cash stays in suspense, where it "
+        "can be matched again or refunded."))
 
 
 # ------------------------------------------------------------- money in (P2)
@@ -312,7 +402,7 @@ async def money_in_simulate(request: Request):
     try:
         from .airwallex.client import AirwallexClient
         client = AirwallexClient()
-        accts = accounts_cached(_db)
+        accts = accounts_cached(_database())
         account = next((a for a in accts if a["id"] == chosen), None) if chosen else None
         if account is None:
             # No account chosen: pick the first ACTIVE one for the asked currency.
@@ -358,7 +448,7 @@ async def money_in_simulate(request: Request):
     credited = ((deposit or {}).get("currency") or ccy).upper() \
         if isinstance(deposit, dict) else ccy
     try:
-        result = ingest_deposit(_db, deposit) if dep_id else None
+        result = ingest_deposit(_database(), deposit) if dep_id else None
     except Exception as exc:
         log.exception("intake failed for deposit %s", dep_id)
         result = None
@@ -372,6 +462,12 @@ async def money_in_simulate(request: Request):
                      ok=f"{head}. It will appear once Airwallex reports it.")
     if result.duplicate:
         return _back(request, tab="money-in", ok=f"{head}. {result.reason}")
+    if result.disposition == "PROPOSED":
+        return _back(request, tab="money-in", ok=(
+            f"{head}. Read as {result.status} via {result.method} at "
+            f"{result.confidence:.2f} — BELOW the automatic threshold, so "
+            f"nothing has been applied. The invoice has not moved and the cash "
+            f"is in suspense awaiting your approval. {result.reason}"))
     applied = f" -> {', '.join(result.applied)}" if result.applied else ""
     return _back(request, tab="money-in", ok=(
         f"{head}. Matched {result.status} via {result.method} at "
@@ -387,7 +483,7 @@ async def money_in_poll(request: Request):
     if guard:
         return _back(request, tab="money-in", err=guard)
     try:
-        results = poll_deposits(_db)
+        results = poll_deposits(_database())
     except Exception as exc:
         log.exception("deposit poll failed")
         return _back(request, tab="money-in", err=f"Could not poll: {exc}")
@@ -442,7 +538,7 @@ async def setup_settings(request: Request):
 
     b = await _read_body(request)
     try:
-        with _db.session_scope() as s:
+        with _database().session_scope() as s:
             save(s, budget_currency=str(b.get("budget_currency") or "USD"),
                  reserve_floor=str(b.get("reserve_floor") or ""),
                  auto_pay_limit=str(b.get("auto_pay_limit") or ""),
@@ -459,7 +555,7 @@ async def setup_customers(request: Request):
 
     b = await _read_body(request)
     try:
-        with _db.session_scope() as s:
+        with _database().session_scope() as s:
             row = create_customer(s, name=str(b.get("name") or ""),
                                   email=str(b.get("email") or ""),
                                   country=str(b.get("country") or ""))
@@ -475,7 +571,7 @@ async def setup_invoices(request: Request):
 
     b = await _read_body(request)
     try:
-        with _db.session_scope() as s:
+        with _database().session_scope() as s:
             row = create_invoice(
                 s, customer_id=int(b.get("customer_id") or 0),
                 number=str(b.get("number") or ""),
@@ -506,7 +602,7 @@ async def setup_suppliers(request: Request):
     b = await _read_body(request)
     form = {k: (v if isinstance(v, str) else "") for k, v in b.items()}
     try:
-        with _db.session_scope() as s:
+        with _database().session_scope() as s:
             sup = create_supplier(
                 s, name=str(b.get("name") or ""),
                 country=str(b.get("country") or ""),
@@ -518,7 +614,7 @@ async def setup_suppliers(request: Request):
 
     outcome = validate_and_create(None, form, beneficiaries=_beneficiary_client())
 
-    with _db.session_scope() as s:
+    with _database().session_scope() as s:
         record_beneficiary(s, supplier_id, request=outcome.request,
                            beneficiary_id=outcome.beneficiary_id,
                            status=outcome.status, error=outcome.error)
@@ -544,14 +640,14 @@ async def setup_supplier_beneficiary(supplier_id: int, request: Request):
 
     b = await _read_body(request)
     form = {k: (v if isinstance(v, str) else "") for k, v in b.items()}
-    with _db.session_scope() as s:
+    with _database().session_scope() as s:
         sup = s.get(Supplier, supplier_id)
         if sup is None:
             return _back(request, err="That supplier no longer exists.")
         name = sup.name
 
     outcome = validate_and_create(None, form, beneficiaries=_beneficiary_client())
-    with _db.session_scope() as s:
+    with _database().session_scope() as s:
         record_beneficiary(s, supplier_id, request=outcome.request,
                            beneficiary_id=outcome.beneficiary_id,
                            status=outcome.status, error=outcome.error)
@@ -567,7 +663,7 @@ async def setup_payables(request: Request):
 
     b = await _read_body(request)
     try:
-        with _db.session_scope() as s:
+        with _database().session_scope() as s:
             row = create_payable(
                 s, supplier_id=int(b.get("supplier_id") or 0),
                 currency=str(b.get("currency") or ""),
@@ -590,7 +686,7 @@ async def workspace_reset(request: Request):
 
     b = await _read_body(request)
     try:
-        arch = archive_and_reset(_db, confirm=str(b.get("confirm") or ""))
+        arch = archive_and_reset(_database(), confirm=str(b.get("confirm") or ""))
         total = sum(arch.cleared.values())
         return _back(request, ok=f"Workspace archived to {arch.path} and cleared "
                                  f"({total} rows). Your reserve floor and limit "

@@ -91,7 +91,8 @@ class Forecast:
     def total_minor(self) -> int:
         return sum(int(x.get("usd_minor") or 0) for x in self.lines)
 
-    def funding(self, short_minor: int, prefer: str | None = None) -> list[str]:
+    def funding(self, short_minor: int, prefer: str | None = None,
+                require_currency: str | None = None) -> list[str]:
         """Which expected inflows would cover `short_minor`.
 
         `prefer` is the invoice a payable already DEPENDS on, and it wins when it
@@ -103,18 +104,34 @@ class Forecast:
         Only meaningful when `total_minor() >= short_minor`; the caller checks
         that before quoting names, so a payment is never told it waits for an
         invoice that would not be enough either.
+
+        `require_currency` restricts the answer to invoices paid IN the currency
+        that would actually have to be spent. A GBP invoice does not unblock a
+        USD payment on its own, and naming it sent the reader to chase the wrong
+        customer with the wrong currency: PO-2002 needs USD and was told it
+        waited for INV-1002 (GBP).
         """
         if short_minor <= 0:
             return []
+        if require_currency:
+            want = require_currency.upper()
+            usable = [line for line in self.lines
+                      if str(line.get("currency") or "").upper() == want]
+            total = sum(int(line.get("usd_minor") or 0) for line in usable)
+            if total < short_minor:
+                return []
+            lines = usable
+        else:
+            lines = self.lines
         if prefer:
-            for line in self.lines:
+            for line in lines:
                 if str(line.get("number")) == prefer:
                     if int(line.get("usd_minor") or 0) >= short_minor:
                         return [prefer]
                     break
         out: list[str] = []
         acc = 0
-        for line in sorted(self.lines, key=lambda r: -int(r.get("usd_minor") or 0)):
+        for line in sorted(lines, key=lambda r: -int(r.get("usd_minor") or 0)):
             out.append(str(line.get("number")))
             acc += int(line.get("usd_minor") or 0)
             if acc >= short_minor:

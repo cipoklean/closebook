@@ -60,6 +60,12 @@ class FakeInflow:
         self.amount_minor = amount
         self.currency = ccy
         self.match_status = MatchStatus.UNMATCHED
+        # The review fields the proposal path writes.
+        self.proposed_json = None
+        self.review_state = None
+        self.reviewed_at = None
+        self.reviewed_by = None
+        self.match_reason = None
 
 
 # ---- double-entry --------------------------------------------------------
@@ -117,45 +123,156 @@ def test_apply_inflow_marks_receivable_paid(db):
 
 
 def test_apply_partial_marks_receivable_partial(db):
+    """A CONFIDENT partial applies. (0.85 would not — see the next test.)"""
     inv = _receivable(db)
     from app.domain.matching import Allocation, MatchResult
     res = MatchResult(status="PARTIAL",
                       allocations=[Allocation(inv.id, 480_000)],
-                      confidence=0.85, method="RULE")
+                      confidence=0.95, method="RULE")
     L.apply_inflow_to_receivables(db, FakeInflow(480_000, "GBP"), res)
     db.flush()
     assert inv.status == RecStatus.PARTIAL
     assert inv.amount_minor - inv.amount_paid_minor == 720_000
 
 
+def test_a_SUB_THRESHOLD_partial_moves_NOTHING(db):
+    """THE RULE: below the auto band is a proposal, not a decision.
+
+    A 0.85 read of GBP 4,800 against a GBP 8,000 invoice used to move the
+    invoice to PARTIAL and write a Match row. Now the invoice does not move,
+    nothing is applied, and the whole amount waits in suspense.
+    """
+    inv = _receivable(db, number="INV-1002", amount=800_000, ccy="GBP")
+    from app.domain.matching import Allocation, MatchResult
+    res = MatchResult(status="PARTIAL",
+                      allocations=[Allocation(inv.id, 480_000)],
+                      confidence=0.85, method="RULE",
+                      reason="part-payment against INV-1002")
+    inflow = FakeInflow(480_000, "GBP")
+    created = L.apply_inflow_to_receivables(db, inflow, res)
+    db.flush()
+
+    assert created == [], "no Match row may be written on a proposal"
+    assert db.query(Match).count() == 0
+    assert inv.amount_paid_minor == 0, "the invoice must NOT move"
+    assert inv.status == RecStatus.OPEN
+    assert inflow.match_status == MatchStatus.PROPOSED
+    assert inflow.review_state == "PENDING"
+    assert inflow.proposed_json and "480000" in inflow.proposed_json
+
+    rows = {e.account: e.credit_minor - e.debit_minor
+            for e in db.query(L.LedgerEntry).filter_by(txn_id="inflow:1").all()}
+    # credit - debit: cash is DEBITED (money arrived), suspense is CREDITED.
+    assert rows["cash:GBP"] == -480_000, "the cash IS in the bank"
+    assert rows["unapplied_cash"] == 480_000, "all of it, in suspense"
+    assert "receivable_clearing" not in rows, "nothing was applied to an invoice"
+
+
+def test_approving_a_proposal_applies_it(db):
+    """Approve applies the STORED numbers, not a fresh match."""
+    inv = _receivable(db, number="INV-1002", amount=800_000, ccy="GBP")
+    from app.domain.matching import Allocation, MatchResult
+    res = MatchResult(status="PARTIAL",
+                      allocations=[Allocation(inv.id, 480_000)],
+                      confidence=0.85, method="RULE")
+    inflow = FakeInflow(480_000, "GBP")
+    L.apply_inflow_to_receivables(db, inflow, res)
+    db.flush()
+
+    L.approve_inflow(db, inflow, approved_by="david")
+    db.flush()
+
+    assert inv.amount_paid_minor == 480_000
+    assert inv.status == RecStatus.PARTIAL
+    assert inflow.review_state == "APPROVED"
+    assert inflow.reviewed_by == "david"
+    assert db.query(Match).count() == 1
+
+    rows = {}
+    for e in db.query(L.LedgerEntry).all():
+        rows[e.account] = rows.get(e.account, 0) + e.debit_minor - e.credit_minor
+    assert rows["cash:GBP"] == 480_000
+    assert rows["unapplied_cash"] == 0, "the suspense is cleared"
+    assert rows["receivable_clearing"] == -480_000, "and landed on the invoice"
+
+
+def test_approving_twice_is_refused(db):
+    inv = _receivable(db, number="INV-1002", amount=800_000, ccy="GBP")
+    from app.domain.matching import Allocation, MatchResult
+    res = MatchResult(status="PARTIAL", allocations=[Allocation(inv.id, 480_000)],
+                      confidence=0.85, method="RULE")
+    inflow = FakeInflow(480_000, "GBP")
+    L.apply_inflow_to_receivables(db, inflow, res)
+    L.approve_inflow(db, inflow)
+    db.flush()
+    with pytest.raises(L.LedgerError):
+        L.approve_inflow(db, inflow)
+
+
+def test_rejecting_leaves_the_cash_in_suspense(db):
+    """The money is real. Rejecting says "not this invoice", not "not received"."""
+    inv = _receivable(db, number="INV-1002", amount=800_000, ccy="GBP")
+    from app.domain.matching import Allocation, MatchResult
+    res = MatchResult(status="PARTIAL", allocations=[Allocation(inv.id, 480_000)],
+                      confidence=0.85, method="RULE")
+    inflow = FakeInflow(480_000, "GBP")
+    L.apply_inflow_to_receivables(db, inflow, res)
+    L.reject_inflow(db, inflow, rejected_by="david", reason="not our invoice")
+    db.flush()
+    assert inflow.review_state == "REJECTED"
+    assert inv.amount_paid_minor == 0, "still not applied"
+    rows = {}
+    for e in db.query(L.LedgerEntry).all():
+        rows[e.account] = rows.get(e.account, 0) + e.debit_minor - e.credit_minor
+    assert rows["cash:GBP"] == 480_000
+    assert rows["unapplied_cash"] == -480_000, "parked, not lost"
+    with pytest.raises(L.LedgerError):
+        L.approve_inflow(db, inflow)
+
+
+def test_an_unmatchable_inflow_is_AMBIGUOUS_not_PROPOSED(db):
+    """No allocations at all is a different state from a rejected-looking one."""
+    from app.domain.matching import MatchResult
+    inflow = FakeInflow(325_000)
+    L.apply_inflow_to_receivables(
+        db, inflow, MatchResult(status="AMBIGUOUS", confidence=0.0, method="RULE"))
+    db.flush()
+    assert inflow.match_status == MatchStatus.AMBIGUOUS
+    assert inflow.review_state == "PENDING"
+
+
 def test_apply_overpayment_marks_overpaid(db):
+    """A CONFIDENT overpayment applies, credit and all."""
     inv = _receivable(db, amount=450_000)
     from app.domain.matching import Allocation, MatchResult
     res = MatchResult(status="OVERPAID",
                       allocations=[Allocation(inv.id, 450_000)],
-                      confidence=0.85, method="RULE", credit_minor=50_000)
+                      confidence=0.95, method="RULE", credit_minor=50_000)
     L.apply_inflow_to_receivables(db, FakeInflow(500_000), res)
     db.flush()
     assert inv.status == RecStatus.OVERPAID
 
 
-def test_sub_threshold_confidence_is_never_recorded_as_settled(db):
-    """A 0.70 fuzzy match must not settle, whatever the caller says.
+def test_sub_threshold_confidence_is_never_applied(db):
+    """A 0.70 fuzzy match must not touch an invoice, whatever the caller says.
 
-    The matcher already scored this below the auto threshold; the ledger was
-    applying the allocations anyway, creating a refund obligation from a guess.
+    The matcher already scored this below the auto threshold; the ledger used to
+    apply the allocations anyway and merely LABEL the match unconfirmed — which
+    created a refund obligation from a guess. Labelling is not a control.
     """
     inv = _receivable(db)
     from app.domain.matching import Allocation, MatchResult
     res = MatchResult(status="OVERPAID",
                       allocations=[Allocation(inv.id, 450_000)],
                       confidence=0.70, method="RULE", credit_minor=50_000)
-    L.apply_inflow_to_receivables(db, FakeInflow(500_000), res)
+    inflow = FakeInflow(500_000)
+    L.apply_inflow_to_receivables(db, inflow, res)
     db.flush()
-    m = db.query(Match).filter_by(invoice_receivable_id=inv.id).one()
-    # The weak confidence is preserved as evidence, and the inflow is not
-    # recorded as a settled MATCHED.
-    assert m.confidence == 0.70
+    assert db.query(Match).count() == 0
+    db.refresh(inv)
+    assert inv.amount_paid_minor == 0
+    assert inv.status == RecStatus.OPEN
+    assert inflow.review_state == "PENDING"
 
 
 def test_confidence_gate_does_not_hide_the_cash(db):
@@ -194,7 +311,7 @@ def test_unapplied_cash_goes_to_suspense(db):
     from app.domain.matching import Allocation, MatchResult
     res = MatchResult(status="PARTIAL",
                       allocations=[Allocation(inv.id, 400_000)],
-                      confidence=0.85, method="RULE")
+                      confidence=0.95, method="RULE")
     L.apply_inflow_to_receivables(db, FakeInflow(500_000), res)
     db.flush()
     rows = {e.account: e.credit_minor - e.debit_minor

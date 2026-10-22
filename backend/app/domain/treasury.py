@@ -264,8 +264,24 @@ def funding_for(plan, payable_number: str, held: set[str],
         return Funding("USD", 0, "no_plan",
                        "the plan has no step for this payable")
 
+    # THE PLAN'S OWN NUMBER, for planned and deferred payables alike. The
+    # planner records `funding_currency`/`funding_amount_minor` on every step it
+    # produces about a payable, so the tile reads the same arithmetic the plan
+    # used rather than re-deriving it. Re-deriving is exactly how the tile came
+    # to say "no conversion is planned" for a bill the plan costed at USD
+    # 10,346.00.
     if pay.currency in held:
         return Funding(pay.currency, pay.amount_minor, "held", "")
+
+    f_ccy = getattr(pay, "funding_currency", None)
+    f_amt = int(getattr(pay, "funding_amount_minor", 0) or 0)
+    if f_ccy and f_amt > 0:
+        planned = pay.action in (ACT_FX, ACT_PAY)
+        return Funding(
+            f_ccy, f_amt, "conversion" if planned else "planned",
+            ("" if planned else
+             f"the plan converts {f_ccy} into {pay.currency} as soon as it can "
+             f"be afforded — {money_str(f_amt, f_ccy)} set aside for it"))
 
     return Funding(
         pay.currency, pay.amount_minor, "unfunded",

@@ -1061,7 +1061,7 @@ def _money_in(c: dict) -> str:
         prop = u.get("model_proposed") or {}
         allocs = prop.get("allocations") or []
         what = ", ".join(f'{a.get("invoice_number")} '
-                         f'{money(int(float(a.get("amount", 0)) * 100))}'
+                         f'{money(int(float(a.get("amount") or 0) * 100))}'
                          for a in allocs) or "nothing specific"
         # The reasons come from the decision code actually recorded in
         # agent_trace — NOT recomputed here. A view that re-derives policy is a
@@ -1384,7 +1384,23 @@ def _ok(c: dict) -> str:
             'Chase it, re-apply it, or refund it.</p></div>'
             f'<span class="x-pill x-pill--warn">{len(wait)} to review</span>'
             '</div>'
-            + "".join(_arrival_row(a, detail=True) for a in wait)))
+            + "".join(
+                _arrival_row(a, detail=True)
+                + (f'<form class="x-actions" method="post" '
+                   f'action="/inflows/{a["id"]}/approve" data-action>'
+                   f'<div class="x-pin"><label for="pin-i{a["id"]}">Your PIN'
+                   f'</label><input id="pin-i{a["id"]}" name="pin" '
+                   f'type="password" inputmode="numeric" '
+                   f'autocomplete="one-time-code" maxlength="12" required></div>'
+                   f'<button class="x-btn x-btn--primary" type="submit">'
+                   f'Apply it to '
+                   f'{" and ".join(x["invoice"] for x in a["applied"]) or "the invoice"}'
+                   f'</button>'
+                   f'<button class="x-btn" type="submit" '
+                   f'formaction="/inflows/{a["id"]}/reject" '
+                   f'formnovalidate>Not this invoice</button></form>'
+                   if a.get("proposed_invoices") else "")
+                for a in wait)))
         return body + note_in + held + note
     return body + held + note
 
@@ -1463,12 +1479,12 @@ def _ai(c: dict) -> str:
             if prop and prop.get("allocations"):
                 says = " · ".join(
                     f'{a.get("invoice_number")} '
-                    f'{money(int(float(a.get("amount", 0)) * 100))}'
+                    f'{money(int(float(a.get("amount") or 0) * 100))}'
                     for a in prop["allocations"])
             else:
                 says = outs.get("explanation") or "nothing it could stand behind"
             ai_msg = (f'I think this is <b>{e(says)}</b>'
-                      + (f' — about {float(prop.get("confidence", 0)):.2f} confident.'
+                      + (f' — about {float(prop.get("confidence") or 0):.2f} confident.'
                          if prop else '.'))
             rule_msg = (t["detail"] or outs.get("explanation") or
                         "Checked every number against the open invoices.")

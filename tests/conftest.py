@@ -20,3 +20,10 @@ os.environ.setdefault("CLOSEBOOK_DATABASE_URL", "sqlite:///:memory:")
 # REAL secret. Approval signing needs CLOSEBOOK_HMAC_SECRET, so set a fixed
 # test-only value here. `setdefault` still lets CI override it deliberately.
 os.environ.setdefault("CLOSEBOOK_HMAC_SECRET", "test-only-not-a-real-secret")
+
+# The model tier is now WIRED (it never was — `intake` passed llm=None), so a
+# test that ingests a deposit would call the configured provider. Tests must
+# never touch the network: slow, flaky, and it bills somebody. An empty
+# LLM_API_KEY makes the matcher honestly unavailable, which is also the state
+# the offline tests assert about.
+os.environ["LLM_API_KEY"] = ""

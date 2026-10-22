@@ -71,6 +71,7 @@ class LLMConfig:
             api_key=key or None,
             base_url=s.llm_base_url,
             model=s.llm_model,
+            timeout_s=int(getattr(s, "llm_timeout_s", 45) or 45),
         )
 
     @classmethod
@@ -117,19 +118,35 @@ class OpenAICompatibleMatcher:
 
     def __init__(self, config: Optional[LLMConfig] = None):
         self.cfg = config or LLMConfig.from_env()
+        #: Why the last `propose()` returned None. None means it succeeded.
+        self.last_error: Optional[str] = None
 
     def available(self) -> bool:
         return self.cfg.available
 
     def propose(self, inflow: dict[str, Any],
                 candidates: list[dict[str, Any]]) -> Optional[dict]:
+        """The model's reading, or None.
+
+        None means one of TWO different things and they must not be confusable:
+        no key is configured, or the provider failed. `last_error` carries the
+        distinction so the page can say "no model configured" or "the model was
+        down (ReadTimeout)" instead of the old, useless "0 calls".
+        """
+        self.last_error = None
         if not self.cfg.available:
+            self.last_error = ("no model is configured — LLM_API_KEY is empty, "
+                               "so the deterministic tiers decide alone")
             return None
         try:
-            return self._call(inflow, candidates)
+            out = self._call(inflow, candidates)
+            if out is None:
+                self.last_error = "the model returned nothing usable"
+            return out
         except Exception as exc:  # noqa: BLE001
             # A model failure must never break matching — the deterministic
             # tiers already produced a result, and the LLM is only a fallback.
+            self.last_error = f"{type(exc).__name__}: {exc}"[:200]
             log.warning("LLM proposal failed (%s); falling back to escalation",
                         type(exc).__name__)
             return None

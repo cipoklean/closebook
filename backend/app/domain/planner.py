@@ -152,6 +152,13 @@ class Step:
     # these carry them structured.
     blockers: list[str] = field(default_factory=list)
     blocker_codes: list[str] = field(default_factory=list)
+    # WHAT THIS PAYABLE COSTS, in the currency that would actually have to leave.
+    # A EUR bill paid with USD costs USD. The planner works this out for the
+    # steps it PLANS *and* for the ones it defers, so the dashboard can read the
+    # cost from the plan instead of recomputing it — the tile and the plan used
+    # to disagree because only the plan knew about the conversion.
+    funding_currency: Optional[str] = None
+    funding_amount_minor: int = 0
     # linking
     unlocks: list[str] = field(default_factory=list)
     chained_to: Optional[int] = None   # index of the step this depends on
@@ -176,6 +183,8 @@ class Step:
             "policy_reason": self.policy_reason,
             "blockers": list(self.blockers),
             "blocker_codes": list(self.blocker_codes),
+            "funding_currency": self.funding_currency,
+            "funding_amount_minor": self.funding_amount_minor,
             "unlocks": self.unlocks,
             "reason": self.reason,
         }
@@ -229,7 +238,8 @@ def _defer_cost(p: Payable, pos: CashPosition) -> int:
 def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: int,
                     currency: str, floor_minor: int, forecast, what: str,
                     conversion: bool = False,
-                    prefer_inflow: Optional[str] = None) -> tuple[str, str]:
+                    prefer_inflow: Optional[str] = None,
+                    fund_currency: Optional[str] = None) -> tuple[str, str]:
     """(reason, code) for a payment that does not fit, or ("", "") if it does.
 
     ONE basis: `available_after` already has the floor taken off, and it was
@@ -260,14 +270,19 @@ def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: i
     # beats describing the arithmetic. It is still NOT paid early: the rule is
     # defer and say what it waits for.
     if forecast is not None and forecast.total_minor() >= gap:
-        names = forecast.funding(gap, prefer=prefer_inflow)
-        who = " and ".join(names) if names else "cash"
-        if enough_cash:
-            return (f"waits for {who} to land — paying it now would leave cash "
-                    f"{left_txt}, below the {floor_txt} floor"), "waits_for_inflow"
-        return (f"waits for {who} to land — the account holds "
-                f"{money_str(max(currency_held, 0), currency)} and this needs "
-                f"{money_str(needed_minor, currency)}"), "waits_for_inflow"
+        names = forecast.funding(gap, prefer=prefer_inflow,
+                                 require_currency=fund_currency)
+        # ONLY name an invoice when there IS one that could fund this. With no
+        # name the sentence fell back to "waits for cash to land", which is not
+        # a thing anybody can chase — so the floor arithmetic is said instead.
+        if names:
+            who = " and ".join(names)
+            if enough_cash:
+                return (f"waits for {who} to land — paying it now would leave cash "
+                        f"{left_txt}, below the {floor_txt} floor"), "waits_for_inflow"
+            return (f"waits for {who} to land — the account holds "
+                    f"{money_str(max(currency_held, 0), currency)} and this needs "
+                    f"{money_str(needed_minor, currency)}"), "waits_for_inflow"
 
     if not enough_cash:
         return (f"{what}: needs {money_str(needed_minor, currency)} "
@@ -278,6 +293,51 @@ def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: i
     return (f"{what}: paying it now would leave cash {left_txt}, below the "
             f"{floor_txt} floor"), "reserve_floor"
 
+
+
+def _restate_deferrals(plan, deferred_ctx, *, available, holdings, floor_minor,
+                       forecast) -> None:
+    """Re-say every deferral against the position the WHOLE run leaves behind.
+
+    A blocked payable is costed at its turn in the loop, before the payments
+    that come after it. PO-2002 (EUR, deferred) was told "paying it now would
+    leave cash USD 4,904.00" while the very same run was about to send USD 1,800
+    to PO-2001 — and 4,904 is not a figure the operator would ever see, because
+    both payments are in the plan. The honest number is what is left after
+    everything this run will actually do: USD 3,104.00.
+
+    Deferrals consume nothing, so `available()` gives exactly
+    final_position - this_payment - floor. `holdings` is the final position,
+    so the capacity-versus-floor branch is chosen the same way it would be at
+    the end of the run.
+    """
+    for d in deferred_ctx:
+        idx = d["index"]
+        if idx >= len(plan.steps):
+            continue
+        st = plan.steps[idx]
+        needed = int(d["needed_minor"] or 0)
+        if needed <= 0:
+            continue
+        f_ccy = d["fund_ccy"] or st.currency
+        bs, bc = _blocked_reason(
+            needed_minor=needed, available_after=available(needed),
+            currency_held=int(holdings.get(f_ccy, 0)),
+            currency=f_ccy, floor_minor=floor_minor, forecast=forecast,
+            what=d["what"], prefer_inflow=d["prefer"], fund_currency=f_ccy)
+        if not bs:
+            continue
+        # Restate the cash half ONLY. A dependency blocker is not affected by
+        # the arithmetic of the rest of the run, so it stays first.
+        keep = [b for b in st.blockers if "waits for" not in b
+                and "would leave cash" not in b]
+        keep.append(bs)
+        st.blockers = keep
+        st.blocker_codes = [c for c in st.blocker_codes
+                            if c in ("dependency_not_met", "no_rate",
+                                     "unsupported_currency")] + [bc]
+        st.reason = "; ".join(st.blockers)
+        st.policy_reason = st.blocker_codes[0] if st.blocker_codes else st.policy_reason
 
 
 def build_plan(payables: Iterable[Payable], pos: CashPosition,
@@ -291,6 +351,7 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
     """
     budget = budget or BudgetSettings()
     plan = Plan()
+    deferred_ctx: list[dict] = []
     payables = list(payables)
 
     bccy = budget.currency.upper()
@@ -399,6 +460,18 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
         # bill reported as needing USD 1,809.00 — and said the same thing twice,
         # once with each number. Not holding enough of the budget currency is a
         # CAPACITY problem, and step 5 below states it correctly.
+        # WHAT THIS COSTS, in the currency that would actually leave. Worked out
+        # here for EVERY payable — planned or blocked — so the dashboard reads
+        # the cost off the plan instead of recomputing it. That recomputation is
+        # why the tile said "no conversion is planned" while the plan had a
+        # USD 10,346 figure for the same bill.
+        fund_ccy: Optional[str] = bccy
+        fund_amt: int = move_minor
+        if p.currency.upper() != bccy and held < move_minor:
+            _r = pos.usd_rate(p.currency)
+            fund_amt = (_fx_sell_needed(move_minor, p.currency, _r,
+                                        fx_tolerance_pct) if _r else 0)
+
         fx_plan = None            # (sell_minor, rate)
         if p.currency.upper() != bccy and held < move_minor:
             rate = pos.usd_rate(p.currency)
@@ -423,7 +496,8 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
                 currency_held=working.get(bccy, 0), currency=bccy,
                 floor_minor=floor_minor, forecast=pos.forecast,
                 what=f"buy {money_str(move_minor, p.currency)} for {p.number}",
-                conversion=True, prefer_inflow=p.depends_on_receivable)
+                conversion=True, prefer_inflow=p.depends_on_receivable,
+                fund_currency=bccy)
             if bs:
                 blockers.append(bs)
                 codes.append(bc)
@@ -461,7 +535,7 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
             currency=p.currency.upper(), floor_minor=floor_minor,
             forecast=pos.forecast,
             what=f"pay {p.number} ({money_str(move_minor, p.currency)})",
-            prefer_inflow=p.depends_on_receivable)
+            prefer_inflow=p.depends_on_receivable, fund_currency=bccy)
         if bs:
             blockers.append(bs)
             codes.append(bc)
@@ -478,7 +552,23 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
                 blockers=blockers,
                 blocker_codes=codes,
                 chained_to=fx_index,
+                funding_currency=fund_ccy,
+                funding_amount_minor=fund_amt,
             ))
+            # Remember how to re-state this reason once the WHOLE run is
+            # planned. A deferral is costed before the payments that follow it
+            # in the loop, so "paying it now would leave USD 4,904.00" ignored
+            # the USD 1,800 the same run was about to send.
+            deferred_ctx.append({
+                "index": len(plan.steps) - 1,
+                "needed_minor": (fund_amt if fund_ccy == bccy else pay_cost),
+                "fund_ccy": fund_ccy,
+                "prefer": p.depends_on_receivable,
+                "what": (f"buy {money_str(move_minor, p.currency)} for {p.number}"
+                         if fund_ccy == bccy and p.currency.upper() != bccy
+                         else f"pay {p.number} ({money_str(move_minor, p.currency)})"),
+                "codes": list(codes),
+            })
             continue
 
         # --- 7. approval threshold ---------------------------------------
@@ -499,6 +589,12 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
                     f"{fee_txt} by {p.payout_method} — {why}"),
             policy_reason="within_policy" if not needs_approval else "needs_approval",
             chained_to=fx_index,
+            funding_currency=fund_ccy,
+            funding_amount_minor=fund_amt,
         ))
+
+    _restate_deferrals(plan, deferred_ctx, available=_available,
+                       holdings=working, floor_minor=floor_minor,
+                       forecast=pos.forecast)
 
     return plan

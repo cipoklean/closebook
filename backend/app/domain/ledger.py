@@ -26,6 +26,10 @@ from ..models import (
 )
 
 
+class LedgerError(Exception):
+    """A review action that cannot be taken, with the reason in plain words."""
+
+
 class LedgerImbalance(Exception):
     """A posting did not balance. Never commit an unbalanced entry."""
 
@@ -65,71 +69,89 @@ def post(db_session, txn_id: str, legs: list[tuple[str, int, int, str]],
     return created
 
 
+@dataclass
+class _Alloc:
+    """Just enough of matching.Allocation for the apply path. Local to avoid
+    importing the matcher into the ledger."""
+    invoice_id: int
+    amount_minor: int
+
+
+def _allocations_from_proposal(inflow) -> list[_Alloc]:
+    """The stored proposal, as it was shown to the human.
+
+    Returns objects with `.invoice_id`/`.amount_minor`, NOT dicts: the apply
+    path is shared with the automatic one and reads attributes, so handing it
+    dicts raised `'dict' object has no attribute 'invoice_id'` the first time a
+    human approved anything.
+    """
+    if not inflow.proposed_json:
+        return []
+    try:
+        blob = json.loads(inflow.proposed_json)
+    except ValueError:
+        return []
+    out: list[_Alloc] = []
+    for a in (blob.get("allocations") or []):
+        try:
+            out.append(_Alloc(int(a["invoice_id"]), int(a["amount_minor"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _proposal_blob(result) -> str:
+    return json.dumps({
+        "status": result.status,
+        "confidence": float(result.confidence),
+        "method": result.method,
+        "reason": result.reason,
+        "shortfall_minor": int(result.shortfall_minor or 0),
+        "credit_minor": int(result.credit_minor or 0),
+        "evidence": result.evidence,
+        "allocations": [{"invoice_id": a.invoice_id,
+                         "amount_minor": a.amount_minor}
+                        for a in result.allocations],
+    }, default=str)[:4000]
+
+
 def apply_inflow_to_receivables(db_session, inflow, result) -> list[Match]:
     """Record a match, post the cash, and move each invoice's status.
 
     `result` is a matching.MatchResult. This is the only place a receivable's
     amount_paid/status changes.
 
-    CONFIDENCE IS ENFORCED HERE, not only in the matcher. The matcher already
-    scores a weak match below `MATCH_CONFIDENCE_AUTO` so it escalates, but
-    scoring it low does not stop a caller from applying the allocations anyway.
-    The matcher returned a 0.85 OVERPAID for a fuzzy payer and the ledger
-    applied it to an invoice regardless — a refund obligation created from a
-    70%-confidence guess. Below the auto threshold the cash is still posted and
-    the invoice still moves to PARTIAL (so the money is visible and chaseable),
-    but it is recorded as awaiting approval rather than as a settled match.
+    BELOW THE AUTO BAND NOTHING IS APPLIED. A score under
+    `MATCH_CONFIDENCE_AUTO` is a PROPOSAL, not a decision: the invoice does not
+    move, no Match row is written, and the whole amount is parked in
+    `unapplied_cash`. The proposal is stored verbatim on the inflow so that
+    approving it later applies THE NUMBERS THAT WERE SHOWN.
+
+    The previous behaviour applied the allocation anyway and merely *labelled*
+    it unconfirmed — which meant a 0.70 guess moved an invoice's paid amount and
+    could create a refund obligation. Labelling is not a control.
     """
     from .policy import MATCH_CONFIDENCE_AUTO
 
-    needs_approval = result.confidence < MATCH_CONFIDENCE_AUTO
-    cands = {c.invoice_id: c for c in []}  # placeholder, filled below
-    created: list[Match] = []
-    # A recorded overpayment is money that WAS received against this invoice but
-    # exceeds what was owed. It must land on the invoice (so the invoice reads
-    # OVERPAID and the credit is visible) while the cash itself stays in the
-    # unapplied_cash suspense account for a human to refund or carry forward.
-    credit_to_apply = result.credit_minor or 0
+    applied_statuses = ("MATCHED", "PARTIAL", "OVERPAID")
+    confident = (result.confidence >= MATCH_CONFIDENCE_AUTO
+                 and result.status in applied_statuses
+                 and bool(result.allocations))
+    if not confident:
+        return _propose(db_session, inflow, result)
 
-    for alloc in result.allocations:
-        inv = db_session.query(InvoiceReceivable).filter_by(id=alloc.invoice_id).first()
-        if inv is None:
-            continue
-        inv.amount_paid_minor += alloc.amount_minor
-        if inv.amount_paid_minor < inv.amount_minor:
-            inv.status = RecStatus.PARTIAL
-        elif inv.amount_paid_minor == inv.amount_minor:
-            inv.status = RecStatus.PAID
-        else:
-            inv.status = RecStatus.OVERPAID
+    created = _apply_allocations(db_session, inflow, result.allocations,
+                                 confidence=result.confidence,
+                                 method=result.method,
+                                 status=result.status,
+                                 evidence=result.evidence,
+                                 credit_minor=int(result.credit_minor or 0))
 
-        if credit_to_apply:
-            # Attach the credit to the invoice we overpaid.
-            inv.amount_paid_minor += credit_to_apply
-            inv.status = RecStatus.OVERPAID
-            credit_to_apply = 0
-
-        m = Match(
-            inflow_id=inflow.id, invoice_receivable_id=inv.id,
-            amount_applied_minor=alloc.amount_minor,
-            confidence=result.confidence,
-            method=MatchMethod[result.method] if result.method in MatchMethod.__members__ else MatchMethod.RULE,
-            evidence_json=json.dumps(result.evidence, default=str)[:2000],
-        )
-        db_session.add(m)
-        created.append(m)
-
-    inflow.match_status = MatchStatus[result.status] if result.status in MatchStatus.__members__ \
-        else MatchStatus.AMBIGUOUS
-    # A sub-threshold match is never recorded as settled. AMBIGUOUS keeps the
-    # cash visible and the invoice traceable while forcing a human decision.
-    if needs_approval and inflow.match_status in (MatchStatus.MATCHED,
-                                                  MatchStatus.PARTIAL):
-        inflow.match_status = MatchStatus.AMBIGUOUS
-
-    # Cash in: debit the cash account, credit the receivable clearing account.
-    # `allocated` is what was applied to invoices; the credit portion is
-    # deliberately left in unapplied_cash so it is visible and refundable.
+    # Cash in: debit the cash account, credit the clearing account for what was
+    # applied. Anything left over — an unmatchable remainder, or the credit side
+    # of an overpayment — goes to suspense so it stays visible and refundable.
+    # (The proposal path above posts its own legs; the approval path posts from
+    # suspense in `approve_inflow`.)
     legs = [("cash:" + inflow.currency, inflow.amount_minor, 0, inflow.currency)]
     allocated = sum(a.amount_minor for a in result.allocations)
     suspense = inflow.amount_minor - allocated
@@ -144,6 +166,121 @@ def apply_inflow_to_receivables(db_session, inflow, result) -> list[Match]:
              ref=f"match {result.status}")
     db_session.flush()
     return created
+
+
+def _propose(db_session, inflow, result) -> list[Match]:
+    """Park the cash and store the proposal. Move no invoice."""
+    inflow.match_status = (MatchStatus.PROPOSED if result.allocations
+                           else MatchStatus.AMBIGUOUS)
+    inflow.proposed_json = _proposal_blob(result)
+    inflow.review_state = "PENDING"
+    legs = [("cash:" + inflow.currency, inflow.amount_minor, 0, inflow.currency),
+            ("unapplied_cash", 0, inflow.amount_minor, inflow.currency)]
+    post(db_session, txn_id=f"inflow:{inflow.id}", legs=legs,
+         ref=f"proposal {result.status} ({result.confidence:.2f})")
+    db_session.flush()
+    return []
+
+
+def _apply_allocations(db_session, inflow, allocations, *, confidence, method,
+                       status, evidence, credit_minor: int = 0) -> list[Match]:
+    """Move the cash onto the invoices. Shared by the auto path and approval,
+    so an approved proposal lands exactly where an automatic one would.
+
+    `credit_minor` is money received AGAINST an invoice beyond what it owed. It
+    is attached to the invoice so the invoice reads OVERPAID and the credit is
+    visible, while the cash itself stays in `unapplied_cash` for a refund or a
+    carry-forward.
+    """
+    created: list[Match] = []
+    for alloc in allocations:
+        inv = db_session.query(InvoiceReceivable).filter_by(
+            id=alloc.invoice_id).first()
+        if inv is None:
+            continue
+        inv.amount_paid_minor += alloc.amount_minor
+        if inv.amount_paid_minor < inv.amount_minor:
+            inv.status = RecStatus.PARTIAL
+        elif inv.amount_paid_minor == inv.amount_minor:
+            inv.status = RecStatus.PAID
+        else:
+            inv.status = RecStatus.OVERPAID
+        if credit_minor:
+            inv.amount_paid_minor += credit_minor
+            inv.status = RecStatus.OVERPAID
+            credit_minor = 0
+
+        m = Match(
+            inflow_id=inflow.id, invoice_receivable_id=inv.id,
+            amount_applied_minor=alloc.amount_minor,
+            confidence=confidence,
+            method=(MatchMethod[method] if method in MatchMethod.__members__
+                    else MatchMethod.RULE),
+            evidence_json=json.dumps(evidence, default=str)[:2000],
+        )
+        db_session.add(m)
+        created.append(m)
+
+    inflow.match_status = (MatchStatus[status] if status in MatchStatus.__members__
+                           else MatchStatus.AMBIGUOUS)
+    db_session.flush()
+    return created
+
+
+def approve_inflow(db_session, inflow, *, approved_by: str = "dashboard") -> list[Match]:
+    """Apply a stored PROPOSAL. This is where a below-band match becomes real.
+
+    Posts from suspense to the invoice, so the net effect on the books is
+    identical to an automatic apply: cash debited once, receivable_clearing
+    credited for what was allocated.
+    """
+    if inflow.review_state == "APPROVED":
+        raise LedgerError(f"inflow {inflow.id} was already approved")
+    if inflow.review_state == "REJECTED":
+        raise LedgerError(f"inflow {inflow.id} was rejected; re-match it "
+                          f"rather than approving an old proposal")
+    allocs = _allocations_from_proposal(inflow)
+    if not allocs:
+        raise LedgerError(f"inflow {inflow.id} has no proposal to approve")
+
+    try:
+        blob = json.loads(inflow.proposed_json or "{}")
+    except ValueError:
+        blob = {}
+    created = _apply_allocations(
+        db_session, inflow, allocs,
+        confidence=float(blob.get("confidence") or 0.0),
+        method=str(blob.get("method") or "RULE"),
+        status=str(blob.get("status") or "MATCHED"),
+        evidence=dict(blob.get("evidence") or {},
+                      approved_by=approved_by, approved_from_proposal=True),
+        credit_minor=int(blob.get("credit_minor") or 0))
+
+    allocated = sum(a.amount_minor for a in allocs)
+    if allocated:
+        from ..timeutils import utcnow
+        post(db_session, txn_id=f"inflow:{inflow.id}:approved",
+             legs=[("unapplied_cash", allocated, 0, inflow.currency),
+                   ("receivable_clearing", 0, allocated, inflow.currency)],
+             ref=f"approved by {approved_by}")
+        inflow.reviewed_at = utcnow()
+    inflow.review_state = "APPROVED"
+    inflow.reviewed_by = approved_by
+    db_session.flush()
+    return created
+
+
+def reject_inflow(db_session, inflow, *, rejected_by: str = "dashboard",
+                  reason: str = "") -> None:
+    """Say no. The cash STAYS in suspense — it is real money we received."""
+    from ..timeutils import utcnow
+
+    inflow.review_state = "REJECTED"
+    inflow.reviewed_by = rejected_by
+    inflow.reviewed_at = utcnow()
+    inflow.match_reason = (reason or "rejected; the cash stays in suspense "
+                                    "until it is matched or refunded")
+    db_session.flush()
 
 
 # ---- payable status transitions ----------------------------------------

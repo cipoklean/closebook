@@ -54,7 +54,11 @@ def receiver(monkeypatch):
     import importlib
 
     main = importlib.import_module("app.main")
-    main._webhooks = WebhookHandler(main._db, "integration-test-secret")
+    # `main._database()` resolves the app's single handle per call, so the
+    # handler is rebuilt against whatever database is current — there is no
+    # separate `main._db` to keep in step any more.
+    main._webhooks = WebhookHandler(main._database(), "integration-test-secret")
+    main._webhook_db = main._database()
     main.INCIDENTS.clear()
     return main
 

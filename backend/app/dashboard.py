@@ -584,6 +584,21 @@ def incidents_block(incidents: list | None) -> list[dict]:
 
 
 # ------------------------------------------------------------- trace
+def _proposed_invoice_numbers(session, inflow) -> list[str]:
+    """Invoice numbers named by a stored proposal, for the approve button."""
+    blob = _loads(inflow.proposed_json) if inflow.proposed_json else {}
+    out = []
+    for a in (blob.get("allocations") or []):
+        try:
+            inv = session.query(InvoiceReceivable).filter_by(
+                id=int(a["invoice_id"])).first()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if inv is not None:
+            out.append(inv.number)
+    return out
+
+
 # ------------------------------------------------------- money that arrived
 def arrivals_block(s) -> list[dict]:
     """Every deposit we took in, with the verdict that was recorded on it.
@@ -623,9 +638,17 @@ def arrivals_block(s) -> list[dict]:
             "applied": by_inflow.get(i.id, []),
             # "Needs your OK" is not the same question as "unmatched": a
             # part-payment at 0.85 is applied AND needs a human to chase it.
-            "awaiting_human": (conf is not None
-                               and conf < MATCH_CONFIDENCE_AUTO
-                               and i.match_status != MatchStatus.MATCHED),
+            "review_state": i.review_state or "",
+            # The invoices a PENDING proposal would apply to. Read from the
+            # stored proposal, so the button names the same invoice the matcher
+            # proposed — not a fresh match that might read differently.
+            "proposed_invoices": _proposed_invoice_numbers(s, i),
+            "proposal": _loads(i.proposed_json),
+            # WAITING means PENDING, full stop. This used to also ask "is the
+            # confidence below the band", which stayed true after approval — so
+            # an already-applied match kept appearing in the review queue and
+            # offered a button that could only fail.
+            "awaiting_human": (i.review_state == "PENDING"),
             "settled_match": i.match_status == MatchStatus.MATCHED,
         })
     return out

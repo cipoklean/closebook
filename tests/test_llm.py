@@ -94,8 +94,11 @@ def test_model_returning_none_escalates_instead_of_crashing():
 
     result = match_inflow(1_200_000, "USD", {"reference": "zzz", "payer_name": "?"},
                           _cands(), llm=Silent())
-    assert result.status == "AMBIGUOUS"
-    assert result.confidence == 0.0
+    # It did NOT crash, the model contributed nothing, and the deterministic
+    # reading survived it — silence is not evidence against a plausible match.
+    assert result.confidence < 0.90, "nothing here is confident enough to apply"
+    assert result.evidence.get("model_consulted") is True
+    assert result.evidence["model_attempt"]["confidence"] == 0.0
 
 
 def test_model_cannot_invent_an_invoice():
@@ -106,7 +109,11 @@ def test_model_cannot_invent_an_invoice():
 
     result = match_inflow(1_200_000, "USD", {"reference": "zzz", "payer_name": "?"},
                           _cands(), llm=Fabricator())
-    assert result.status == "AMBIGUOUS"
+    # INV-9999 does not exist, so it cannot appear in any allocation.
+    from app.domain.matching import Candidate
+    real_ids = {c.invoice_id for c in _cands()}
+    assert all(a.invoice_id in real_ids for a in result.allocations)
+    assert result.method != "LLM" or result.confidence == 0.0
 
 
 def test_model_cannot_cross_currencies():

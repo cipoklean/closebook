@@ -60,12 +60,31 @@ def test_exact_match_clean_reference():
     assert r.allocations[0].invoice_id == 1
 
 
-def test_exact_match_survives_o_zero_typo():
-    """Beat 2 literally uses reference "inv 0O41 brightline"."""
-    r = try_exact(1_200_000, "USD", "inv 0O41 brightline", [BRIGHTLINE, LUMEN])
-    assert r is not None, "O/0 typo must still match exactly"
+def test_a_CLEAN_reference_is_EXACT_at_full_confidence():
+    """EXACT means the number is literally there. Nothing was inferred."""
+    r = try_exact(1_200_000, "USD", "payment for INV-0041", [BRIGHTLINE, LUMEN])
+    assert r is not None
+    assert r.method == "EXACT"
     assert r.confidence == 1.0
+    assert r.status == "MATCHED"
     assert r.allocations[0].invoice_id == 1
+
+
+def test_an_O_ZERO_typo_is_RULE_and_below_the_band():
+    """Beat 2 literally uses reference "inv 0O41 brightline".
+
+    The old behaviour called this EXACT at 1.00, which is a lie about how much
+    was known: nothing in the reference says "0041" until O is folded to 0. It
+    is a plausible READING, so it is labelled RULE, scored below the auto band,
+    and a human confirms it.
+    """
+    r = try_exact(1_200_000, "USD", "inv 0O41 brightline", [BRIGHTLINE, LUMEN])
+    assert r is not None, "the typo must still be READ, just not trusted"
+    assert r.method == "RULE"
+    assert r.confidence < 0.90, "folding is a guess and must not auto-apply"
+    assert r.status == "PROPOSED"
+    assert r.allocations[0].invoice_id == 1
+    assert "folded" in r.reason
 
 
 def test_exact_requires_currency_and_amount_to_agree():
@@ -210,7 +229,10 @@ def test_llm_proposal_is_revalidated_in_code():
 
 
 def test_llm_overallocation_is_caught_by_code():
-    """Model claims 900,000 against a 700,000 open balance -> ESCALATE."""
+    """Model claims 900,000 against a 700,000 open balance -> its numbers are
+    discarded. The deterministic reading (0.88, amount-only, no payer) is kept
+    and recorded as hearing the model out — a model that over-allocates does not
+    also get to erase a plausible reading by shrugging."""
     # MAJOR units, as the real OpenAI-compatible client returns them.
     r = match_inflow(
         700_000, "USD", {"payer_name": "", "reference_raw": "wire ref 88123"},
@@ -218,8 +240,11 @@ def test_llm_overallocation_is_caught_by_code():
         llm=StubLLM({"allocations": {"1": 9_000}, "confidence": 0.99,
                      "rationale": "looks right to me"}),
     )
-    assert r.status == "AMBIGUOUS"
-    assert r.confidence == 0.0
+    assert r.method == "RULE", "the model's numbers were NOT used"
+    assert r.confidence < 0.90, "and it still needs a human"
+    assert r.evidence.get("model_consulted") is True
+    assert r.evidence["model_attempt"]["confidence"] == 0.0, \
+        "the model's rejected attempt is recorded"
 
 
 def test_llm_allocations_must_sum_to_inflow():
@@ -245,34 +270,65 @@ def test_llm_currency_crossing_is_rejected():
 
 
 def test_llm_unknown_invoice_is_rejected():
+    """An invoice the model invented must not appear in the result."""
     r = match_inflow(
         700_000, "USD", {"payer_name": "", "reference_raw": "wire"},
         _needs_llm_candidates(),
         llm=StubLLM({"allocations": {"999": 700_000}, "confidence": 0.99,
                      "rationale": "?"}),
     )
-    assert r.status == "AMBIGUOUS"
+    assert all(a.invoice_id in (1, 2) for a in r.allocations), \
+        "invoice 999 does not exist and must not be allocated"
+    assert r.method != "LLM"
 
 
-def test_dead_llm_escalates_rather_than_guesses():
+def test_a_dead_llm_neither_crashes_nor_invents_anything():
+    """A gateway that 503s must not become a wrong decision — and must not
+    destroy the deterministic reading either."""
     class Boom:
         def propose(self, inflow, candidates):
             raise RuntimeError("gateway 503")
 
     r = match_inflow(700_000, "USD", {"payer_name": "", "reference_raw": "wire"},
                      _needs_llm_candidates(), llm=Boom())
-    assert r.status == "AMBIGUOUS"
-    assert r.needs_escalation
+    assert r.method == "RULE", "decided without the model"
+    assert r.confidence < 0.90
+    assert r.evidence.get("model_consulted") is True
+    assert "503" in str(r.evidence["model_attempt"].get("error")), \
+        "and the outage is on the record"
 
 
 # ---- orchestrator --------------------------------------------------------
 def test_beat2_end_to_end_typo_deposit():
+    """The typo is READ, and it is NOT what decided the match.
+
+    With a recognised payer and an exact amount, the RULE tier identifies the
+    invoice on its own evidence (payer identity + open balance) and scores 0.92.
+    That is honest: 0.92 is what the payer and the amount justify, NOT the 1.00
+    the folded reference used to claim.
+    """
     r = match_inflow(1_200_000, "USD",
                      {"payer_name": "Brightline Retail",
                       "reference_raw": "inv 0O41 brightline"},
                      [BRIGHTLINE, LUMEN])
+    assert r.method == "RULE", "never EXACT — the number was folded, not found"
+    assert 0.90 <= r.confidence < 1.0, "confident, but not certain"
     assert r.status == "MATCHED"
-    assert r.method == "EXACT"
+
+
+def test_a_folded_reference_with_NO_other_evidence_is_PROPOSED():
+    """When folding is the ONLY thing pointing at an invoice, it is a proposal.
+
+    An unknown payer and a typo'd number is exactly the case that must reach a
+    human rather than move an invoice on its own.
+    """
+    r = match_inflow(1_200_000, "USD",
+                     {"payer_name": "Somebody Else",
+                      "reference_raw": "chq 0O41"},
+                     [BRIGHTLINE])
+    assert r.status == "PROPOSED"
+    assert r.method == "RULE"
+    assert r.confidence < 0.90
 
 
 def test_beat3_end_to_end_partial_deposit():

@@ -54,6 +54,11 @@ class MatchStatus(str, enum.Enum):
     MATCHED = "MATCHED"
     PARTIAL = "PARTIAL"
     AMBIGUOUS = "AMBIGUOUS"
+    # PROPOSED: the code found a plausible invoice but not confidently enough to
+    # apply it. Nothing has moved — no invoice status, no ledger posting to the
+    # invoice — and a human can approve it into a match or reject it to
+    # suspense. Distinct from AMBIGUOUS, which means no usable reading at all.
+    PROPOSED = "PROPOSED"
 
 
 class MatchMethod(str, enum.Enum):
@@ -168,6 +173,17 @@ class Inflow(Base):
     match_method: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     match_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     match_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # A proposal that is waiting on a human. `proposed_json` holds the EXACT
+    # allocation the matcher wanted, so approving applies the same numbers that
+    # were shown — not a re-match that might read differently a minute later.
+    proposed_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # PENDING  -> proposed, nothing applied, cash in suspense
+    # APPROVED -> the proposal was applied (invoice + ledger moved)
+    # REJECTED -> a human said no; the cash stays in suspense for a refund
+    review_state: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    reviewed_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
 
 class Match(Base):

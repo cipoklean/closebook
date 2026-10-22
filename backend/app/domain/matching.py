@@ -160,9 +160,18 @@ def try_exact(inflow_amount_minor: int, inflow_currency: str,
               reference: str, candidates: Iterable[Candidate]) -> Optional[MatchResult]:
     """Invoice number present in the reference AND amount AND currency agree.
 
-    Number comparison folds digit lookalikes so "inv 0O41" matches INV-0041,
-    but requires the digits to align to the invoice's own digits (a trailing
-    invoice number, not an arbitrary number from the reference).
+    TWO outcomes, and they are not the same claim:
+
+      * **EXACT (1.00)** — the invoice number is literally in the normalised
+        reference. "INV-1001" appears in "payment for INV-1001". Nothing was
+        inferred.
+      * **RULE (0.88)** — the number is only there once digit lookalikes are
+        FOLDED: "1OO1" -> "1001", "O" read as "0". Nothing in the reference says
+        1001; the code guessed, plausibly.
+
+    The second used to return EXACT at 1.00, which is a lie about how much was
+    known, and 1.00 is the number a reader trusts most. 0.88 is below the
+    auto-apply band, so a folded number is PROPOSED and a human confirms it.
     """
     ref_norm = normalise(reference)
     ref_nums = number_blob(reference)
@@ -174,18 +183,8 @@ def try_exact(inflow_amount_minor: int, inflow_currency: str,
         inv_norm = normalise_invoice(c.number)
         if not inv_norm:
             continue
-        # (a) whole normalised reference contains the whole normalised number
-        hit = inv_norm in ref_norm
-        if not hit and ref_nums:
-            # (b) or the invoice's digits appear as a contiguous run in the
-            # reference's digits, so a typo'd reference like "0O41" still
-            # matches INV-0041. Require at least 3 digits — a 1-2 digit
-            # invoice number would otherwise match any reference containing
-            # that digit.
-            inv_digits = "".join(re.findall(r"\d+", fold_digits(c.number)))
-            if len(inv_digits) >= 3 and inv_digits in ref_nums:
-                hit = True
-        if hit:
+        # (a) the whole normalised invoice number appears in the reference.
+        if inv_norm in ref_norm:
             return MatchResult(
                 status="MATCHED",
                 allocations=[Allocation(c.invoice_id, inflow_amount_minor)],
@@ -196,6 +195,27 @@ def try_exact(inflow_amount_minor: int, inflow_currency: str,
                           "normalised_reference": ref_norm},
                 reason=f"reference identifies {c.number} exactly",
             )
+        # (b) or its digits appear as a contiguous run only after folding, so a
+        # typo'd reference like "0O41" reads as INV-0041. Require at least 3
+        # digits — a 1-2 digit invoice number would otherwise match any
+        # reference containing that digit.
+        if ref_nums:
+            inv_digits = "".join(re.findall(r"\d+", fold_digits(c.number)))
+            if len(inv_digits) >= 3 and inv_digits in ref_nums:
+                return MatchResult(
+                    status="PROPOSED",
+                    allocations=[Allocation(c.invoice_id, inflow_amount_minor)],
+                    confidence=0.88, method="RULE",
+                    evidence={
+                        "rule": "invoice number appears in the reference only "
+                                "after folding digit lookalikes",
+                        "invoice": c.number,
+                        "normalised_reference": ref_norm,
+                        "folded_digits": ref_nums,
+                    },
+                    reason=(f"reference is only {c.number} if 0/O and 1/I are "
+                            f"folded — a human should confirm"),
+                )
     return None
 
 
@@ -586,16 +606,44 @@ def match_inflow(inflow_amount_minor: int, inflow_currency: str,
     # when the deterministic tiers did not reach the auto threshold — and its
     # answer is ALWAYS re-validated in code (try_llm cannot return a clean
     # auto-match on an arithmetically impossible proposal).
+    #
+    # THE MODEL DOES NOT GET TO DELETE A GOOD DETERMINISTIC READING. Returning
+    # `try_llm(...)` unconditionally meant a folded reference that the matcher
+    # had read at 0.88 (a usable proposal, waiting for a human) was thrown away
+    # the moment the model answered "nothing" at 0.00 — the worse answer
+    # replaced the better one, and the operator saw a blank instead of the
+    # invoice the code had already identified. Best answer wins; a tie keeps the
+    # deterministic one, because it can be explained line by line.
+    llm_attempt = None
     if llm is not None and (best is None or best.confidence < 0.9):
-        return try_llm(inflow_amount_minor, inflow_currency, inflow_meta, candidates, llm)
+        llm_res = try_llm(inflow_amount_minor, inflow_currency, inflow_meta,
+                          candidates, llm)
+        llm_attempt = {
+            "status": llm_res.status,
+            "confidence": float(llm_res.confidence),
+            "reason": llm_res.reason,
+            "claimed": (llm_res.evidence or {}).get("model_claimed_confidence"),
+            "rationale": (llm_res.evidence or {}).get("rationale") or "",
+            "error": (llm_res.evidence or {}).get("error"),
+        }
+        if best is None or llm_res.confidence > best.confidence:
+            llm_res.evidence = dict(llm_res.evidence or {},
+                                    model_consulted=True,
+                                    model_attempt=llm_attempt)
+            return llm_res
 
     if best is not None:
+        if llm_attempt is not None:
+            best.evidence = dict(best.evidence or {}, model_consulted=True,
+                                 model_attempt=llm_attempt)
         return best
 
     return MatchResult(
         status="AMBIGUOUS", confidence=0.0, method="RULE",
         evidence={"rule": "no tier reached the auto threshold",
                   "reference": reference, "payer": payer,
-                  "candidate_count": len(candidates)},
+                  "candidate_count": len(candidates),
+                  "model_consulted": llm_attempt is not None,
+                  "model_attempt": llm_attempt},
         reason="no confident match; a human decides",
     )

@@ -68,9 +68,10 @@ class TestIntakeIsExactlyOnce:
         _invoice("INV-1001", "USD", 1_200_000)
         r = I.ingest_deposit(db, _deposit("dep-1", "USD", 1_200_000,
                                           payer="Brightline Retail",
-                                          reference="invoce 1OO1 brightline"))
+                                          reference="payment for INV-1001"))
         assert r.status == "MATCHED"
         assert r.method == "EXACT"
+        assert r.confidence == 1.0
         assert r.confidence >= 0.9
         assert any("INV-1001" in a for a in r.applied)
         with session_scope() as s:
@@ -110,12 +111,24 @@ class TestIntakeIsExactlyOnce:
 
 # ------------------------------------------------------------------- matching
 class TestMatchingOnRealReferences:
-    def test_a_typoed_invoice_number_still_matches(self, db):
-        """'1OO1' folds to '1001' — the O/0 case the matcher exists for."""
+    def test_a_typoed_invoice_number_is_READ_but_only_PROPOSED(self, db):
+        """'1OO1' folds to '1001' — read, but not trusted on its own.
+
+        With no payer to corroborate it, folding is the entire evidence, so the
+        match is PROPOSED: the invoice does not move and the cash waits in
+        suspense for a human.
+        """
         _invoice("INV-1001", "USD", 1_200_000)
         r = I.ingest_deposit(db, _deposit("a", "USD", 1_200_000,
                                           reference="invoce 1OO1 brightline"))
-        assert r.status == "MATCHED"
+        assert r.disposition == "PROPOSED"
+        assert r.confidence < 0.90
+        with session_scope() as s:
+            inv = s.query(InvoiceReceivable).filter_by(number="INV-1001").one()
+            assert inv.amount_paid_minor == 0, "a folded number moves nothing"
+            inflow = s.query(Inflow).one()
+            assert inflow.review_state == "PENDING"
+            assert inflow.proposed_json, "the proposal is stored for approval"
 
     def test_a_material_part_payment_is_PARTIAL_and_never_auto_applies(self, db):
         """A payer we recognise plus a big shortfall = a deliberate part
@@ -128,15 +141,15 @@ class TestMatchingOnRealReferences:
         r = I.ingest_deposit(db, _deposit("b", "GBP", 480_000,
                                           payer="Harrow & Co",
                                           reference="part payment invoice 1002"))
-        assert r.status == "PARTIAL"
-        assert 0.75 <= r.confidence < 0.90, "applied, chaseable, not automatic"
+        assert r.status == "PARTIAL", "what the matcher read"
+        assert r.disposition == "PROPOSED", "and what actually happened"
+        assert 0.75 <= r.confidence < 0.90
         with session_scope() as s:
             inv = s.query(InvoiceReceivable).filter_by(number="INV-1002").one()
-            assert inv.status == RecStatus.PARTIAL
-            assert inv.amount_paid_minor == 480_000
+            assert inv.status == RecStatus.OPEN, "below the band moves NOTHING"
+            assert inv.amount_paid_minor == 0
             inflow = s.query(Inflow).one()
-            assert inflow.match_status != MatchStatus.MATCHED, \
-                "a sub-threshold match is recorded as awaiting a human"
+            assert inflow.review_state == "PENDING"
 
     def test_an_exact_amount_against_one_open_invoice_matches_on_amount_alone(self, db):
         """The documented rule, not a guess: an amount-only match is allowed when
@@ -147,7 +160,7 @@ class TestMatchingOnRealReferences:
         assert r.status in ("MATCHED", "PARTIAL")
         assert r.confidence < 0.90, "amount alone never reaches the auto band"
 
-    def test_an_odd_small_shortfall_ESCALATES_rather_than_guessing(self, db):
+    def test_an_odd_small_shortfall_is_PROPOSED_rather_than_guessed(self, db):
         """A 2% gap is outside the bank-fee tolerance and below the 10% that
         makes a shortfall deliberate — an odd fee, a wrong invoice and a typo all
         look identical here, so it goes to a human.
@@ -161,27 +174,27 @@ class TestMatchingOnRealReferences:
         _invoice("INV-1004", "USD", 500_000)
         r = I.ingest_deposit(db, _deposit("d", "USD", 490_000,
                                           reference="no idea what this is"))
-        assert r.status == "AMBIGUOUS"
-        assert r.confidence < 0.75, "an ambiguous read must never reach the band"
+        assert r.disposition == "PROPOSED"
+        assert r.confidence < 0.90, "an ambiguous read must never reach the band"
         with session_scope() as s:
             inflow = s.query(Inflow).one()
-            assert inflow.match_status != MatchStatus.MATCHED, \
-                "awaiting a human, not settled"
+            assert inflow.review_state == "PENDING"
             inv = s.query(InvoiceReceivable).filter_by(number="INV-1004").one()
-            assert inv.amount_paid_minor == 490_000, "the cash is visible on it"
-            assert inv.status == RecStatus.PARTIAL
+            assert inv.amount_paid_minor == 0, "a guess moves nothing"
+            assert inv.status == RecStatus.OPEN
 
-    def test_a_large_shortfall_is_a_deliberate_part_payment(self, db):
-        """The other side of that boundary: 84% outstanding is not a fee, so it
-        is a part payment — applied, and flagged for a human to chase."""
+    def test_a_large_shortfall_is_a_part_payment_but_still_needs_a_human(self, db):
+        """84% outstanding is not a fee, so it reads as a part payment — and at
+        0.70 it is below the band, so it is proposed rather than applied."""
         _invoice("INV-1005", "USD", 500_000)
         r = I.ingest_deposit(db, _deposit("e", "USD", 77_777,
                                           reference="no idea what this is"))
-        assert r.status == "PARTIAL"
+        assert r.disposition == "PROPOSED"
         assert r.confidence < 0.90
         with session_scope() as s:
             inv = s.query(InvoiceReceivable).filter_by(number="INV-1005").one()
-            assert inv.amount_paid_minor == 77_777
+            assert inv.amount_paid_minor == 0, "proposed, not applied"
+            assert s.query(Inflow).one().review_state == "PENDING"
 
     def test_the_cash_lands_in_the_right_currency(self, db):
         _invoice("INV-1002", "GBP", 800_000)
@@ -370,9 +383,10 @@ class TestTheVerdictIsReadableFromTheInflow:
         _invoice("INV-1001", "USD", 1_200_000)
         I.ingest_deposit(db, _deposit("m1", "USD", 1_200_000,
                                       payer="Brightline Retail",
-                                      reference="invoce 1OO1 brightline"))
+                                      reference="INV-1001"))
         a = self._arrivals(db)[0]
         assert a["method"] == "EXACT"
+        assert a["confidence"] == 1.0
         assert a["confidence"] >= 0.90
         assert a["settled_match"] is True
         assert a["awaiting_human"] is False
@@ -400,16 +414,13 @@ class TestTheVerdictIsReadableFromTheInflow:
         I.ingest_deposit(db, _deposit("m4", "GBP", 480_000, payer="Harrow & Co",
                                       reference="part payment invoice 1002"))
         a = self._arrivals(db)[0]
-        # The INFLOW is recorded AMBIGUOUS, not PARTIAL: apply_inflow_to_receivables
-        # re-classifies anything below the auto band as awaiting a human, while
-        # the matcher's own verdict stays in the reason and the tier in `method`.
-        assert a["match_status"] == "AMBIGUOUS"
+        assert a["match_status"] == "PROPOSED"
         assert a["method"] == "RULE"
         assert a["confidence"] < 0.90
         assert "part-payment" in a["reason"]
         assert a["awaiting_human"] is True, "it must surface under Needs your OK"
-        # and it WAS applied — the money is on the invoice, not parked
-        assert a["applied"] and a["applied"][0]["invoice"] == "INV-1002"
+        assert a["applied"] == [], "nothing is on the invoice yet"
+        assert a["review_state"] == "PENDING"
 
     def test_a_settled_match_does_not_wait_on_anyone(self, db):
         from app.dashboard import arrivals_block

@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr = Field(default=SecretStr(""))
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
+    # A model that reads a payment reference is on the CRITICAL PATH of an
+    # incoming payment, so the timeout is a real decision. 20s was too short for
+    # the configured provider and every call raised ReadTimeout, which read on
+    # the page as "the model proposed nothing" — a timeout dressed up as an
+    # answer. 45s with the deterministic tiers still deciding either way.
+    llm_timeout_s: int = 45
 
     # Demo: shared PIN gating the approval endpoints.
     demo_approver_pin: SecretStr = Field(default=SecretStr(""))

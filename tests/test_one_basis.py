@@ -217,8 +217,14 @@ class TestBeatOneFromTheSeed:
         assert steps["PO-7002"].action == ACT_DEFER
         assert any("waits for INV-0041 to land" in b
                    for b in steps["PO-7001"].blockers)
-        assert any("waits for INV-0042 to land" in b
-                   for b in steps["PO-7002"].blockers)
+        # PO-7002 needs USD and the only open invoice behind it is GBP, so it is
+        # NOT told to wait for a GBP payment to arrive — that was the wrong
+        # currency for the bill and pointed at the wrong customer. Its
+        # dependency is still named, because THAT is what structurally blocks it.
+        assert any("INV-0042" in b for b in steps["PO-7002"].blockers)
+        assert not any("waits for INV-0042 to land" in b
+                       for b in steps["PO-7002"].blockers), \
+            "a GBP invoice does not unblock a USD payment"
 
     def test_each_held_payment_states_both_reasons(self, db):
         """Not just the first: the dependency AND the cash."""
@@ -385,14 +391,29 @@ class TestAnUnfundableBillIsNotAShortfallInItsOwnCurrency:
     account, and it made a page with USD 15,250 in it read as overdrawn.
     """
 
-    def test_an_unfunded_bill_does_not_create_a_shortfall_in_its_currency(self, db):
+    def test_a_foreign_bill_is_costed_in_its_FUNDING_currency(self, db):
+        """A EUR bill paid with USD is a USD obligation.
+
+        It must never be reported as "Short by EUR" — nobody was going to spend
+        EUR out of a USD account — and the number has to be the PLAN's, not one
+        the tile invented, so both read the same computation.
+        """
         _cash("USD", 1_500_000)
         _payable("PO-EUR", "EUR", 900_000)          # a currency we do not hold
-        m = build_context([])["money"]
+        ctx = build_context([])
+        m = ctx["money"]
         assert "EUR" not in m["shortfall"], m["shortfall"]
         assert "EUR" not in m["promised"], m["promised"]
-        assert m["unfunded"], "it must still be surfaced, in plain words"
-        assert "no conversion is planned" in m["unfunded"][0]["note"]
+        line = next(l for l in m["lines"] if l["payable_number"] == "PO-EUR")
+        assert line["currency"] == "USD", "costed in the currency that leaves"
+        assert line["amount_minor"] > 900_000, "the conversion includes headroom"
+
+        # and it is the SAME number the planner put on the step
+        from app.domain.treasury import current_plan, funding_for
+        plan = current_plan(db)
+        step = next(s for s in plan.steps if s.payable_number == "PO-EUR")
+        assert step.funding_currency == line["currency"]
+        assert step.funding_amount_minor == line["amount_minor"]
 
     def test_a_FUNDED_foreign_bill_IS_costed_in_its_funding_currency(self, db):
         """The guard must not switch off the case the funding lookup exists for."""
@@ -402,9 +423,22 @@ class TestAnUnfundableBillIsNotAShortfallInItsOwnCurrency:
         assert m["promised"].get("USD"), "costed in the currency that buys it"
         assert "EUR" not in m["promised"]
 
-    def test_the_free_headline_says_short_only_when_a_budget_currency_is_short(self, db):
+    def test_the_page_never_reports_a_shortfall_in_a_currency_nobody_spends(self, db):
         _cash("USD", 1_500_000)
         _payable("PO-EUR", "EUR", 900_000)
         html = render_app(build_context([]), tab="home")
         assert "Short by EUR" not in html
-        assert "Not costed here" in html
+
+    def test_the_tile_and_the_planner_agree_on_the_cost(self, db):
+        """The whole point: one costing, called by both."""
+        from app.domain.treasury import current_plan
+        _cash("USD", 1_500_000)
+        _payable("PO-EUR", "EUR", 900_000)
+        m = build_context([])["money"]
+        program = {s.payable_number: s for s in current_plan(db).steps}
+        for line in m["lines"]:
+            st = program.get(line["payable_number"])
+            if st is None or not st.funding_currency:
+                continue
+            assert (line["currency"], line["amount_minor"]) == \
+                   (st.funding_currency, st.funding_amount_minor), line

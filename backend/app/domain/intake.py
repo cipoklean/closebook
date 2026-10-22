@@ -42,16 +42,29 @@ WANTED_ACCOUNTS = {"USD": ("US", "USD"), "GBP": ("GB", "GBP")}
 @dataclass
 class IntakeResult:
     deposit_id: str
-    status: str                 # MATCHED | PARTIAL | OVERPAID | AMBIGUOUS | DUPLICATE | ERROR
+    #: What the MATCHER read: MATCHED | PARTIAL | OVERPAID | PROPOSED | AMBIGUOUS
+    #: | DUPLICATE | ERROR. This is a reading, not an outcome.
+    status: str
     confidence: float = 0.0
     method: str = ""
     applied: list[str] = field(default_factory=list)
     reason: str = ""
     inflow_id: Optional[int] = None
+    #: What HAPPENED: APPLIED (the ledger moved the invoice), PROPOSED (stored
+    #: and waiting for a human), HELD (nothing usable), DUPLICATE, ERROR.
+    #: Reported separately because a PARTIAL reading that was NOT applied is a
+    #: completely different state from one that was, and the two used to share
+    #: a single field.
+    disposition: str = ""
+    review_state: str = ""
 
     @property
     def duplicate(self) -> bool:
         return self.status == "DUPLICATE"
+
+    @property
+    def proposed(self) -> bool:
+        return self.disposition == "PROPOSED"
 
 
 # ------------------------------------------------------------------ candidates
@@ -78,6 +91,114 @@ def candidates_from_db(session) -> list:
 
 
 # --------------------------------------------------------------------- intake
+def matcher_from_settings():
+    """The model matcher, or None when nothing is configured.
+
+    Returns `(matcher, why_not)`. The intake used to pass `llm=None`
+    unconditionally, so the model tier NEVER RAN — the code was there, the
+    prompt was there, and no call site ever supplied an object. That is why AI
+    activity showed "0 calls" even for a reference nothing could read.
+    """
+    try:
+        from .llm import LLMConfig, OpenAICompatibleMatcher
+    except Exception as exc:                      # pragma: no cover
+        return None, f"the model client could not be imported: {exc}"
+    cfg = LLMConfig.from_settings()
+    if not cfg.available:
+        return None, ("no model is configured — LLM_API_KEY is empty, so the "
+                      "deterministic tiers decide alone")
+    return OpenAICompatibleMatcher(cfg), ""
+
+
+def _trace_model(session, *, inflow, result, llm, why_not: str) -> None:
+    """Record the model call and the code's verdict side by side.
+
+    Written to `agent_trace`, which is the table the AI-activity screen already
+    reads, so the proposal and the enforcement appear together rather than one
+    of them being implied.
+    """
+    import json as _json
+
+    from ..models import AgentTrace
+
+    ev = result.evidence or {}
+    attempt = ev.get("model_attempt") or {}
+    consulted = bool(ev.get("model_consulted")) or result.method == "LLM"
+    claimed = attempt.get("claimed", ev.get("model_claimed_confidence"))
+    rationale = attempt.get("rationale") or ev.get("rationale") or ""
+
+    if consulted:
+        # The tier ran. `None` in last_error means it answered.
+        err = (attempt.get("error")
+               or (getattr(llm, "last_error", None) if llm is not None else None)
+               or why_not)
+        session.add(AgentTrace(
+            tool="propose_match",
+            inputs_json=_json.dumps({
+                "inflow_id": inflow.id,
+                "amount_minor": inflow.amount_minor,
+                "currency": inflow.currency,
+                "payer": inflow.payer_name or "",
+                "reference_raw": inflow.reference_raw or "",
+                "model": getattr(getattr(llm, "cfg", None), "model", "") or "",
+            }, default=str)[:4000],
+            outputs_json=_json.dumps({
+                "model_proposed": {
+                    "allocations": [
+                        {"invoice_number": a.get("invoice"),
+                         "amount": a.get("amount")}
+                        for a in (result.evidence or {}).get("allocations", [])
+                    ],
+                    "confidence": claimed,
+                    "rationale": rationale,
+                },
+                "model_error": (None if err == "" else err),
+            }, default=str)[:4000],
+            verdict=("accepted" if result.method == "LLM"
+                     and result.confidence > 0 else "escalated"),
+            detail=(
+                f"the model claimed {claimed}; code re-checked it and kept the "
+                f"DETERMINISTIC reading instead ({result.method} at "
+                f"{result.confidence:.2f}) because it was better grounded: "
+                f"{result.reason}"
+                if result.method != "LLM" else
+                (f"the model claimed {claimed}. Code pinned it to "
+                 f"{result.confidence:.2f} and re-checked every number; "
+                 f"{result.reason}") if claimed is not None else
+                (err or "the model answered and code re-validated it")),
+        ))
+        session.add(AgentTrace(
+            tool="decide_match",
+            inputs_json=_json.dumps({"inflow_id": inflow.id}, default=str),
+            outputs_json=_json.dumps({
+                "confidence": float(result.confidence),
+                "band": "auto" if result.confidence >= 0.90 else "proposed",
+                "status": result.status,
+                "reason": result.reason,
+                "evidence": result.evidence,
+            }, default=str)[:4000],
+            verdict=("accepted" if result.confidence >= 0.90 else "escalated"),
+            detail=result.reason,
+        ))
+        return
+
+    # The tier did NOT run. Say which of the two reasons it was, so the page
+    # never reports a bare "0 calls" for a decision nobody was asked about.
+    if why_not or (llm is not None and getattr(llm, "last_error", None)):
+        session.add(AgentTrace(
+            tool="model_unavailable",
+            inputs_json=_json.dumps({"inflow_id": inflow.id}, default=str),
+            outputs_json=_json.dumps({
+                "model_error": why_not or getattr(llm, "last_error", ""),
+                "decided_by": result.method,
+                "deterministic_confidence": float(result.confidence),
+            }, default=str)[:2000],
+            verdict="escalated",
+            detail=(why_not or getattr(llm, "last_error", "")
+                    or "the model was not consulted"),
+        ))
+
+
 def record_and_match(session, *, deposit_id: str, currency: str,
                      amount_minor: int, payer_name: str = "",
                      reference: str = "", llm=None) -> IntakeResult:
@@ -116,12 +237,24 @@ def record_and_match(session, *, deposit_id: str, currency: str,
     session.add(inflow)
     session.flush()
 
+    # THE MODEL IS ACTUALLY CONSULTED HERE. Passing `llm=None` unconditionally
+    # meant the LLM tier could never run, whatever was configured.
+    why_not = ""
+    if llm is None:
+        llm, why_not = matcher_from_settings()
+
     cands = candidates_from_db(session)
     result = match_inflow(
         inflow.amount_minor, inflow.currency,
         {"reference_raw": reference or "", "payer_name": payer_name or ""},
         cands, llm=llm,
     )
+    try:
+        _trace_model(session, inflow=inflow, result=result, llm=llm,
+                     why_not=why_not)
+    except Exception:
+        log.exception("could not record the model trace for inflow %s",
+                      inflow.id)
 
     # The ledger re-checks confidence and posts the cash. It is the ONLY writer
     # of a receivable's paid amount and status.
@@ -140,6 +273,8 @@ def record_and_match(session, *, deposit_id: str, currency: str,
         if inv is not None:
             numbers.append(f"{inv.number} ({inv.status.value})")
     session.flush()
+    disposition = ("APPLIED" if matches
+                   else ("PROPOSED" if inflow.proposed_json else "HELD"))
     return IntakeResult(
         deposit_id=str(deposit_id),
         status=result.status,
@@ -148,6 +283,8 @@ def record_and_match(session, *, deposit_id: str, currency: str,
         applied=numbers,
         reason=result.reason or "",
         inflow_id=inflow.id,
+        disposition=disposition,
+        review_state=inflow.review_state or "",
     )
 
 
