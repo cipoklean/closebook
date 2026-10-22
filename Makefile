@@ -7,7 +7,8 @@ ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 PY := $(ROOT)/.venv/bin/python
 PIP := $(ROOT)/.venv/bin/pip
 
-.PHONY: help setup dev seed demo test webhook-url run-ui clean
+.PHONY: help setup dev seed demo test webhook-url run-ui clean \
+        testsprite testsprite-reset testsprite-url
 
 help:
 	@echo "make setup      create .venv, install requirements, copy .env.example -> .env (first run only)"
@@ -16,6 +17,11 @@ help:
 	@echo "make demo       run the 7-beat scripted demo (requires seed + .env + sandbox creds)"
 	@echo "make test       run pytest (policy, matching, money, webhook, idempotency)"
 	@echo "make webhook-url create a cloudflared tunnel and print the public webhook URL"
+	@echo ""
+	@echo "TestSprite (automated tester) — a SEPARATE instance, own DB, own PIN:"
+	@echo "make testsprite       run it on :8020 against data/testsprite.sqlite3"
+	@echo "make testsprite-url   open a public tunnel to :8020 and print the URL"
+	@echo "make testsprite-reset empty its database (no seeded data) for a clean run"
 
 setup:
 	@if [ ! -d .venv ]; then python3 -m venv .venv; fi
@@ -68,3 +74,68 @@ webhook-url:
 
 clean:
 	rm -rf .venv .pytest_cache
+
+# ---------------------------------------------------------------------------
+# TestSprite — a SEPARATE instance for automated testers.
+#
+# An automated tester presses every button it can reach and submits invented
+# data. Pointed at the operator's workspace that is not a test, it is an
+# incident. This instance has its own database, its own port, its own public
+# URL and its own PIN, and it labels every row it writes "testsprite".
+#
+# It shares the Airwallex SANDBOX keys and the NVIDIA LLM config on purpose:
+# the point is the same code against the same sandbox APIs. Nothing in this
+# project touches real money.
+#
+# Requires TESTSPRITE_PIN in .env (see .env.example). The PIN is never printed.
+# ---------------------------------------------------------------------------
+TESTSPRITE_PORT ?= 8020
+
+testsprite:
+	@"$(ROOT)/scripts/testsprite.sh"
+
+# One command to start from nothing. Deletes and rebuilds the file, seeds
+# NOTHING, so the run builds its own world through the Setup screens.
+testsprite-reset:
+	@"$(PY)" "$(ROOT)/scripts/testsprite_reset.py"
+
+# Its own tunnel.
+#
+# WHY CLOUDFLARED AND NOT NGROK: ngrok's free plan puts the account's ONE
+# reserved static domain on every `ngrok http` endpoint, so a second tunnel
+# fails with ERR_NGROK_334 ("already online"). Its only suggested alternative is
+# `--pooling-enabled`, which load-balances both endpoints on the SAME hostname —
+# that would route an automated tester into the operator's real workspace at
+# random, which is the exact thing this instance exists to prevent.
+#
+# cloudflared also removes the free-tier warning page entirely, so a bot browser
+# needs no special header at all. Its URL is random and changes on restart,
+# because a quick tunnel cannot claim a fixed hostname without a Cloudflare
+# account and a DNS record.
+TESTSPRITE_TUNNEL ?= $(shell which cloudflared 2>/dev/null || echo /usr/local/bin/cloudflared)
+
+testsprite-url:
+	@if [ ! -x "$(TESTSPRITE_TUNNEL)" ]; then echo "cloudflared not found — set TESTSPRITE_TUNNEL=/path/to/cloudflared"; exit 1; fi
+	@if curl -s -o /dev/null -m 3 http://127.0.0.1:$(TESTSPRITE_PORT)/healthz; then \
+	  echo "the TestSprite instance is up on :$(TESTSPRITE_PORT)"; \
+	else echo "warning: nothing is answering on :$(TESTSPRITE_PORT) yet — run 'make testsprite' first"; fi
+	@mkdir -p logs
+	@rm -f logs/cloudflared-testsprite.log
+	@nohup "$(TESTSPRITE_TUNNEL)" tunnel --url http://127.0.0.1:$(TESTSPRITE_PORT) \
+	  --no-autoupdate > logs/cloudflared-testsprite.log 2>&1 &
+	@for i in $$(seq 1 40); do \
+	  url=$$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' logs/cloudflared-testsprite.log 2>/dev/null | head -1); \
+	  [ -n "$$url" ] && break; sleep 1; done; \
+	  if [ -z "$$url" ]; then echo "no URL in logs/cloudflared-testsprite.log yet — check that file"; exit 1; fi; \
+	  echo ""; \
+	  echo "TestSprite URL: $$url"; \
+	  echo ""; \
+	  echo "Checking with a PLAIN curl — no headers, no user-agent tricks:"; \
+	  for path in / /app; do \
+	    code=$$(curl -s -o /dev/null -w '%{http_code}' -m 20 "$$url$$path" || true); \
+	    title=$$(curl -s -m 20 "$$url$$path" | grep -oE '<title>[^<]*</title>' | head -1); \
+	    echo "  $$path -> HTTP $$code  $$title"; \
+	  done; \
+	  echo ""; \
+	  echo "Add this to .env so the instance's own links point at itself:"; \
+	  echo "    TESTSPRITE_BASE_URL=$$url"
