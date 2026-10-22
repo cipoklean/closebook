@@ -46,6 +46,20 @@ class Settings(BaseSettings):
     # the page as "the model proposed nothing" — a timeout dressed up as an
     # answer. 45s with the deterministic tiers still deciding either way.
     llm_timeout_s: int = 45
+    # Tried when the primary returns a 5xx or times out. A free tier's busy hour
+    # must not read as "the model proposed nothing".
+    llm_fallback_model: str = ""
+    # 429 is a throttle, not a failure: back off and retry the SAME model.
+    llm_max_retries: int = 3
+    llm_backoff_s: float = 1.5
+    # Ask for a JSON object (`response_format`). The transport drops it and
+    # retries if the server rejects it, so this is safe on providers that lack it.
+    llm_json_mode: bool = True
+    # Provider-specific request keys as a JSON object, merged into the body —
+    # e.g. NVIDIA NIM's {"chat_template_kwargs": {"enable_thinking": false}} to
+    # skip the reasoning pass. Keeping it here means no provider needs a special
+    # case in the client.
+    llm_extra_body: str = ""
 
     # Demo: shared PIN gating the approval endpoints.
     demo_approver_pin: SecretStr = Field(default=SecretStr(""))
