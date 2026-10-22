@@ -14,6 +14,7 @@ from decimal import Decimal
 from ..config import get_settings
 from ..db import DB
 from ..money import to_major, to_minor
+from ..domain.ledger import post
 from ..models import (
     Customer, InvoicePayable, InvoiceReceivable, PayStatus, RecStatus,
     Supplier,
@@ -35,6 +36,16 @@ def _seed_local(db: DB) -> None:
                            payout_method=p.payout_method, mcc=p.mcc)
             s.add(row)
         suppliers[p.name] = row
+
+    # STARTING CASH, in the LEDGER. The planner reads real available cash, so
+    # the opening balance has to be posted, not merely declared in a constant.
+    # Idempotent: post() is unique per (txn_id, account, currency).
+    for currency, major in scenario.SEED_DEPOSITS:
+        minor = to_minor(major, currency)
+        post(s, txn_id=f"seed:deposit:{currency}",
+             legs=[(f"cash:{currency}", minor, 0, currency),
+                   ("opening_balance", 0, minor, currency)],
+             ref="opening cash")
 
     for r in scenario.RECEIVABLES:
         cust = s.query(Customer).filter(Customer.name == r.customer).first()

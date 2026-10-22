@@ -12,12 +12,11 @@ from datetime import datetime
 from decimal import Decimal
 
 from app.domain.planner import ACT_PAY, CashPosition, Payable, build_plan
-from app.domain.policy import CommittedCash, load_budget
+from app.domain.policy import Forecast, load_budget
 
 
 def _pos():
-    return CashPosition(balances={"USD": 4_000_000},
-                        committed=CommittedCash("USD", 4_000_000, 0),
+    return CashPosition(balances={"USD": 4_000_000}, forecast=Forecast(),
                         rates={})
 
 

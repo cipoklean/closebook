@@ -41,8 +41,8 @@ from typing import Iterable, Optional
 
 from ..money import minor_for, money_str, to_major_str, to_minor
 from .policy import (
-    AUTO_PAY_LIMIT_USD, BudgetSettings, CommittedCash, PayablePriority,
-    RESERVE_FLOOR_USD, breaches_reserve_floor, priority_key, prioritise,
+    AUTO_PAY_LIMIT_USD, BudgetSettings, Forecast, PayablePriority,
+    RESERVE_FLOOR_USD, available_cash_minor, priority_key, prioritise,
     requires_approval, supported, total_payout_minor, usd_value_minor,
 )
 
@@ -75,19 +75,38 @@ class Payable:
 
 @dataclass
 class CashPosition:
-    """What we hold and what we're allowed to move.
+    """What we hold, what is already committed, and what is still coming.
 
-    balances:     real spendable balance per currency (sandbox = CAPACITY)
-    committed:    committed-cash budget (policy), in `committed_currency`
-    rates:        1 USD -> N units of currency. Used to size FX and to value
-                  amounts for the USD-based floor/limit checks.
+    balances:  LEDGER cash per currency. Capacity — and, in the budget currency,
+                                                 the cash the floor is measured against.
+    in_flight: sent to the bank and not settled in the LEDGER yet. Committed
+               money that has not left the books; it must not be planned twice.
+    forecast:  invoiced and expected. DISPLAY AND NAMING ONLY — never funds a
+               payment. See `policy.available_cash_minor`.
+    rates:     1 USD -> N units of currency. Used to size FX and to value
+               amounts for the USD-based floor/limit checks.
+
+    `committed` (the old expected-inflows budget) is GONE. It let the floor be
+    measured against money the business had not received, so the plan approved
+    payments the cash position could not cover.
     """
     balances: dict[str, int] = field(default_factory=dict)
-    committed: CommittedCash = field(default_factory=lambda: CommittedCash("USD", 0, 0))
+    in_flight: dict[str, int] = field(default_factory=dict)
+    forecast: Forecast = field(default_factory=Forecast)
     rates: dict[str, Decimal] = field(default_factory=dict)
+    budget_currency: str = "USD"
+    floor_minor: int = 500_000          # the reserve floor, in budget_currency
 
     def held(self, currency: str) -> int:
         return self.balances.get(currency.upper(), 0)
+
+    def available_minor(self, committed_this_run_minor: int = 0) -> int:
+        """Cash free to spend, via the ONE rule in policy.available_cash_minor."""
+        return available_cash_minor(
+            cash_minor=self.balances.get(self.budget_currency.upper(), 0),
+            in_flight_minor=self.in_flight.get(self.budget_currency.upper(), 0),
+            committed_this_run_minor=committed_this_run_minor,
+            floor_minor=self.floor_minor)
 
     def usd_rate(self, currency: str) -> Optional[Decimal]:
         """Units of `currency` per 1 USD. USD is 1 by definition."""
@@ -207,7 +226,60 @@ def _defer_cost(p: Payable, pos: CashPosition) -> int:
     return usd if usd is not None else 0
 
 
-# ---- the planner ---------------------------------------------------------
+def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: int,
+                    currency: str, floor_minor: int, forecast, what: str,
+                    conversion: bool = False,
+                    prefer_inflow: Optional[str] = None) -> tuple[str, str]:
+    """(reason, code) for a payment that does not fit, or ("", "") if it does.
+
+    ONE basis: `available_after` already has the floor taken off, and it was
+    computed by `available_cash_minor`. This function only decides WHICH
+    sentence to say, so the planner and the tiles cannot describe the same
+    position two different ways.
+
+    The three outcomes are different problems with different fixes:
+      * not enough money in the account at all  -> insufficient_balance
+      * fits only once an invoiced payment lands -> waits_for_inflow, named
+      * cannot fit and no expected inflow covers it -> reserve_floor
+    """
+    spends_budget = currency == "USD"
+    enough_cash = currency_held >= needed_minor
+    if enough_cash and (not spends_budget or available_after >= 0):
+        return "", ""
+
+    # How much MORE real cash would have to be here for this to fit. Two ways to
+    # be short: the account does not hold the money at all, or it holds it but
+    # spending it would breach the floor.
+    gap = (needed_minor - max(currency_held, 0)) if not enough_cash else -available_after
+
+    floor_txt = money_str(floor_minor, currency)
+    left_txt = money_str(available_after + floor_minor, currency)
+
+    # If money already INVOICED would cover the gap, this is a TIMING problem,
+    # not an affordability one, and the invoice is the actionable half. Naming it
+    # beats describing the arithmetic. It is still NOT paid early: the rule is
+    # defer and say what it waits for.
+    if forecast is not None and forecast.total_minor() >= gap:
+        names = forecast.funding(gap, prefer=prefer_inflow)
+        who = " and ".join(names) if names else "cash"
+        if enough_cash:
+            return (f"waits for {who} to land — paying it now would leave cash "
+                    f"{left_txt}, below the {floor_txt} floor"), "waits_for_inflow"
+        return (f"waits for {who} to land — the account holds "
+                f"{money_str(max(currency_held, 0), currency)} and this needs "
+                f"{money_str(needed_minor, currency)}"), "waits_for_inflow"
+
+    if not enough_cash:
+        return (f"{what}: needs {money_str(needed_minor, currency)} "
+                f"but the account holds "
+                f"{money_str(max(currency_held, 0), currency)}"), \
+               "insufficient_balance"
+
+    return (f"{what}: paying it now would leave cash {left_txt}, below the "
+            f"{floor_txt} floor"), "reserve_floor"
+
+
+
 def build_plan(payables: Iterable[Payable], pos: CashPosition,
                budget: Optional[BudgetSettings] = None,
                fx_tolerance_pct: Decimal = Decimal("0.50"),
@@ -217,15 +289,33 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
     `payables` may arrive in any order; `prioritise()` decides who is served
     first, so the output ordering is a function of policy, not of the query.
     """
-    budget = budget or BudgetSettings(committed=pos.committed)
+    budget = budget or BudgetSettings()
     plan = Plan()
     payables = list(payables)
 
-    # Running state. `working` is the live capacity we can still draw on;
-    # `committed_left` is the policy budget still deployable. Both start from
-    # the caller's position and are decremented as steps are planned.
+    bccy = budget.currency.upper()
+    floor_minor = int(budget.reserve_floor_usd * minor_for(bccy))
+
+    # Running capacity per currency: ledger cash MINUS what is already in
+    # flight, because money that has been sent cannot be spent twice. This is
+    # the only capacity number the planner uses, and it is real money.
     working = dict(pos.balances)
-    committed_left = pos.committed.available_minor()
+    for ccy, amt in (pos.in_flight or {}).items():
+        working[ccy.upper()] = working.get(ccy.upper(), 0) - int(amt)
+
+    def _available(also_spend_minor: int = 0) -> int:
+        """THE one available-cash rule, in the budget currency.
+
+        `also_spend_minor` is the step being CONSIDERED, nothing else: everything
+        already planned this run is inside `working` (each planned step takes its
+        capacity as it is appended), so passing it again here would count the same
+        money twice. That mistake made PO-7002 report a USD 11,692.00 hole when
+        the real one was USD 1,346.00.
+        """
+        return available_cash_minor(
+            cash_minor=working.get(bccy, 0),
+            committed_this_run_minor=also_spend_minor,
+            floor_minor=floor_minor)
 
     # ---- chase steps first: they recover cash, they never spend it --------
     for inv_number, shortfall in (chase_shortfalls or {}).items():
@@ -299,10 +389,10 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
         held = working.get(p.currency.upper(), 0)
 
         # --- 4. do we hold the currency? if not, the conversion is needed --
-        # Everything in this block is a WHAT-IF: it computes what the floor
-        # would say without touching `working` or `committed_left`, because a
-        # blocked payable must leave the remaining capacity for the next one.
-        fx_plan = None            # (sell_minor, rate, committed_after)
+        # Everything in this block is a WHAT-IF: it computes what the position
+        # would say without touching `working`, because a blocked payable must
+        # leave the remaining capacity for the next one.
+        fx_plan = None            # (sell_minor, rate)
         if held < move_minor:
             rate = pos.usd_rate(p.currency)
             if rate is None:
@@ -321,37 +411,27 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
 
             sell_minor = _fx_sell_needed(move_minor, p.currency, rate,
                                          fx_tolerance_pct)
-            usd_held = working.get("USD", 0)
-            if usd_held < sell_minor:
-                blockers.append(
-                    f"needs {money_str(sell_minor, 'USD')} to buy "
-                    f"{money_str(move_minor, p.currency)}, but only "
-                    f"{money_str(usd_held, 'USD')} is available — capacity, "
-                    f"not policy")
-                codes.append("insufficient_balance")
+            bs, bc = _blocked_reason(
+                needed_minor=sell_minor, available_after=_available(sell_minor),
+                currency_held=working.get(bccy, 0), currency=bccy,
+                floor_minor=floor_minor, forecast=pos.forecast,
+                what=f"buy {money_str(move_minor, p.currency)} for {p.number}",
+                conversion=True, prefer_inflow=p.depends_on_receivable)
+            if bs:
+                blockers.append(bs)
+                codes.append(bc)
             else:
-                committed_after_fx = committed_left - sell_minor
-                if breaches_reserve_floor(committed_after_fx, "USD",
-                                          floor_usd=budget.reserve_floor_usd):
-                    blockers.append(
-                        f"converting {money_str(sell_minor, 'USD')} would drop "
-                        f"committed cash to "
-                        f"{money_str(committed_after_fx, 'USD')}, below the "
-                        f"{money_str(int(budget.reserve_floor_usd * 100), 'USD')} "
-                        f"reserve floor — deferring, not trimming")
-                    codes.append("reserve_floor")
-                else:
-                    fx_plan = (sell_minor, rate, committed_after_fx)
+                fx_plan = (sell_minor, rate)
 
             if not blockers and fx_plan is not None:
                 # Actually plan the conversion and take the capacity.
-                sell_minor, rate, committed_after_fx = fx_plan
+                sell_minor, rate = fx_plan
                 fx_step = Step(
                     action=ACT_FX,
                     reason=(f"buy the {money_str(move_minor, p.currency)} "
                             f"that {p.number} needs{fee_txt}, "
                             f"including {fx_tolerance_pct}% drift tolerance"),
-                    sell_currency="USD", sell_amount_minor=sell_minor,
+                    sell_currency=bccy, sell_amount_minor=sell_minor,
                     buy_currency=p.currency.upper(), buy_amount_minor=move_minor,
                     rate=rate,
                     payable_number=p.number,
@@ -359,20 +439,25 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
                 )
                 fx_index = len(plan.steps)
                 plan.steps.append(fx_step)
-                committed_left = committed_after_fx
-                working["USD"] = working.get("USD", 0) - sell_minor
+                working[bccy] = working.get(bccy, 0) - sell_minor
                 working[p.currency.upper()] = held + move_minor
 
-        # --- 5. reserve floor on the payout itself (what-if when blocked) ---
-        pay_usd = pos.to_usd_minor(move_minor, p.currency)
-        committed_after_pay = committed_left - pay_usd
-        if breaches_reserve_floor(committed_after_pay, "USD",
-                                  floor_usd=budget.reserve_floor_usd):
-            blockers.append(
-                f"paying {p.number} ({money_str(move_minor, p.currency)}) would "
-                f"leave cash {money_str(committed_after_pay, 'USD')}, below the "
-                f"{money_str(int(budget.reserve_floor_usd * 100), 'USD')} floor")
-            codes.append("reserve_floor")
+        # --- 5. can we afford the payout itself? (what-if when blocked) ----
+        # The cost to the budget currency is what actually leaves it: a payout in
+        # a currency we already hold does not touch USD, so it does not consume
+        # the USD budget.
+        pay_cost = move_minor if p.currency.upper() == bccy else 0
+        bs, bc = _blocked_reason(
+            needed_minor=pay_cost,
+            available_after=_available(pay_cost),
+            currency_held=working.get(p.currency.upper(), 0),
+            currency=p.currency.upper(), floor_minor=floor_minor,
+            forecast=pos.forecast,
+            what=f"pay {p.number} ({money_str(move_minor, p.currency)})",
+            prefer_inflow=p.depends_on_receivable)
+        if bs:
+            blockers.append(bs)
+            codes.append(bc)
 
         # --- 6. anything blocking? one step, every reason ------------------
         if blockers:
@@ -394,7 +479,6 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
             move_minor, p.currency, pos.rates,
             auto_limit_usd=budget.auto_pay_limit_usd)
 
-        committed_left = committed_after_pay
         working[p.currency.upper()] = working.get(p.currency.upper(), 0) - move_minor
 
         plan.steps.append(Step(

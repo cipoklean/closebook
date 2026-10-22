@@ -23,9 +23,10 @@ from ..domain.planner import (
     ACT_CHASE, ACT_DEFER, ACT_ESCALATE, ACT_FX, ACT_PAY, CashPosition, Payable,
     build_plan,
 )
-from ..domain.policy import CommittedCash, load_budget
+from ..domain.policy import load_budget
 # The DB->planner assembly lives in ONE place, shared with the dashboard, so a
 # hold reason shown in the UI cannot drift from the one this demo prints.
+from ..money import money_str
 from ..domain.treasury import DEMO_RATES, cash_position as _cash_position_impl
 from ..models import InvoicePayable, InvoiceReceivable, PayStatus, RecStatus
 from ..seed import scenario
@@ -59,9 +60,16 @@ def _show_plan(db: DB) -> None:
     payables = _payables_from_db(db)
     pos = _cash_position(db, budget)
 
-    print(f"Committed cash (policy): {budget.committed.available_minor()/100:,.2f} "
-          f"{budget.committed.currency}   "
-          f"[sandbox balance = capacity, not policy]")
+    # ONE basis, printed: the same available_cash rule the tiles use.
+    bccy = budget.currency.upper()
+    cash = pos.balances.get(bccy, 0)
+    inflight = pos.in_flight.get(bccy, 0)
+    floor = pos.floor_minor
+    print(f"Cash ({bccy}, ledger): {cash/100:,.2f}   "
+          f"in flight: {inflight/100:,.2f}   floor: {floor/100:,.2f}")
+    print(f"Available to spend: {money_str(pos.available_minor(), bccy)}")
+    print(f"Forecast (invoiced, NOT spendable): "
+          f"{money_str(pos.forecast.total_minor(), bccy)}")
     print(f"Reserve floor: USD {budget.reserve_floor_usd}   "
           f"Auto-pay limit: USD {budget.auto_pay_limit_usd}")
     print()

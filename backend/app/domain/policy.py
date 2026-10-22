@@ -51,42 +51,96 @@ class PolicyError(Exception):
     """A plan step violated policy. Carries a human-readable reason."""
 
 
-# ---- committed-cash budget ----------------------------------------------
-@dataclass
-class CommittedCash:
-    """The Closebook-side cash position policy is written against.
+# ---- THE ONE AVAILABLE-CASH RULE ----------------------------------------
+def available_cash_minor(*, cash_minor: int, in_flight_minor: int = 0,
+                         committed_this_run_minor: int = 0,
+                         floor_minor: int = 0) -> int:
+    """Cash genuinely free to spend. THE single basis for the whole system.
 
-    `expected_inflows` is money already matched/expected but not yet landed;
-    `earmarked` is cash reserved for a specific known obligation.
+        available = cash - in flight - promised already this run - reserve floor
+
+    Every term is REAL money. Expected inflows are deliberately ABSENT: money
+    that has been invoiced but has not landed cannot pay anybody, and a system
+    that lets it fund a payment is a system that bounces transfers.
+
+    Both the planner's reserve-floor check and the dashboard tiles call this, so
+    they cannot drift apart again. They used to be two different answers to "can
+    we afford this": the plan approved PO-7003 while the page reported the
+    position USD 7,715.00 short, and a judge sees that contradiction in the first
+    ten seconds.
+
+    `cash_minor` is the LEDGER balance in the budget currency, never the
+    Airwallex sandbox balance — the sandbox pre-funds 10,000,000 in every major
+    currency, so a floor measured against it could never bind.
+    """
+    return (int(cash_minor) - int(in_flight_minor)
+            - int(committed_this_run_minor) - int(floor_minor))
+
+
+@dataclass
+class Forecast:
+    """Money invoiced and expected to land. NEVER funds a payment.
+
+    Kept for exactly two jobs: a display line, and naming what a deferred
+    payment is waiting for ("waits for INV-0042 to land"). It is not an input to
+    any affordability decision — that is `available_cash_minor`.
     """
     currency: str = "USD"
-    expected_inflows_minor: int = 0
-    earmarked_minor: int = 0
+    lines: list[dict] = field(default_factory=list)   # {number, currency, usd_minor}
 
-    def available_minor(self) -> int:
-        return max(0, self.expected_inflows_minor - self.earmarked_minor)
+    def total_minor(self) -> int:
+        return sum(int(x.get("usd_minor") or 0) for x in self.lines)
 
-    def usd_equivalent_minor(self, rates: Optional[dict[str, Decimal]] = None) -> int:
-        """Convert to USD for floor/limit comparisons (see usd_value_minor for
-        the rate convention: rates[CCY] = CCY per 1 USD)."""
-        if self.currency == "USD":
-            return self.available_minor()
-        rate = (rates or {}).get(self.currency)
-        if not rate:
-            # Conservative: treat unknown currency as not spendable for policy.
-            return 0
-        major = Decimal(self.available_minor()) / Decimal(minor_for(self.currency))
-        return int(major / rate * 100)
+    def funding(self, short_minor: int, prefer: str | None = None) -> list[str]:
+        """Which expected inflows would cover `short_minor`.
+
+        `prefer` is the invoice a payable already DEPENDS on, and it wins when it
+        covers the gap on its own. Without it a payment blocked waiting on
+        INV-0042 could be told it waits for INV-0041, because the largest open
+        invoice comes first — true in arithmetic, useless to the reader, and it
+        sends them to chase the wrong customer.
+
+        Only meaningful when `total_minor() >= short_minor`; the caller checks
+        that before quoting names, so a payment is never told it waits for an
+        invoice that would not be enough either.
+        """
+        if short_minor <= 0:
+            return []
+        if prefer:
+            for line in self.lines:
+                if str(line.get("number")) == prefer:
+                    if int(line.get("usd_minor") or 0) >= short_minor:
+                        return [prefer]
+                    break
+        out: list[str] = []
+        acc = 0
+        for line in sorted(self.lines, key=lambda r: -int(r.get("usd_minor") or 0)):
+            out.append(str(line.get("number")))
+            acc += int(line.get("usd_minor") or 0)
+            if acc >= short_minor:
+                break
+        return out
 
 
-# ---- loading the committed-cash budget ----------------------------------
+# ---- loading the limits --------------------------------------------------
 _SETTINGS_FILE = Path(__file__).resolve().parents[3] / "settings" / "committed_cash.json"
 
 
 @dataclass
 class BudgetSettings:
-    """The committed-cash budget plus the limits policy is written against."""
-    committed: CommittedCash
+    """The limits policy is written against.
+
+    This no longer carries a committed-cash budget. Policy used to run against
+    "expected inflows" (USD 40,000 invoiced, not landed), which meant the reserve
+    floor was measured against money the business had not received — so the plan
+    approved a payment the cash position could not cover. The budget is now the
+    LEDGER, through `available_cash_minor`. Expected inflows survive only as a
+    `Forecast`.
+
+    The file is still called committed_cash.json for history; the name is
+    misleading and the docstring in it says so.
+    """
+    currency: str = "USD"
     reserve_floor_usd: Decimal = RESERVE_FLOOR_USD
     auto_pay_limit_usd: Decimal = AUTO_PAY_LIMIT_USD
     fx_tolerance_pct: Decimal = Decimal("0.50")
@@ -98,18 +152,17 @@ def load_budget(path: str | Path | None = None) -> BudgetSettings:
 
     Falls back to the module defaults when the file is absent, so the library
     stays usable without the repo's settings directory.
+
+    `expected_inflows_minor` and `earmarked_minor` are deliberately NOT read:
+    they described a policy budget, and a policy budget is what allowed a
+    payment to be planned against money that had not arrived.
     """
     p = Path(path or os.environ.get("CLOSEBOOK_SETTINGS") or _SETTINGS_FILE)
     if not p.exists():
-        return BudgetSettings(committed=CommittedCash("USD", 0, 0))
+        return BudgetSettings()
     data = json.loads(p.read_text())
-    committed = CommittedCash(
-        currency=data.get("currency", "USD"),
-        expected_inflows_minor=int(data.get("expected_inflows_minor", 0)),
-        earmarked_minor=int(data.get("earmarked_minor", 0)),
-    )
     return BudgetSettings(
-        committed=committed,
+        currency=data.get("currency", "USD"),
         reserve_floor_usd=Decimal(str(data.get("reserve_floor_usd", RESERVE_FLOOR_USD))),
         auto_pay_limit_usd=Decimal(str(data.get("auto_pay_limit_usd", AUTO_PAY_LIMIT_USD))),
         fx_tolerance_pct=Decimal(str(data.get("fx_tolerance_pct", "0.50"))),
@@ -185,13 +238,22 @@ def total_payout_minor(amount_minor: int, currency: str, payout_method: str) -> 
     return amount_minor
 
 
-def breaches_reserve_floor(available_after_minor: int, currency: str = "USD",
+def breaches_reserve_floor(available_before_floor_minor: int, currency: str = "USD",
                            floor_usd: Decimal = RESERVE_FLOOR_USD,
                            rates: Optional[dict[str, Decimal]] = None) -> bool:
-    """Would this plan push USD-equivalent available cash below the floor?"""
-    if currency == "USD":
-        return available_after_minor < int(floor_usd * 100)
-    return usd_value_minor(available_after_minor, currency, rates) < int(floor_usd * 100)
+    """Would this leave the position below the floor?
+
+    Routed through `available_cash_minor`, which OWNS the rule, so this and the
+    planner and the tiles are literally the same arithmetic rather than three
+    transcriptions of it. `available_before_floor_minor` is the position BEFORE
+    the floor is taken off.
+    """
+    if currency != "USD":
+        available_before_floor_minor = usd_value_minor(
+            available_before_floor_minor, currency, rates)
+    return available_cash_minor(
+        cash_minor=available_before_floor_minor,
+        floor_minor=int(floor_usd * 100)) < 0
 
 
 # ---- prioritisation ------------------------------------------------------

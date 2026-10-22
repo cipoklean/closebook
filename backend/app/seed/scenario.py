@@ -72,9 +72,21 @@ class SeedPayable:
 # ---- company + cash -----------------------------------------------------
 COMPANY = "Kano Craft Imports Ltd"
 
+# Starting cash the business ALREADY HOLDS. This is real money: the planner
+# reads available cash from the LEDGER (see policy.available_cash_minor), so a
+# seed that only named a number in a constant would leave the plan unable to pay
+# anything. run_seed posts these as opening balances.
+#
+# USD 9,000 was chosen against the arithmetic, not picked: the floor is USD
+# 5,000, so it leaves USD 4,000 of headroom. PO-7003 (USD 1,800) fits with USD
+# 2,200 to spare and auto-pays; PO-7001's conversion (about USD 10,346) does NOT
+# fit, so PO-7001 waits for INV-0041 to land — which is what beat 2 injects. The
+# previous USD 40,000 was never in the ledger at all; it was the EXPECTED-INFLOW
+# forecast masquerading as policy, and it let the plan approve payments against
+# money the business had not received.
 SEED_DEPOSITS = [
     # (currency, major) -> both credited via POST /simulation/deposit/create
-    (USD, Decimal("40000")),
+    (USD, Decimal("9000")),
     (GBP, Decimal("6000")),
 ]
 
@@ -132,15 +144,20 @@ BEATS: list[DemoBeat] = [
     DemoBeat(
         "initial_plan",
         inject="manual_run",
-        expect="PO-7003 auto-paid (1800 < 2500 limit). PO-7001 + PO-7002 HELD "
-               "(their receivables INV-0041/INV-0042 haven't landed).",
+        expect="PO-7003 auto-paid (1800 < 2500 limit) out of REAL cash: "
+               "USD 9,000 - 1,800 = 7,200, still USD 2,200 above the 5,000 "
+               "floor. PO-7001 + PO-7002 HELD, each for two reasons: their "
+               "receivables haven't landed AND the cash is not there - the plan "
+               "says so and names the invoice it waits for.",
     ),
     DemoBeat(
         "deposit_typo_match",
         inject='deposit USD 12000 reference="inv 0O41 brightline"',
-        expect="EXACT match to INV-0041 despite the O/0 typo. Agent converts "
-               "EUR 9000 + 12.85 SWIFT fee, releases PO-7001 -> needs approval "
-               "(9012.85 > 2500). Approve in UI, then simulate SENT -> PAID.",
+        expect="EXACT match to INV-0041 despite the O/0 typo. The USD 12,000 "
+               "lands, so real cash is USD 21,000 and PO-7001 now fits: agent "
+               "converts EUR 9000 + 12.85 SWIFT fee, releases PO-7001 -> needs "
+               "approval (9012.85 > 2500). Approve in UI, then simulate "
+               "SENT -> PAID.",
     ),
     DemoBeat(
         "partial_payment",

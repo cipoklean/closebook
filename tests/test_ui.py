@@ -217,7 +217,7 @@ class TestAppShell:
         """
         ctx = _ctx()
         html = render_app(ctx, tab="home")
-        expected = f"{ctx['budget']['expected_inflows_minor'] / 100:,.2f}"
+        expected = f"{ctx['budget']['forecast_minor'] / 100:,.2f}"
         assert expected in html
         # a number that is in neither the context nor a real record
         assert "99,999.99" not in html
@@ -284,6 +284,9 @@ class TestLabelMapping:
         assert "Free to spend" in html
 
     def test_a_shortfall_names_the_currency(self, db):
+        """A shortfall in ANY currency must reach the page, not just the budget
+        currency: an unfundable EUR payment behind a comfortable USD headline is
+        the kind of contradiction this round exists to remove."""
         _payable(db, number="PO-7204", currency="EUR", amount=50_000)
         ctx = build_context([])
         html = render_app(ctx, tab="home")
@@ -891,10 +894,18 @@ class TestHeldPaymentsAreExplained:
         assert "INV-0042" in html
 
     def test_a_payable_over_the_limit_without_an_object_id_awaits_approval(self, db):
-        """Over the auto-pay limit and not yet sent => needs a human."""
+        """Over the auto-pay limit and not yet sent => needs a human.
+
+        The cash has to be there first: with the one basis, a payment that cannot
+        be afforded at all is DEFERRED, and a deferral is not an approval request.
+        """
         from app.db import session_scope
+        from app.domain.ledger import post
         from app.models import InvoicePayable, PayStatus, PayoutMethod, Supplier
 
+        with session_scope() as s:
+            post(s, "test:cash", [("cash:USD", 2_000_000, 0, "USD"),
+                                  ("receivable_clearing", 0, 2_000_000, "USD")])
         with session_scope() as s:
             sup = Supplier(name="Big Co", payout_method=PayoutMethod.LOCAL)
             s.add(sup)
@@ -1376,9 +1387,10 @@ class TestFundingCurrencyIsWhatHasToBeThere:
 
         # costed in USD — the currency that actually has to be there
         assert line["currency"] == "USD"
-        assert line["source"] == "conversion"
-        # the number is the PLAN's, drift headroom included, not a new rate
-        assert line["amount_minor"] == self._plan_funding("PO-7501").sell_amount_minor
+        # the commitment comes from the SENT step, not a rebuilt plan: the
+        # payload is what was actually submitted
+        assert line["source"] == "in_flight"
+        assert line["amount_minor"] == 1_034_600, "the stored sell amount"
         # sent, so it is in flight and NOT still promised
         assert line["where"] == "in_flight"
         assert "PO-7501" not in [
@@ -1405,7 +1417,9 @@ class TestFundingCurrencyIsWhatHasToBeThere:
         m = build_context([])["money"]
         html = render_app(build_context([]), tab="home")
         assert "In flight" in html
-        assert money_str(m["in_flight"]["USD"], "USD") in html
+        # this payable was sent in EUR, so that is the committed currency
+        assert m["in_flight"] == {"EUR": 901_285}
+        assert money_str(m["in_flight"]["EUR"], "EUR") in html
 
     def test_a_real_shortfall_after_fx_still_warns_and_names_the_payable(self, db):
         self._cash(db, "USD", 100_000)                       # USD 1,000.00 only

@@ -34,7 +34,9 @@ from app.domain.executor import ExecutionRefused, Executor  # noqa: E402
 from app.domain.plan_store import is_already_paid, new_run_id, persist_plan  # noqa: E402
 from app.domain.planner import (ACT_FX, ACT_PAY, CashPosition, Payable,  # noqa: E402
                                 build_plan)
-from app.domain.policy import CommittedCash, load_budget  # noqa: E402
+from app.db import get_default_db  # noqa: E402
+from app.domain.policy import load_budget  # noqa: E402
+from app.domain.treasury import cash_position  # noqa: E402
 
 BEN_ROTTERDAM = "6647f065-5075-412f-ba90-199e54200fe5"   # NL/EUR SWIFT, live
 
@@ -43,15 +45,12 @@ PAYABLE = dict(number="PO-7001", supplier="Rotterdam Freight BV", currency="EUR"
 
 
 def main() -> int:
-    reset_default_db()
+    reset_default_db(allow_demo_file=True)
     budget = load_budget()
-    # Committed cash must cover EUR 9,000 (~USD 10,240) or the floor blocks it.
-    pos = CashPosition(
-        balances={"USD": 10_120_000, "EUR": 0, "GBP": 10_018_000},
-        committed=budget.committed,
-        rates={"USD": Decimal("1"), "EUR": Decimal("0.878174"),
-               "GBP": Decimal("1.27")},
-    )
+    # LEDGER cash must cover the conversion (~USD 10,346) or the floor blocks
+    # it. The sandbox balance is deliberately not consulted: it pre-funds 10M,
+    # so a payment measured against it could never be refused.
+    pos = cash_position(get_default_db(), budget)
     plan = build_plan([Payable(**PAYABLE)], pos, budget)
     print("--- plan ---")
     for s in plan.steps:

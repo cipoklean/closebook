@@ -625,11 +625,11 @@ def _home(c: dict) -> str:
         f'<div class="x-fig">{e(cash_str)}</div>'
         f'<div class="x-statnote">Ledger balance, per currency. Balanced: '
         f'{"yes" if c["ledger_balanced"] else "no"}.</div>'
-        # Expected inflows are NOT cash: label them as money still to arrive, on
-        # their own line, instead of folding them into a balance we do not hold.
-        f'<div class="x-statnote">Plus {e(bud_ccy)} '
-        f'{money(b["expected_inflows_minor"])} invoiced and expected, not yet '
-        f'landed.</div>'
+        # Expected inflows are a FORECAST and never spendable. Say both, on
+        # their own line: this figure cannot fund a payment, and a reader who
+        # thinks otherwise will not understand why a payment was deferred.
+        f'<div class="x-statnote">Forecast: {e(money_str(b["forecast_minor"], bud_ccy))} '
+        f'invoiced and expected, not landed. Not spendable.</div>'
     )))
 
     # 2. What we owe, in the currency that will PAY for it, excluding anything
@@ -668,21 +668,26 @@ def _home(c: dict) -> str:
     # to buy.
     hccy = m["headline_currency"]
     floor_txt = money_str(m["reserve_floor_minor"], m["reserve_applies_to"])
-    if m["headline_shortfall_minor"]:
-        short_txt = money_str(m["headline_shortfall_minor"], hccy)
+    shorts = dict(m["shortfall"])
+    if shorts:
+        # EVERY short currency, not just the budget one. A shortfall in a
+        # currency we cannot fund is still a shortfall, and a page that reported
+        # only the budget currency would look comfortable while an unfundable
+        # payment sat in the list.
+        bits = " and ".join(money_str(v, ccy) for ccy, v in sorted(shorts.items()))
+        headline = f"Short by {bits}"
         who = m["breaching"][0] if m["breaching"] else None
         if who:
-            headline = (f'Short by {short_txt} — paying '
-                        f'{who["payable_number"]} '
-                        f'({money_str(who["amount_minor"], who["currency"])}) '
-                        f'would take cash below the {floor_txt} reserve floor.')
+            headline += (f" — paying {who['payable_number']} "
+                         f"({money_str(who['amount_minor'], who['currency'])}) "
+                         f"would take cash below the {floor_txt} reserve floor")
         else:
-            headline = (f'Short by {short_txt} after promised payments and the '
-                        f'{floor_txt} reserve floor.')
+            headline += (f" after promised payments and the {floor_txt} "
+                         f"reserve floor")
         head_cls = ' style="color:var(--x-bad)"'
     else:
-        headline = (f'{money_str(m["headline_free_minor"], hccy)} after promised '
-                    f'payments and the {floor_txt} reserve floor.')
+        headline = (f"{money_str(m['headline_free_minor'], hccy)} after promised "
+                    f"payments and the {floor_txt} reserve floor")
         head_cls = ""
     # Working, per currency, so the headline number is checkable.
     work = "".join(

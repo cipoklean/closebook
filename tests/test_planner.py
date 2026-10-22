@@ -15,7 +15,7 @@ from app.domain.planner import (
     ACT_CHASE, ACT_DEFER, ACT_ESCALATE, ACT_FX, ACT_PAY, CashPosition, Payable,
     build_plan,
 )
-from app.domain.policy import BudgetSettings, CommittedCash, load_budget
+from app.domain.policy import BudgetSettings, Forecast, load_budget
 
 
 # ---- the beat-1 scenario, straight from seed/scenario.py ---------------
@@ -35,12 +35,24 @@ ALL_THREE = [ROTTERDAM, SHENZHEN, ATLANTA]
 RATES = {"EUR": Decimal("0.8756"), "GBP": Decimal("1.27"), "CNY": Decimal("7.1")}
 
 
-def beat1_position(committed_minor=4_000_000):
-    """USD 40,000 committed, USD 40,000 capacity, no EUR yet."""
+def beat1_position(cash_minor=4_000_000, *, in_flight=None, forecast=None,
+                   floor_minor=500_000):
+    """A position the planner can ACTUALLY spend from.
+
+    `cash_minor` is real ledger cash now, not a committed-cash budget: the
+    planner reads available cash through policy.available_cash_minor, so a test
+    that hands it a budget instead of cash is testing a model that no longer
+    exists. In flight and the forecast default to empty and are opt-in, because
+    forgetting to pass in-flight money is exactly how a payment gets planned
+    twice.
+    """
     return CashPosition(
-        balances={"USD": 4_000_000, "GBP": 600_000},
-        committed=CommittedCash("USD", committed_minor, 0),
+        balances={"USD": cash_minor, "GBP": 600_000},
+        in_flight=dict(in_flight or {}),
+        forecast=forecast if forecast is not None else Forecast(),
         rates=RATES,
+        budget_currency="USD",
+        floor_minor=floor_minor,
     )
 
 
@@ -135,19 +147,20 @@ def test_pay_step_chains_to_its_fx_step():
     assert plan.steps[pay.chained_to].action == ACT_FX
 
 
-# ---- the reserve floor, the whole point of option (b) ------------------
+# ---- the reserve floor, on real cash ----------------------------------
 def test_reserve_floor_defers_the_big_payment():
     """Only USD 6,000 committed with a USD 5,000 floor: the EUR 9,012.85
     payout would breach it, so it must be DEFERRED — not trimmed to fit."""
-    tight = beat1_position(committed_minor=600_000)
+    tight = beat1_position(cash_minor=1_300_000)
     plan = build_plan([_unblock_roterdam()], tight, load_budget())
     assert plan.steps[0].action == ACT_DEFER
-    assert "reserve floor" in plan.steps[0].reason
+    assert "floor" in plan.steps[0].reason
+    assert "below" in plan.steps[0].reason
     assert plan.steps[0].policy_reason == "reserve_floor"
 
 
 def test_reserve_floor_message_states_the_shortfall():
-    tight = beat1_position(committed_minor=600_000)
+    tight = beat1_position(cash_minor=1_300_000)
     plan = build_plan([_unblock_roterdam()], tight, load_budget())
     # it must say what it WOULD have left, so a human can judge
     assert "below" in plan.steps[0].reason
@@ -155,7 +168,7 @@ def test_reserve_floor_message_states_the_shortfall():
 
 def test_floor_never_trims_the_amount():
     """A deferral must carry the FULL payable amount, never a shaved one."""
-    tight = beat1_position(committed_minor=600_000)
+    tight = beat1_position(cash_minor=1_300_000)
     plan = build_plan([_unblock_roterdam()], tight, load_budget())
     assert plan.steps[0].amount_minor == 901_285
 
@@ -163,13 +176,14 @@ def test_floor_never_trims_the_amount():
 def test_capacity_shortfall_is_distinguished_from_policy():
     """Running out of a currency is CAPACITY; breaching the floor is POLICY.
     They get different reasons because the fix is different."""
-    broke = CashPosition(balances={"USD": 5_000},   # USD 50 capacity
-                         committed=CommittedCash("USD", 4_000_000, 0),
-                         rates=RATES)
+    broke = CashPosition(balances={"USD": 5_000},     # USD 50 of real cash
+                         rates=RATES, floor_minor=500_000)
     plan = build_plan([_unblock_roterdam()], broke, load_budget())
     assert plan.steps[0].action == ACT_DEFER
+    # USD 50 cannot buy EUR 9,012.85 whatever the floor says, so this is NOT a
+    # floor problem and must not be reported as one.
     assert plan.steps[0].policy_reason == "insufficient_balance"
-    assert "capacity" in plan.steps[0].reason
+    assert "holds" in plan.steps[0].reason
 
 
 # ---- ordering is policy, not input order ------------------------------
@@ -209,9 +223,8 @@ def test_zero_shortfall_produces_no_chase():
 
 # ---- unpriceable / unsupported -----------------------------------------
 def test_no_rate_escalates_rather_than_guessing():
-    pos = CashPosition(balances={"USD": 4_000_000},
-                       committed=CommittedCash("USD", 4_000_000, 0),
-                       rates={})   # no rates at all
+    pos = CashPosition(balances={"USD": 4_000_000}, rates={},
+                       forecast=Forecast(), floor_minor=500_000)
     plan = build_plan([_unblock_roterdam()], pos, load_budget())
     assert plan.steps[0].action == ACT_ESCALATE
     assert plan.steps[0].policy_reason == "no_rate"

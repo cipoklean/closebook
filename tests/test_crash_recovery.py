@@ -23,14 +23,14 @@ from app.db import reset_default_db, session_scope
 from app.domain.executor import Executor
 from app.domain.planner import ACT_PAY, CashPosition, Step
 from app.models import PlanStep, StepStatus, StepType
-from app.domain.policy import CommittedCash
+from app.domain.policy import Forecast
 
 from tests.test_executor import FakeClient, FakeTransfers, _pay_step
 
 
 def _position():
     return CashPosition(balances={"USD": 4_000_000},
-                        committed=CommittedCash("USD", 4_000_000, 0), rates={})
+                        forecast=Forecast(), rates={})
 
 
 def _executor(session, transfers):

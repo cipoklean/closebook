@@ -18,7 +18,7 @@ from app.domain import approvals as ap
 from app.domain.executor import ExecutionRefused, Executor, StepResult
 from app.domain.planner import ACT_FX, ACT_PAY, CashPosition, Payable, Plan, Step
 from app.models import PlanStep, StepStatus, StepType
-from app.domain.policy import CommittedCash
+from app.domain.policy import Forecast
 
 
 @pytest.fixture(autouse=True)
@@ -109,8 +109,7 @@ def _row(number="PO-7003", **kw) -> PlanStep:
 def _executor(transfers=None, fx=None, *, dry_run=False, approval=None):
     from app.airwallex.fx import FX
     from app.airwallex.transfers import Transfers
-    pos = CashPosition(balances={"USD": 4_000_000},
-                       committed=CommittedCash("USD", 4_000_000, 0), rates={})
+    pos = CashPosition(balances={"USD": 4_000_000}, forecast=Forecast(), rates={})
     with session_scope() as s:
         return Executor(
             db=s, client=FakeClient(),

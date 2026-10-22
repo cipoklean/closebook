@@ -18,6 +18,7 @@ from .domain.agent_tools import ALLOWED_TOOLS
 # exactly how a second definition of "still moving" gets out of step — and this
 # set is what decides whether a replacement payment may be created.
 from .domain.incidents import in_flight as _live_in_flight
+from .domain.policy import available_cash_minor
 from .money import money_str
 from .models import (
     AgentTrace, Approval, ApprovalStatus, Customer, Inflow, InvoicePayable,
@@ -37,24 +38,38 @@ def _loads(text) -> dict:
 
 
 # ---------------------------------------------------------------- budget
-def budget_block() -> dict:
-    """The committed-cash budget, named for what it actually IS.
+def budget_block(s=None) -> dict:
+    """The limits, plus the FORECAST — shown, never spent.
 
-    `expected_inflows_minor` is money invoiced and expected to LAND — it is not
-    cash on hand and it is not money set aside. Every dollar of it is USD. The
-    old UI called it "Cash set aside", which read as cash we hold (we hold a
-    fraction of it) and as an obligation (it is the opposite — money coming in).
-    The names here match the file's own docstring in settings/committed_cash.json.
+    Expected inflows used to be the policy budget the reserve floor was measured
+    against, which is how a payment could be approved against money the business
+    had not received. They are now a forecast line and nothing else: the
+    affordability rule is `policy.available_cash_minor`, and the tiles and the
+    planner both call it.
+
+    The forecast is DERIVED from the open receivables rather than read from a
+    config number, so it cannot drift from the invoices it describes.
     """
+    from .db import get_default_db
     from .domain.policy import load_budget
+    from .domain.treasury import forecast_from_db, DEMO_RATES
+
     b = load_budget()
+    try:
+        fc = forecast_from_db(s or get_default_db().session(), DEMO_RATES)
+        forecast_lines = fc.lines
+        forecast_total = fc.total_minor()
+    except Exception:
+        log.exception("could not build the forecast")
+        forecast_lines, forecast_total = [], 0
     return {
-        "currency": b.committed.currency,
-        "expected_inflows_minor": b.committed.expected_inflows_minor,
-        "earmarked_minor": b.committed.earmarked_minor,
-        "available_minor": b.committed.available_minor(),
+        "currency": b.currency,
         "reserve_floor_minor": int(b.reserve_floor_usd * 100),
         "auto_pay_limit_minor": int(b.auto_pay_limit_usd * 100),
+        # FORECAST ONLY. Named so no reader mistakes it for spendable cash.
+        "forecast_lines": forecast_lines,
+        "forecast_minor": forecast_total,
+        "forecast_is_spendable": False,
     }
 
 
@@ -111,49 +126,55 @@ def money_block(s, cash: dict, budget: dict, plan=None,
     lines: list[dict] = []
     unfunded: list[dict] = []
 
+    from .domain.treasury import in_flight_for
+
     for p in rows:
         num = p.get("number")
         if not num:
             continue
-        # Has this payable's CONVERSION been posted? If so the bought currency
-        # is real cash and the payout is funded from it, not from the plan.
-        fx_id = p.get("fx_object_id")
-        conversion_posted = bool(fx_id) and fx_id in posted_keys
-        f = funding_for(plan, num, held, conversion_posted=conversion_posted)
-
         st = (p.get("display_status") or "").upper()
         live = (p.get("live_status") or "").upper()
         payout_id = p.get("airwallex_object_id")
         bank_says_done = live in ("PAID", "COMPLETED", "SUCCESS", "SETTLED")
         in_ledger = bool(payout_id) and payout_id in posted_keys
 
+        # IN FLIGHT comes from the SAME function the planner uses, reading the
+        # executed step payloads. Deriving it here from a rebuilt plan let the
+        # tile and the plan quote different numbers for the same sent payment.
+        sent = None if in_ledger else in_flight_for(s, num, posted=posted_keys)
+
         if in_ledger:
             where = "settled"
-        elif st == "SUBMITTED" or _live_in_flight(live) or bank_says_done:
-            # Sent, and the cash has not left the ledger yet — so it stays
-            # committed. A bank that has finished but whose posting has not
-            # landed is still in flight, which is exactly why free-to-spend
-            # cannot move until the ledger does.
+            f_ccy, f_amt, f_src, f_note = str(p.get("currency") or "USD"), 0, "settled", ""
+        elif sent is not None:
             where = "in_flight"
+            f_ccy, f_amt, f_src, f_note = (
+                sent[0], sent[1], "in_flight",
+                "sent to the bank; the ledger has not taken it out of cash yet")
         else:
             # Unpaid and unsent. A failed payout lands here too: nothing was
             # posted, the supplier is still owed, so it is still promised.
+            fx_id = p.get("fx_object_id")
+            f = funding_for(plan, num, held,
+                            conversion_posted=bool(fx_id) and fx_id in posted_keys)
             where = "promised"
+            f_ccy, f_amt, f_src, f_note = (f.currency, f.amount_minor,
+                                           f.source, f.note)
 
         # Counted EXACTLY ONCE, in its funding currency. Settled money is out of
         # the arithmetic because the ledger has already taken it out of cash.
         if where == "in_flight":
-            in_flight[f.currency] = in_flight.get(f.currency, 0) + f.amount_minor
+            in_flight[f_ccy] = in_flight.get(f_ccy, 0) + f_amt
         elif where == "promised":
-            promised[f.currency] = promised.get(f.currency, 0) + f.amount_minor
+            promised[f_ccy] = promised.get(f_ccy, 0) + f_amt
 
         line = {
             "payable_number": num,
             "supplier": p.get("supplier"),
-            "currency": f.currency,
-            "amount_minor": f.amount_minor,
-            "source": f.source,
-            "note": f.note,
+            "currency": f_ccy,
+            "amount_minor": f_amt,
+            "source": f_src,
+            "note": f_note,
             "where": where,
             "payable_currency": p.get("currency"),
             "payable_amount_minor": p.get("amount_minor"),
@@ -163,31 +184,32 @@ def money_block(s, cash: dict, budget: dict, plan=None,
             "display_status": st,
         }
         lines.append(line)
-        if f.source == "unfunded" and where == "promised":
+        if f_src == "unfunded" and where == "promised":
             unfunded.append(line)
 
     free: dict[str, int] = {}
     shortfall: dict[str, int] = {}
     for ccy in sorted(set(cash) | set(promised) | set(in_flight)):
-        net = (int(cash.get(ccy, 0))
-               - int(promised.get(ccy, 0))
-               - int(in_flight.get(ccy, 0))
-               - (floor if ccy == budget_ccy else 0))
+        # THE ONE RULE, called — not re-implemented. The planner calls the same
+        # function, which is the entire point: these two used to be separate
+        # arithmetic answering the same question two ways.
+        net = available_cash_minor(
+            cash_minor=int(cash.get(ccy, 0)),
+            in_flight_minor=int(in_flight.get(ccy, 0)),
+            committed_this_run_minor=int(promised.get(ccy, 0)),
+            floor_minor=(floor if ccy == budget_ccy else 0))
         free[ccy] = net
         if net < 0:
             shortfall[ccy] = -net
 
     # Which payable would take the position below the floor? Walk the still-to-
-    # be-paid ones in plan order and name the one that cannot be covered.
-    #
-    # NOTE the basis: this is the CASH basis (ledger cash less what is already in
-    # flight), which is a different question from the planner's reserve floor —
-    # that one is measured against the committed-cash budget. Both are real, and
-    # they can disagree. The wording says which one it is, because a floor
-    # statement with no basis on it is the kind of number a judge cannot check.
+    # be-paid ones in plan order and name the one that cannot be covered, using
+    # the same rule so the sentence matches the tile above it.
     breaching: list[dict] = []
-    remaining = (int(cash.get(budget_ccy, 0))
-                 - int(in_flight.get(budget_ccy, 0)) - floor)
+    remaining = available_cash_minor(
+        cash_minor=int(cash.get(budget_ccy, 0)),
+        in_flight_minor=int(in_flight.get(budget_ccy, 0)),
+        floor_minor=floor)
     for line in lines:
         if line["where"] != "promised" or line["currency"] != budget_ccy:
             continue
@@ -762,21 +784,10 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
         money = money_block(s, rep.cash_by_currency, budget,
                             plan=plan, payables=payables)
 
-        # Merge the CASH-basis floor reason into each blocked payable, from the
-        # one computation the tiles use, so a hold reason cannot read one way on
-        # Home and another way on Money out.
-        cash_blocked = {ln["payable_number"]: ln for ln in money["breaching"]}
-        for p in payables:
-            extra = cash_blocked.get(p["number"])
-            if not extra:
-                continue
-            all_blockers = list(p.get("plan_blockers") or [])
-            if extra["cash_floor_reason"] not in all_blockers:
-                all_blockers.append(extra["cash_floor_reason"])
-            p["plan_blockers"] = all_blockers
-            p["plan_blocker_codes"] = list(p.get("plan_blocker_codes") or []) + \
-                [extra["cash_floor_code"]]
-            p["cash_after_minor"] = extra["cash_after_minor"]
+        # NO cash-basis merge any more. The planner now uses the SAME rule the
+        # tiles use, so its blockers already ARE the cash reasons; appending a
+        # second, separately-worded cash reason would put the same fact on the
+        # page twice in two different sentences.
 
         return {
             "budget": budget,

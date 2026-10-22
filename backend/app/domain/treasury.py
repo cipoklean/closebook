@@ -23,12 +23,14 @@ from typing import Optional
 
 from ..db import DB
 from ..money import money_str
-from ..models import InvoicePayable, InvoiceReceivable, RecStatus
+from ..models import (
+    InvoicePayable, InvoiceReceivable, PlanStep, RecStatus, StepStatus, StepType,
+)
 from .planner import (
     ACT_CHASE, ACT_DEFER, ACT_ESCALATE, ACT_FX, ACT_PAY, CashPosition, Payable,
     Plan, build_plan,
 )
-from .policy import BudgetSettings, CommittedCash, load_budget
+from .policy import BudgetSettings, Forecast, load_budget
 
 # CCY per 1 USD. The sandbox rate moves; these are demo inputs, not live quotes.
 DEMO_RATES: dict[str, Decimal] = {
@@ -71,20 +73,130 @@ def payables_from_db(session) -> list[Payable]:
     return out
 
 
-def cash_position(db: DB, budget: BudgetSettings) -> CashPosition:
-    """Balances are CAPACITY (what the sandbox holds); `committed` is POLICY
-    (the virtual budget the floor and limits are measured against)."""
-    from ..seed import scenario
-    s = db.session()
-    balances = {}
-    for ccy, amt in scenario.SEED_DEPOSITS:
-        balances[ccy] = int(amt * 100)
+def _sent_steps(session, posted: set) -> list:
+    """Executed FX/transfer steps that are SENT and not yet in the ledger."""
+    rows = (session.query(PlanStep)
+            .filter(PlanStep.airwallex_object_id.isnot(None))
+            .order_by(PlanStep.id.asc()).all())
+    return [r for r in rows
+            if r.airwallex_object_id not in posted
+            and r.status in (StepStatus.SUBMITTED, StepStatus.APPROVED)]
+
+
+def _payload_of(row) -> dict:
+    import json as _json
+    try:
+        return _json.loads(row.payload_json or "{}")
+    except (ValueError, TypeError):
+        return {}
+
+
+def in_flight_for(session, payable_number: str,
+                  *, posted: set | None = None) -> Optional[tuple[str, int]]:
+    """(currency, minor) committed in flight for ONE payable, or None.
+
+    One payable, one commitment. A payable whose conversion has NOT been posted
+    is committed in the conversion's SELL currency, because the bought currency
+    does not exist yet. Once the conversion is in the ledger the bought currency
+    IS cash, so the commitment becomes the transfer's own currency. Counting
+    both would double the commitment.
+
+    Reads the EXECUTED step payloads, never a freshly rebuilt plan: the payload
+    is what was actually submitted. A recomputed plan can quote a different
+    conversion size (rates move between runs) and the tiles would then disagree
+    with the books about money that has already left.
+    """
+    from .settlement import settled_txn_keys
+    posted = settled_txn_keys(session) if posted is None else posted
+
+    fx = pay = None
+    for row in _sent_steps(session, posted):
+        pl = _payload_of(row)
+        if pl.get("payable_number") != payable_number:
+            continue
+        if row.type == StepType.FX:
+            fx = pl
+        elif row.type == StepType.TRANSFER:
+            pay = pl
+
+    if fx is not None:
+        ccy, amt = fx.get("sell_currency"), int(fx.get("sell_amount_minor") or 0)
+        if ccy and amt > 0:
+            return str(ccy).upper(), amt
+    if pay is not None:
+        ccy, amt = pay.get("currency"), int(pay.get("amount_minor") or 0)
+        if ccy and amt > 0:
+            return str(ccy).upper(), amt
+    return None
+
+
+def in_flight_by_currency(session, *, posted: set | None = None) -> dict[str, int]:
+    """Money SENT but not settled IN THE LEDGER, per currency, summed."""
+    from .settlement import settled_txn_keys
+    posted = settled_txn_keys(session) if posted is None else posted
+
+    out: dict[str, int] = {}
+    for row in _sent_steps(session, posted):
+        pl = _payload_of(row)
+        number = pl.get("payable_number")
+        if not number:
+            continue
+        got = in_flight_for(session, str(number), posted=posted)
+        if got is None:
+            continue
+        ccy, amt = got
+        # Count each payable ONCE, not once per step.
+        if any(_payload_of(r).get("payable_number") == number
+               for r in _sent_steps(session, posted) if r.id < row.id):
+            continue
+        out[ccy] = out.get(ccy, 0) + amt
+    return out
+
+
+def forecast_from_db(session, rates: dict) -> Forecast:
+    """What is invoiced and expected to land. A FORECAST — it funds nothing.
+
+    Derived from the open receivables rather than a config number, so it cannot
+    drift from the invoices it claims to describe. Non-USD amounts are valued in
+    the budget currency only so a shortfall can name what would cover it.
+    """
+    from .policy import usd_value_minor
+
+    lines = []
+    for r in session.query(InvoiceReceivable).all():
+        open_minor = max(0, int(r.amount_minor) - int(r.amount_paid_minor))
+        if open_minor <= 0:
+            continue
+        lines.append({
+            "number": r.number,
+            "currency": r.currency,
+            "amount_minor": open_minor,
+            "usd_minor": usd_value_minor(open_minor, r.currency, rates),
+        })
+    return Forecast(currency="USD", lines=lines)
+
+
+def cash_position(db: DB, budget: BudgetSettings,
+                  *, session=None) -> CashPosition:
+    """The planner's position, from the LEDGER.
+
+    This used to read `scenario.SEED_DEPOSITS` — hardcoded demo numbers that
+    ignored the books entirely, so the plan could spend USD 40,000 that the
+    ledger did not have. It now reads what is actually there, and subtracts what
+    is already committed, through the one rule in `policy.available_cash_minor`.
+    """
+    s = session or db.session()
+    from .ledger import reconcile
+
+    rep = reconcile(s)
+    floor_minor = int(budget.reserve_floor_usd * 100)
     return CashPosition(
-        balances=balances,
-        committed=CommittedCash(budget.committed.currency,
-                                budget.committed.expected_inflows_minor,
-                                budget.committed.earmarked_minor),
+        balances={k: int(v) for k, v in rep.cash_by_currency.items()},
+        in_flight=in_flight_by_currency(s),
+        forecast=forecast_from_db(s, DEMO_RATES),
         rates=DEMO_RATES,
+        budget_currency=budget.currency,
+        floor_minor=floor_minor,
     )
 
 
@@ -181,7 +293,7 @@ def current_plan(db: DB, budget: Optional[BudgetSettings] = None) -> Plan:
     s = db.session()
     return build_plan(
         payables_from_db(s),
-        cash_position(db, budget),
+        cash_position(db, budget, session=s),
         budget,
         chase_shortfalls=chase_shortfalls(s),
     )
@@ -189,5 +301,6 @@ def current_plan(db: DB, budget: Optional[BudgetSettings] = None) -> Plan:
 
 __all__ = [
     "DEMO_RATES", "ACT_CHASE", "Funding", "cash_position", "chase_shortfalls",
-    "current_plan", "funding_for", "payables_from_db",
+    "current_plan", "forecast_from_db", "funding_for", "in_flight_by_currency",
+    "payables_from_db",
 ]

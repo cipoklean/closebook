@@ -32,7 +32,9 @@ from app.airwallex.transfers import Transfers  # noqa: E402
 from app.db import reset_default_db, session_scope  # noqa: E402
 from app.domain.executor import ExecutionRefused, Executor  # noqa: E402
 from app.domain.planner import ACT_PAY, CashPosition, build_plan  # noqa: E402
-from app.domain.policy import CommittedCash, load_budget  # noqa: E402
+from app.db import get_default_db  # noqa: E402
+from app.domain.policy import load_budget  # noqa: E402
+from app.domain.treasury import cash_position  # noqa: E402
 from app.models import PlanStep, StepStatus, StepType  # noqa: E402
 
 # Real, live-created beneficiary ids (see scripts/probe_beneficiary_create.py).
@@ -49,14 +51,14 @@ PAYABLES = [
 
 def main() -> int:
     target = sys.argv[1] if len(sys.argv) > 1 else "PO-7003"
-    reset_default_db()
+    # The DEMO database on purpose: this script exists to move sandbox money
+    # against the seeded book.
+    reset_default_db(allow_demo_file=True)
     budget = load_budget()
-    pos = CashPosition(
-        balances={"USD": 10_120_000, "GBP": 10_018_000},
-        committed=budget.committed,
-        rates={"USD": Decimal("1"), "GBP": Decimal("1.27"),
-               "EUR": Decimal("0.878174")},
-    )
+    # The SAME assembly the dashboard and the planner use. This used to hardcode
+    # the sandbox balance (USD 10,120,000) as capacity, which is the pattern the
+    # one-basis change removed: a payment must be affordable out of LEDGER cash.
+    pos = cash_position(get_default_db(), budget)
 
     from app.domain.planner import Payable
     plan = build_plan([Payable(**p) for p in PAYABLES], pos, budget)
