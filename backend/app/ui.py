@@ -692,13 +692,18 @@ def _home(c: dict) -> str:
                     f"payments and the {floor_txt} reserve floor")
         head_cls = ""
     # Working, per currency, so the headline number is checkable.
+    owed = m.get("refunds_owed") or {}
+    # THE WHOLE ARITHMETIC, per currency, so every tile can be checked by hand
+    # against the one above it. The operator's formula:
+    #   cash - promised - in flight - unattributed - owed back - floor
     work = "".join(
         f'<div>{e(ccy)}: cash {money(c["cash"].get(ccy, 0))} '
         f'− promised {money(m["promised"].get(ccy, 0))} '
         + (f' − in flight {money(m["in_flight"].get(ccy, 0))}'
            if m["in_flight"].get(ccy) else '')
-        + (f' − unallocated {money(m["suspense"].get(ccy, 0))}'
+        + (f' − unattributed {money(m["suspense"].get(ccy, 0))}'
            if m["suspense"].get(ccy) else '')
+        + (f' − owed back {money(owed.get(ccy, 0))}' if owed.get(ccy) else '')
         + (f' − floor {money(m["reserve_floor_minor"])}' if ccy == hccy else '')
         + f' = {money(m["free"].get(ccy, 0))}</div>'
         for ccy in sorted(m["free"]))
@@ -729,11 +734,34 @@ def _home(c: dict) -> str:
     susp_str = " · ".join(money_str(v, k) for k, v in sorted(susp.items()))
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["in"]}</span>'
-        '<div class="x-label">Money we couldn\'t match</div>'
+        '<div class="x-label">Suspense — not spendable</div>'
         f'<div class="x-fig">{e(susp_str) if susp_str else "Nothing waiting"}</div>'
-        f'<div class="x-statnote">{n_unmatched} payment'
-        f'{"s" if n_unmatched != 1 else ""} held</div>'
+        f'<div class="x-statnote">It is in the bank and it is not in the figure '
+        f'above. {n_unmatched} payment'
+        f'{"s" if n_unmatched != 1 else ""} waiting on you.</div>'
     )))
+
+    # 5. Money we have decided is owed back. Real cash in the bank, and still not
+    # ours to spend — so it comes off the same total, and it is shown separately
+    # so the subtraction is visible rather than implied.
+    owed_str = " · ".join(money_str(v, k) for k, v in sorted(owed.items()))
+    if owed_str:
+        owed_rows = "".join(
+            f'<div>{e(a.get("payer") or "unknown payer")} · '
+            f'{e(money_str(a.get("amount_minor", 0), a.get("currency", "")))}'
+            f'{" · " + e(a.get("resolution_reason") or "") if a.get("resolution_reason") else ""}'
+            f'</div>'
+            for a in (c.get("arrivals") or [])
+            if (a.get("review_state") or "") == "REFUND_OWED")
+        cards.append(_card(span="x-span-3", inner=(
+            f'<span class="x-stat-ico">{_I["warn"]}</span>'
+            '<div class="x-label">Refunds owed</div>'
+            f'<div class="x-fig">{e(owed_str)}</div>'
+            '<div class="x-statnote">Recorded as a liability. No transfer has '
+            'been sent, and this money is not spendable.</div>'
+            f'<details class="x-hist"><summary>Details</summary>'
+            f'<div>{owed_rows or "No detail."}</div></details>'
+        )))
 
     # 5. Paid today — settled payouts, read from the ledger. An FX conversion is
     # deliberately absent: it moved money between our own currencies and paid
@@ -995,6 +1023,80 @@ def _dev_controls(transfer_id: str, live: str) -> str:
             f'{e(label)}</button></form>')
     return ('<div class="x-meta"><span class="x-label">Sandbox dev control</span>'
             f'<span class="x-pills">{buttons}</span></div>')
+
+
+
+def _resolve_form(a: dict) -> str:
+    """THE ONE control that gets money out of suspense, with its three options.
+
+    Suspense can only leave in three ways, and each leaves the books in a
+    different state, so picking the wrong one is a real error rather than a
+    preference:
+
+      match  -> the cash is someone's invoice payment; the invoice and the
+                ledger both move
+      refund -> the cash is owed back; it stops being spendable but nothing is
+                sent, because paying a refund is a separate operation
+      income -> the cash is ours; it becomes spendable, and it needs a note
+
+    PIN-gated, re-runs the planner, and cannot happen twice.
+    """
+    if not a.get("resolvable"):
+        return ""
+    iid = a["id"]
+    # `proposed_invoices` is a list of invoice NUMBERS, not of dicts. The
+    # sibling `applied` field IS a list of dicts, and reading one as the other
+    # raised TypeError on a page that had been fine a moment earlier.
+    invs = [str(x) for x in (a.get("proposed_invoices") or []) if x]
+    options = ""
+    if invs:
+        options += (f'<option value="match">Match it to '
+                    f'{e(" and ".join(invs))}</option>')
+    options += (
+        '<option value="refund">Refund owed — record the liability</option>'
+        '<option value="income">Release as unallocated income</option>')
+    return (
+        f'<form class="x-actions" method="post" '
+        f'action="/inflows/{iid}/resolve" data-action>'
+        f'<div class="x-field"><label for="what-{iid}">Resolve this money</label>'
+        f'<select id="what-{iid}" name="what">{options}</select></div>'
+        f'<div class="x-field"><label for="reason-{iid}">Reason — required for '
+        f'a refund</label><input id="reason-{iid}" name="reason" maxlength="200" '
+        f'placeholder="duplicate payment" autocomplete="off"></div>'
+        f'<div class="x-field"><label for="note-{iid}">Note — required to '
+        f'release as income</label><input id="note-{iid}" name="note" '
+        f'maxlength="200" placeholder="no invoice will ever claim this" '
+        f'autocomplete="off"></div>'
+        f'<div class="x-field"><label for="by-{iid}">Resolving as</label>'
+        f'<input id="by-{iid}" name="by" maxlength="64" value="dashboard" '
+        f'autocomplete="off"></div>'
+        f'<div class="x-pin"><label for="pin-r{iid}">Your PIN</label>'
+        f'<input id="pin-r{iid}" name="pin" type="password" inputmode="numeric" '
+        f'autocomplete="one-time-code" maxlength="12" required></div>'
+        f'<button class="x-btn x-btn--primary" type="submit">Resolve</button>'
+        f'</form>')
+
+
+def _resolution_audit(a: dict) -> str:
+    """What was decided about a resolved payment, and by whom.
+
+    Shown, not buried: releasing someone else's money as our own income is the
+    decision most likely to be questioned later, and "who decided this" is the
+    first thing anyone asks.
+    """
+    state = (a.get("review_state") or "").upper()
+    if state == "REFUND_OWED":
+        head = "Recorded as owed back"
+    elif state == "RELEASED_INCOME":
+        head = "Released as unallocated income"
+    else:
+        return ""
+    who = a.get("resolved_by") or "unrecorded"
+    when = (a.get("resolved_at") or "")[:19].replace("T", " ")
+    why = a.get("resolution_reason") or "no reason recorded"
+    return ('<div class="x-note" style="margin-top:16px">' + _I["info"]
+            + f'<span><b>{e(head)}</b> — {e(why)}. Decided by '
+            + f'<b>{e(who)}</b>{(" on " + e(when)) if when else ""}.</span></div>')
 
 
 # ---- money in
@@ -1417,6 +1519,10 @@ def _ok(c: dict) -> str:
     # waiting on a human — and it is not a payment step, so the approvable list
     # never contained it. Shown here so "Needs your OK" means what it says.
     wait = c.get("inflows_waiting") or []
+    # Every card that belongs after the main body is gathered into ONE string and
+    # appended once. Carrying two hand-built returns meant the second one won by
+    # accident and silently dropped a card that had been built correctly.
+    note_in = ""
     if wait:
         note_in = _card(inner=(
             '<div class="x-cardhead"><div><h3>Money in that needs a look</h3>'
@@ -1427,23 +1533,34 @@ def _ok(c: dict) -> str:
             '</div>'
             + "".join(
                 _arrival_row(a, detail=True)
+                + _resolve_form(a)
                 + (f'<form class="x-actions" method="post" '
-                   f'action="/inflows/{a["id"]}/approve" data-action>'
-                   f'<div class="x-pin"><label for="pin-i{a["id"]}">Your PIN'
-                   f'</label><input id="pin-i{a["id"]}" name="pin" '
-                   f'type="password" inputmode="numeric" '
-                   f'autocomplete="one-time-code" maxlength="12" required></div>'
-                   f'<button class="x-btn x-btn--primary" type="submit">'
-                   f'Apply it to '
-                   f'{" and ".join(x["invoice"] for x in a["applied"]) or "the invoice"}'
-                   f'</button>'
-                   f'<button class="x-btn" type="submit" '
-                   f'formaction="/inflows/{a["id"]}/reject" '
-                   f'formnovalidate>Not this invoice</button></form>'
+                   f'action="/inflows/{a["id"]}/reject" '
+                   f'data-action><div class="x-pin">'
+                   f'<label for="pin-rej{a["id"]}">Your PIN</label>'
+                   f'<input id="pin-rej{a["id"]}" name="pin" type="password" '
+                   f'inputmode="numeric" autocomplete="one-time-code" '
+                   f'maxlength="12" required></div>'
+                   f'<button class="x-btn" type="submit" formnovalidate>'
+                   f'Not this invoice</button></form>'
                    if a.get("proposed_invoices") else "")
                 for a in wait)))
-        return body + note_in + held + note
-    return body + held + note
+
+    done = [a for a in (c.get("arrivals") or [])
+            if (a.get("review_state") or "").upper()
+            in ("REFUND_OWED", "RELEASED_INCOME")]
+    if done:
+        note_in += _card(inner=(
+            '<div class="x-cardhead"><div><h3>Resolved money</h3>'
+            '<p class="x-help">Where suspense went, and who decided. A refund '
+            'owed is a liability we have not paid; released income is cash that '
+            'is now ours to spend.</p></div>'
+            f'<span class="x-pill x-pill--info">{len(done)} resolved</span>'
+            '</div>'
+            + "".join(_arrival_row(a, detail=True) + _resolution_audit(a)
+                      for a in done)))
+
+    return body + note_in + held + note
 
 
 # ---- AI activity

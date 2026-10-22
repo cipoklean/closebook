@@ -55,10 +55,12 @@ class PolicyError(Exception):
 def available_cash_minor(*, cash_minor: int, in_flight_minor: int = 0,
                          committed_this_run_minor: int = 0,
                          suspense_minor: int = 0,
+                         refunds_owed_minor: int = 0,
                          floor_minor: int = 0) -> int:
     """Cash genuinely free to spend. THE single basis for the whole system.
 
-        available = cash - in flight - promised this run - suspense - floor
+        available = cash - in flight - promised this run
+                    - suspense - refunds owed - floor
 
     Every term is REAL money. Expected inflows are deliberately ABSENT: money
     that has been invoiced but has not landed cannot pay anybody, and a system
@@ -73,6 +75,14 @@ def available_cash_minor(*, cash_minor: int, in_flight_minor: int = 0,
     couldn't match") so it never silently disappears from the page — the point
     is that it stops being SPENDABLE, not that it stops being visible.
 
+    REFUNDS OWED COMES OFF TOO, and for the mirror-image reason: it is money we
+    HAVE, that we have decided belongs to somebody else. It cannot fund a
+    supplier payment without the refund bouncing later, out of cash that is by
+    then already gone. It is the operator's stated formula:
+
+        balance - in-flight - approved-but-unsent - floor
+                - unattributed suspense - refunds owed
+
     Both the planner's reserve-floor check and the dashboard tiles call this, so
     they cannot drift apart again. They used to be two different answers to "can
     we afford this": the plan approved PO-7003 while the page reported the
@@ -85,7 +95,7 @@ def available_cash_minor(*, cash_minor: int, in_flight_minor: int = 0,
     """
     return (int(cash_minor) - int(in_flight_minor)
             - int(committed_this_run_minor) - int(suspense_minor)
-            - int(floor_minor))
+            - int(refunds_owed_minor) - int(floor_minor))
 
 
 @dataclass

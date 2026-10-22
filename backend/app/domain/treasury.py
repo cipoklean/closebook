@@ -198,6 +198,10 @@ def cash_position(db: DB, budget: BudgetSettings,
         # supplier with money that a human has not yet agreed belongs to any
         # invoice — and that may have to be refunded.
         suspense={k: int(abs(v)) for k, v in (rep.suspense_by_currency or {}).items()},
+        # Money we have decided is owed back. Non-spendable for the mirror-image
+        # reason: the refund will leave later, out of cash we can no longer see.
+        refunds_owed={k: int(abs(v))
+                      for k, v in (rep.refunds_owed_by_currency or {}).items()},
         forecast=forecast_from_db(s, DEMO_RATES),
         rates=DEMO_RATES,
         budget_currency=budget.currency,

@@ -485,14 +485,9 @@ async def approve_inflow_route(inflow_id: int, request: Request):
     b = await _read_body(request)
     pin = str(b.get("pin") or "")
     by = str(b.get("approved_by") or "dashboard")
-    _pin_field = _settings.demo_approver_pin
-    configured = (_pin_field.get_secret_value() if _pin_field is not None else "")
-    if not configured:
-        return _back(request, tab="ok",
-                     err="DEMO_APPROVER_PIN is not configured — the approval "
-                         "endpoint is closed rather than open.")
-    if pin != configured:
-        return _back(request, tab="ok", err="That PIN is not right.")
+    refusal = _check_pin(pin)
+    if refusal:
+        return _back(request, tab="ok", err=refusal)
 
     with _database().session_scope() as s:
         inflow = s.get(Inflow, inflow_id)
@@ -509,6 +504,88 @@ async def approve_inflow_route(inflow_id: int, request: Request):
         f"Approved. {money_str(amount, ccy)} has been applied to invoice "
         f"id(s) {applied}; the invoice and the ledger have both moved."
         + _run_loop("approval")))
+
+
+def _check_pin(pin: str) -> Optional[str]:
+    """The shared gate for anything a human has to authorise.
+
+    Closed rather than open when no PIN is configured: an approval endpoint with
+    no secret is worse than no endpoint.
+    """
+    field = _settings.demo_approver_pin
+    configured = (field.get_secret_value() if field is not None else "")
+    if not configured:
+        return ("DEMO_APPROVER_PIN is not configured — the approval endpoint is "
+                "closed rather than open.")
+    if pin != configured:
+        return "That PIN is not right."
+    return None
+
+
+@app.post("/inflows/{inflow_id}/resolve")
+async def resolve_inflow_route(inflow_id: int, request: Request):
+    """Resolve a suspended payment. THE ONLY THREE WAYS SUSPENSE CAN LEAVE.
+
+      match  -> apply the stored proposal to an invoice (the existing path)
+      refund -> record a liability; the cash stays put and stops being spendable
+      income -> release it as ours; it becomes spendable, and it needs a note
+
+    Every one of them re-runs the planner, and none can happen twice: the state
+    is checked and the ledger transaction is keyed to the inflow, so a second
+    press moves nothing.
+    """
+    from .domain.ledger import (LedgerError, approve_inflow, resolve_income,
+                                resolve_refund, suspense_for)
+    from .money import money_str
+
+    b = await _read_body(request)
+    pin = str(b.get("pin") or "")
+    by = str(b.get("by") or "dashboard")
+    what = str(b.get("what") or "").strip().lower()
+    reason = str(b.get("reason") or "").strip()
+    note = str(b.get("note") or "").strip()
+
+    refusal = _check_pin(pin)
+    if refusal:
+        return _back(request, tab="ok", err=refusal)
+
+    if what not in ("match", "refund", "income"):
+        return _back(request, tab="ok",
+                     err="Pick what to do with this money: match it to an "
+                         "invoice, record a refund owed, or release it as income.")
+
+    session = _database().session_scope()
+    with session as s:
+        inflow = s.get(Inflow, inflow_id)
+        if inflow is None:
+            return _back(request, tab="ok", err="That payment no longer exists.")
+        ccy = inflow.currency
+        try:
+            if what == "match":
+                matches = approve_inflow(s, inflow, approved_by=by)
+                applied = ", ".join(str(m.invoice_receivable_id) for m in matches)
+                amount = sum(m.amount_minor for m in matches) or inflow.amount_minor
+                ok_msg = (f"Matched. {money_str(amount, ccy)} has been applied to "
+                          f"invoice id(s) {applied}; the invoice and the ledger "
+                          f"have both moved.")
+            elif what == "refund":
+                amount = resolve_refund(s, inflow, reason=reason, by=by)
+                ok_msg = (f"Refund owed: {money_str(amount, ccy)} is now a "
+                          f"recorded liability. No transfer was sent, and the "
+                          f"money has stopped being spendable.")
+            else:
+                amount = resolve_income(s, inflow, note=note, by=by)
+                ok_msg = (f"Released as income: {money_str(amount, ccy)} is now "
+                          f"ours to spend. The ledger credits other_income and "
+                          f"the decision is recorded against {by}.")
+        except LedgerError as exc:
+            return _back(request, tab="ok", err=str(exc))
+        remaining = suspense_for(s, inflow)
+
+    return _back(request, tab="ok", ok=(
+        ok_msg + (f" Still unresolved on this payment: "
+                  f"{money_str(remaining, ccy)}." if remaining else "")
+        + _run_loop("resolve")))
 
 
 @app.post("/inflows/{inflow_id}/reject")

@@ -173,14 +173,26 @@ class TestReject:
 
 
 class TestThePageOffersBothChoices:
-    def test_a_pending_proposal_shows_approve_and_reject(self, client, db):
+    def test_a_pending_proposal_offers_all_three_resolutions(self, client, db):
+        """Suspense can only leave three ways, so the page must offer three.
+
+        It used to offer two: apply the proposal, or say no. Saying no left the
+        cash in suspense with nothing further to do about it, which is how money
+        got stuck.
+        """
         _invoice()
         _proposed_inflow(db)
         html = client.get("/app?tab=ok").text
         assert "Money in that needs a look" in html
-        assert "/approve" in html and "/reject" in html
-        assert "INV-1002" in html, "the button names the invoice it would apply to"
+        assert "/inflows/1/resolve" in html
+        assert 'value="match"' in html
+        assert 'value="refund"' in html
+        assert 'value="income"' in html
+        assert "/reject" in html, "saying no is still allowed"
+        assert "INV-1002" in html, "the match option names the invoice it applies to"
         assert 'name="pin"' in html
+        assert 'name="reason"' in html, "a refund needs a reason"
+        assert 'name="note"' in html, "releasing as income needs a note"
 
     def test_a_settled_match_is_not_offered_for_review(self, client, db):
         _invoice(number="INV-1001", ccy="USD", minor=1_200_000,

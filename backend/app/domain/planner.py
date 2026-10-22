@@ -96,6 +96,9 @@ class CashPosition:
     #: or a payment that matched nothing). Real money in the bank, and still not
     #: spendable — see `policy.available_cash_minor`.
     suspense: dict[str, int] = field(default_factory=dict)
+    #: Money we have decided belongs to somebody else. Also real cash, also not
+    #: spendable: a refund that bounces later comes out of cash that is gone.
+    refunds_owed: dict[str, int] = field(default_factory=dict)
     forecast: Forecast = field(default_factory=Forecast)
     rates: dict[str, Decimal] = field(default_factory=dict)
     budget_currency: str = "USD"
@@ -112,6 +115,7 @@ class CashPosition:
             in_flight_minor=self.in_flight.get(bccy, 0),
             committed_this_run_minor=committed_this_run_minor,
             suspense_minor=self.suspense.get(bccy, 0),
+            refunds_owed_minor=self.refunds_owed.get(bccy, 0),
             floor_minor=self.floor_minor)
 
     def usd_rate(self, currency: str) -> Optional[Decimal]:
@@ -377,6 +381,10 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
     for ccy, amt in (pos.in_flight or {}).items():
         working[ccy.upper()] = working.get(ccy.upper(), 0) - int(amt)
     for ccy, amt in (pos.suspense or {}).items():
+        working[ccy.upper()] = working.get(ccy.upper(), 0) - abs(int(amt))
+    # Refunds owed come off EVERY currency for the same reason suspense does:
+    # a GBP bill paid from GBP never consults the budget-currency floor.
+    for ccy, amt in (pos.refunds_owed or {}).items():
         working[ccy.upper()] = working.get(ccy.upper(), 0) - abs(int(amt))
 
     def _available(also_spend_minor: int = 0) -> int:

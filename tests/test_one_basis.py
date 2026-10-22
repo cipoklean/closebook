@@ -499,7 +499,7 @@ class TestSuspenseCashCannotFundAPayment:
         assert m["free"]["USD"] != available_cash_minor(
             cash_minor=1_400_000, floor_minor=500_000)
         html = render_app(build_context([]), tab="home")
-        assert "unallocated" in html, "the money is still visible, just not spendable"
+        assert "unattributed" in html, "the money is still visible, just not spendable"
 
     def test_an_approved_proposal_stops_being_suspense(self, db):
         """Once a human approves it the money is attributed, so it is spendable."""

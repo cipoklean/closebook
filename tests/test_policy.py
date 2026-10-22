@@ -55,7 +55,7 @@ def test_expected_inflows_are_not_an_input():
     assert "forecast_minor" not in params
     assert params == {"cash_minor", "in_flight_minor",
                       "committed_this_run_minor", "suspense_minor",
-                      "floor_minor"}
+                      "refunds_owed_minor", "floor_minor"}
 
 
 def test_suspense_is_subtracted_from_what_can_be_spent():

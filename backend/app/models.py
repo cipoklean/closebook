@@ -177,13 +177,31 @@ class Inflow(Base):
     # allocation the matcher wanted, so approving applies the same numbers that
     # were shown — not a re-match that might read differently a minute later.
     proposed_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # PENDING  -> proposed, nothing applied, cash in suspense
-    # APPROVED -> the proposal was applied (invoice + ledger moved)
-    # REJECTED -> a human said no; the cash stays in suspense for a refund
+    # PENDING         -> proposed, nothing applied, cash in suspense
+    # APPROVED        -> the proposal was applied (invoice + ledger moved)
+    # REJECTED        -> a human said no; the cash stays in suspense
+    # REFUND_OWED     -> moved out of suspense as a recorded liability
+    # RELEASED_INCOME -> released as unallocated income; now spendable
+    #
+    # REJECTED IS NOT AN END STATE. Saying no to a reading leaves the cash in
+    # suspense — we really did receive it — so the money is still stuck until
+    # somebody decides where it belongs. Every state except the two terminal
+    # resolutions is still resolvable.
     review_state: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     reviewed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True)
     reviewed_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # THE RESOLUTION AUDIT ROW: what was decided, why, by whom, when. Kept on
+    # the inflow beside the money it explains, so the answer to "why did this
+    # cash stop being spendable?" is one row away rather than in a log.
+    resolution_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Required for a release to income: "unexplained money became profit" is
+    # exactly the kind of entry an auditor asks about, and the note is the
+    # answer. Not required for a refund, where the REASON is the substance.
+    resolution_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
 
 class Match(Base):

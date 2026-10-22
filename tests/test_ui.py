@@ -323,7 +323,7 @@ class TestLabelMapping:
         assert ctx["money"]["promised"] == {}
 
     def test_money_we_couldnt_match_is_suspense(self):
-        assert "Money we couldn" in render_app(_ctx(), tab="home")
+        assert "Suspense" in render_app(_ctx(), tab="home")
 
     def test_automatic_limit_is_the_auto_pay_limit(self):
         html = render_app(_ctx(), tab="home")

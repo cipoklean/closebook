@@ -283,6 +283,120 @@ def reject_inflow(db_session, inflow, *, rejected_by: str = "dashboard",
     db_session.flush()
 
 
+# ---- resolving suspense: the only three ways it can leave ----------------
+#: Money we received and do NOT owe to our own invoices. It is in the bank and
+#: it is not spendable: a refund is a liability, not cash.
+REFUNDS_OWED = "refunds_owed"
+#: Money that turned out to be ours to keep. Releasing to here is the ONLY way
+#: suspense becomes spendable, and it needs a note because "unexplained money
+#: became income" is the entry an auditor asks about.
+OTHER_INCOME = "other_income"
+
+#: A resolution already taken. Suffix states — the inflow itself is unchanged.
+RESOLVED_STATES = ("REFUND_OWED", "RELEASED_INCOME")
+
+
+def suspense_for(db_session, inflow) -> int:
+    """How much of THIS inflow is still sitting in suspense.
+
+    Read off the LEDGER, not off the inflow's amount: an inflow that was part
+    allocated leaves only its remainder in suspense, and resolving the whole
+    amount would invent money we already applied to an invoice.
+    """
+    from ..models import LedgerEntry
+
+    prefix = f"inflow:{inflow.id}"
+    total = 0
+    for e in db_session.query(LedgerEntry).all():
+        if e.account != "unapplied_cash":
+            continue
+        t = e.txn_id or ""
+        if t == prefix or t.startswith(prefix + ":"):
+            # A CREDIT to unapplied_cash is money we are holding unapplied.
+            total += e.credit_minor - e.debit_minor
+    return total
+
+
+def _resolvable_amount(db_session, inflow) -> int:
+    """The amount a resolution may act on, or a refusal saying why not."""
+    if inflow.review_state in RESOLVED_STATES:
+        raise LedgerError(
+            f"inflow {inflow.id} was already resolved as {inflow.review_state}. "
+            f"Resolving it twice would move the same money twice.")
+    amount = suspense_for(db_session, inflow)
+    if amount <= 0:
+        raise LedgerError(
+            f"inflow {inflow.id} has nothing left in suspense, so there is "
+            f"nothing to resolve.")
+    return amount
+
+
+def resolve_refund(db_session, inflow, *, reason: str, by: str = "dashboard") -> int:
+    """Record a refund obligation. NO TRANSFER IS SENT.
+
+    The cash does not move — it is still in the bank and still in `cash:CCY` —
+    so the ledger swaps which LIABILITY it sits against: out of `unapplied_cash`
+    and into `refunds_owed`. That is what stops it being spendable without
+    pretending the money left, and it is why the refund transfer itself is out
+    of scope: this records what we owe, it does not pay it.
+
+    Returns the amount moved, in minor units.
+    """
+    from ..timeutils import utcnow
+
+    text = (reason or "").strip()
+    if not text:
+        raise LedgerError(
+            "A refund needs a reason, for example 'duplicate payment'. The "
+            "reason is the only thing that explains this liability later.")
+    amount = _resolvable_amount(db_session, inflow)
+
+    post(db_session, txn_id=f"inflow:{inflow.id}:refund",
+         legs=[("unapplied_cash", amount, 0, inflow.currency),
+               (REFUNDS_OWED, 0, amount, inflow.currency)],
+         ref=f"refund owed — {text} (by {by})")
+    inflow.review_state = "REFUND_OWED"
+    inflow.resolution_reason = text
+    inflow.resolved_by = by
+    inflow.resolved_at = utcnow()
+    inflow.match_reason = f"refund owed: {text}"
+    db_session.flush()
+    return amount
+
+
+def resolve_income(db_session, inflow, *, note: str, by: str = "dashboard") -> int:
+    """Release suspense as unallocated income — the only way it becomes spendable.
+
+    Requires a NOTE as well as the acting user, and both are stored on the
+    inflow: releasing someone else's money as profit is the decision most likely
+    to be questioned, so the row has to say who decided and why.
+
+    Returns the amount released, in minor units.
+    """
+    from ..timeutils import utcnow
+
+    text = (note or "").strip()
+    if not text:
+        raise LedgerError(
+            "Releasing money as income needs a note. It is the only thing that "
+            "explains, later, why cash that arrived against nobody's invoice "
+            "became ours to keep.")
+    amount = _resolvable_amount(db_session, inflow)
+
+    post(db_session, txn_id=f"inflow:{inflow.id}:income",
+         legs=[("unapplied_cash", amount, 0, inflow.currency),
+               (OTHER_INCOME, 0, amount, inflow.currency)],
+         ref=f"released as unallocated income — {text} (by {by})")
+    inflow.review_state = "RELEASED_INCOME"
+    inflow.resolution_reason = text
+    inflow.resolution_note = text
+    inflow.resolved_by = by
+    inflow.resolved_at = utcnow()
+    inflow.match_reason = f"released as unallocated income: {text}"
+    db_session.flush()
+    return amount
+
+
 # ---- payable status transitions ----------------------------------------
 def mark_payable(db_session, payable: InvoicePayable, status: PayStatus) -> None:
     payable.status = status
@@ -298,6 +412,13 @@ class ReconciliationReport:
     payables_by_status: dict[str, list[str]] = field(default_factory=dict)
     cash_by_currency: dict[str, int] = field(default_factory=dict)
     suspense_by_currency: dict[str, int] = field(default_factory=dict)
+    #: Money received, not attributed to an invoice, and recorded as owed back.
+    #: A LIABILITY, not cash — kept apart from suspense because the two need
+    #: different actions: suspense needs a decision, a refund needs paying.
+    refunds_owed_by_currency: dict[str, int] = field(default_factory=dict)
+    #: Money released as ours to keep. Spendable, and worth showing, because it
+    #: is profit that arrived as an unexplained bank credit.
+    other_income_by_currency: dict[str, int] = field(default_factory=dict)
     # The outflow side: FX clearing, FX variance and each supplier payable.
     # Reported so the outflow half of the books is visible, not implied.
     outflow_by_account: dict[str, int] = field(default_factory=dict)
@@ -353,6 +474,8 @@ def reconcile(db_session) -> ReconciliationReport:
 
     cash: dict[str, int] = {}
     suspense: dict[str, int] = {}
+    refunds: dict[str, int] = {}
+    income: dict[str, int] = {}
     outflow: dict[str, int] = {}
     for e in db_session.query(LedgerEntry).all():
         net = e.debit_minor - e.credit_minor
@@ -363,6 +486,16 @@ def reconcile(db_session) -> ReconciliationReport:
         elif e.account == "unapplied_cash":
             suspense.setdefault(e.currency, 0)
             suspense[e.currency] += -net  # a credit is money we hold unapplied
+        elif e.account == REFUNDS_OWED:
+            # A CREDIT is a liability we have taken on. It is money still in the
+            # bank that we must not spend.
+            refunds.setdefault(e.currency, 0)
+            refunds[e.currency] += -net
+        elif e.account == OTHER_INCOME:
+            # A CREDIT is money released as ours. Spendable, and shown, because
+            # it is profit that arrived as an unexplained bank credit.
+            income.setdefault(e.currency, 0)
+            income[e.currency] += -net
         elif (e.account in ("fx_clearing", "fx_variance")
               or e.account.startswith("payable:")):
             key = f"{e.account} {e.currency}"
@@ -381,6 +514,8 @@ def reconcile(db_session) -> ReconciliationReport:
     # check had nothing to measure. Only `cash:*` accounts are cash.
     rep.cash_by_currency = {k: v for k, v in cash.items() if v != 0}
     rep.suspense_by_currency = {k: v for k, v in suspense.items() if v != 0}
+    rep.refunds_owed_by_currency = {k: v for k, v in refunds.items() if v != 0}
+    rep.other_income_by_currency = {k: v for k, v in income.items() if v != 0}
     rep.outflow_by_account = {k: v for k, v in outflow.items() if v != 0}
 
     from ..models import Inflow
