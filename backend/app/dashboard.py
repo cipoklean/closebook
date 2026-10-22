@@ -54,20 +54,23 @@ def budget_block(s=None) -> dict:
     in MINOR units as stored — this used to multiply major units by 100, which
     is only right for a 2-exponent currency and only by luck for USD.
     """
-    from .db import get_default_db
+    from .db import get_default_db, session_for
     from .domain.settings_store import as_budget, read as read_settings
     from .domain.treasury import forecast_from_db, DEMO_RATES
 
-    session = s or get_default_db().session()
-    row = read_settings(session)
-    b = as_budget(row)
-    try:
-        fc = forecast_from_db(session, DEMO_RATES)
-        forecast_lines = fc.lines
-        forecast_total = fc.total_minor()
-    except Exception:
-        log.exception("could not build the forecast")
-        forecast_lines, forecast_total = [], 0
+    # THE CALLER'S SESSION, OR ONE WE CLOSE. This read
+    # `session = s or get_default_db().session()` and then never closed the
+    # session it had opened, so every dashboard render leaked a connection.
+    with session_for(get_default_db(), s) as session:
+        row = read_settings(session)
+        b = as_budget(row)
+        try:
+            fc = forecast_from_db(session, DEMO_RATES)
+            forecast_lines = fc.lines
+            forecast_total = fc.total_minor()
+        except Exception:
+            log.exception("could not build the forecast")
+            forecast_lines, forecast_total = [], 0
     return {
         "currency": b.currency,
         "reserve_floor_minor": int(row.reserve_floor_minor),
@@ -871,7 +874,10 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
 
     s = get_default_db().session()
     try:
-        budget = budget_block()
+        # ONE RENDER, ONE CONNECTION. Passing our session down stops the
+        # helpers opening their own, which both leaks connections and splits a
+        # render across several inconsistent snapshots of the book.
+        budget = budget_block(s)
 
         receivables = []
         for r in s.query(InvoiceReceivable).order_by(InvoiceReceivable.number).all():

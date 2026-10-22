@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+from typing import Optional
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool, StaticPool
 
 from .models import Base  # ensure all tables are registered on Base
 
@@ -34,7 +35,46 @@ def make_engine(database_url: str | None = None):
             # database, so create_all and the test session would see different
             # schemas. StaticPool pins one connection for the whole process.
             kwargs["poolclass"] = StaticPool
-    return create_engine(url, **kwargs)
+        else:
+            # NO POOL, ON PURPOSE. A pool is a fixed number of connections with
+            # a timeout, and one leaked session is then enough to take the whole
+            # server down: every later request waits out the timeout and fails.
+            # That is exactly what happened — two helpers opened a session and
+            # never closed it, so after fifteen requests `/state` returned 500
+            # after a 30.00s wait while `/healthz` stayed instant. SQLite opens
+            # a file connection in microseconds, so a pool buys nothing here and
+            # can only ever be exhausted.
+            kwargs["poolclass"] = NullPool
+    engine = create_engine(url, **kwargs)
+
+    if url.startswith("sqlite"):
+        @event.listens_for(engine, "connect")
+        def _sqlite_pragmas(dbapi_connection, _record):
+            """WAL and a busy timeout, on every connection, always.
+
+            WAL lets readers work while a writer holds the database, so a page
+            render cannot be blocked by a settlement. `busy_timeout` makes a
+            writer WAIT for the lock instead of immediately raising "database is
+            locked" — without it, two concurrent setup POSTs on a fresh book
+            fail each other instead of queueing.
+
+            Set here rather than in connect_args because a PRAGMA is per
+            CONNECTION and the engine may open many.
+            """
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA busy_timeout=5000")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                # NOT turning on foreign_keys here. It is the right long-term
+                # setting, but switching it on changes what the EXISTING code is
+                # allowed to write, and it broke seven tests that depend on
+                # insert order. That is a separate change with its own review,
+                # not a side effect of fixing an outage.
+            finally:
+                cursor.close()
+
+    return engine
 
 
 class DB:
@@ -68,6 +108,33 @@ class DB:
             raise
         finally:
             s.close()
+
+
+@contextmanager
+def session_for(db: DB, session: Optional[Session] = None):
+    """The caller's session, or one WE open and are therefore responsible for.
+
+    THE LEAK THIS EXISTS TO PREVENT. Helpers took an optional session and did
+    `s = session or db.session()`, then never closed the one they had created.
+    Every request to a read path that called such a helper checked a connection
+    out of the pool and never returned it, so after fifteen requests the pool
+    was empty and every later request waited out the 30-second timeout and
+    returned a 500 — while `/healthz`, which touches no database, stayed
+    instant. Two helpers had the pattern, and both are read paths the dashboard
+    uses on every render.
+
+    A helper that might create a session must therefore own closing it, and the
+    only way to guarantee that is to make the closing unconditional here rather
+    than remembered at each call site.
+    """
+    if session is not None:
+        yield session                      # the caller's to close, not ours
+        return
+    opened = db.session()
+    try:
+        yield opened
+    finally:
+        opened.close()
 
 
 def get_db(db: DB):

@@ -50,6 +50,10 @@ app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 # file so it never showed; in a test the routes saw an empty book and every
 # lookup answered "no longer exists".
 _settings = get_settings()
+
+#: `/state` is polled by every open page, so it has a budget. Overrunning it is
+#: logged with the elapsed time rather than being allowed to become an outage.
+STATE_SLOW_SECONDS = 1.0
 # The webhook handler is long-lived, so it is rebuilt whenever the default DB
 # changes underneath it.
 _webhook_db = None
@@ -271,30 +275,65 @@ def healthz() -> dict:
 
 @app.get("/state")
 def state() -> dict:
-    """Read-only snapshot for the dashboard (balances come from the cache,
-    not a live API call, so the view stays deterministic)."""
-    with _database().session() as s:
-        recs = s.query(InvoiceReceivable).all()
-        pays = s.query(InvoicePayable).all()
+    """Read-only snapshot for the dashboard. DB ONLY, and never a raw 500.
+
+    THREE RULES, each learned from a real failure:
+
+    * **No network, no planner, no model.** This is polled every few seconds by
+      every open page. Anything slow belongs behind `BackgroundTasks` or on its
+      own route, because an inline Airwallex call here would make the whole UI
+      depend on a third party's latency.
+    * **Bounded.** It is timed; anything over the budget is logged with the
+      elapsed time so a slowly-growing query is visible BEFORE it becomes an
+      outage rather than after.
+    * **Never a raw 500.** A failed read returns a JSON body with a reason the
+      page can print. An unhandled exception here means the operator sees
+      "Internal Server Error" and has no idea whether the books are safe — and
+      "the app could not read state" is exactly what a bot reported.
+    """
+    started = time.monotonic()
+    try:
+        with _database().session() as s:
+            recs = s.query(InvoiceReceivable).all()
+            pays = s.query(InvoicePayable).all()
+            body = {
+                "ok": True,
+                "receivables": [
+                    {"number": r.number, "currency": r.currency,
+                     "amount_minor": r.amount_minor, "paid_minor": r.amount_paid_minor,
+                     "status": r.status.value}
+                    for r in recs
+                ],
+                "payables": [
+                    {"number": p.number, "currency": p.currency,
+                     "amount_minor": p.amount_minor, "status": p.status.value,
+                     "criticality": p.criticality}
+                    for p in pays
+                ],
+                # What this instance DELIBERATELY did not act on, and who it
+                # belonged to. Two instances share one sandbox account, so each
+                # sees the other's arrivals; they are neither suspense nor
+                # incidents, and this is where that decision is visible rather
+                # than merely greppable in a log.
+                "ignored_events": _ignored_events(),
+            }
+    except Exception as exc:                       # noqa: BLE001
+        log.exception("could not read state")
         return {
-        "receivables": [
-            {"number": r.number, "currency": r.currency,
-             "amount_minor": r.amount_minor, "paid_minor": r.amount_paid_minor,
-             "status": r.status.value}
-            for r in recs
-        ],
-        "payables": [
-            {"number": p.number, "currency": p.currency,
-             "amount_minor": p.amount_minor, "status": p.status.value,
-             "criticality": p.criticality}
-            for p in pays
-        ],
-        # What this instance DELIBERATELY did not act on, and who it belonged
-        # to. Two instances share one sandbox account, so each sees the other's
-        # arrivals; they are neither suspense nor incidents, and this is where
-        # that decision is visible rather than merely greppable in a log.
-        "ignored_events": _ignored_events(),
-    }
+            "ok": False,
+            "error": (f"Could not read the books ({type(exc).__name__}). The "
+                      f"database is the only thing this page reads, so the "
+                      f"usual cause is a query that timed out or a file that "
+                      f"is not writable. Nothing was changed by this request."),
+            "receivables": [], "payables": [],
+            "ignored_events": {"count": 0, "recent": []},
+        }
+
+    elapsed = time.monotonic() - started
+    if elapsed > STATE_SLOW_SECONDS:
+        log.warning("GET /state took %.2fs (budget %.2fs) — it must stay a "
+                    "fast, database-only read", elapsed, STATE_SLOW_SECONDS)
+    return body
 
 
 def _ignored_events(limit: int = 20) -> dict:
@@ -1132,12 +1171,27 @@ def app_page(tab: str = "home", ok: str = "", err: str = "") -> str:
     from .ui import render_app
     try:
         ctx = build_context(INCIDENTS)
-    except Exception:
+    except Exception as exc:
         log.exception("dashboard context failed")
-        return ("<html><body style='font-family:system-ui;padding:2rem'>"
-                "<h1>Closebook</h1><p>The app could not read state. "
-                "Try <a href='/state'>/state</a> or <a href='/healthz'>/healthz</a>."
-                "</p></body></html>")
+        # NAME THE REASON. This page used to say only "The app could not read
+        # state", which tells the operator nothing about whether the books are
+        # safe, whether to retry, or what to fix — and it is the exact sentence
+        # an automated tester reported back. A failure message must carry enough
+        # to act on.
+        import html as _html
+
+        reason = f"{type(exc).__name__}: {exc}".strip()
+        return ("<html><body style='font-family:system-ui;padding:2rem;max-width:44rem'>"
+                "<h1>Closebook</h1>"
+                "<p><b>The app could not read its state.</b> Nothing was changed "
+                "by this request — the books are exactly as they were.</p>"
+                f"<p style='font-family:ui-monospace,monospace;background:#F4F2EC;"
+                f"padding:.75rem;border-radius:8px;overflow-wrap:anywhere'>"
+                f"{_html.escape(reason)}</p>"
+                "<p>Retry this page, or read "
+                "<a href='/state'>/state</a> and "
+                "<a href='/healthz'>/healthz</a> directly.</p>"
+                "</body></html>")
     if ok:
         ctx["flash_ok"] = ok
     if err:

@@ -208,8 +208,18 @@ def cash_position(db: DB, budget: BudgetSettings,
     ignored the books entirely, so the plan could spend USD 40,000 that the
     ledger did not have. It now reads what is actually there, and subtracts what
     is already committed, through the one rule in `policy.available_cash_minor`.
+
+    THE SESSION IS OWNED HERE. It used to be `s = session or db.session()` with
+    no close, so every caller that passed no session leaked a connection.
     """
-    s = session or db.session()
+    from ..db import session_for
+
+    with session_for(db, session) as s:
+        return _position_from(s, budget)
+
+
+def _position_from(s, budget: BudgetSettings) -> CashPosition:
+    """The position itself, given a session whose lifetime someone else owns."""
     from .ledger import reconcile
 
     rep = reconcile(s)
@@ -351,14 +361,18 @@ def current_plan(db: DB, budget: Optional[BudgetSettings] = None) -> Plan:
     """
     from .settings_store import workspace_budget
 
-    s = db.session()
-    budget = budget or workspace_budget(s)
-    return build_plan(
-        payables_from_db(s),
-        cash_position(db, budget, session=s),
-        budget,
-        chase_shortfalls=chase_shortfalls(s),
-    )
+    # Same leak, same fix: this opened a session and never closed it, so the
+    # plan path leaked a connection on every call as well.
+    from ..db import session_for
+
+    with session_for(db) as s:
+        budget = budget or workspace_budget(s)
+        return build_plan(
+            payables_from_db(s),
+            cash_position(db, budget, session=s),
+            budget,
+            chase_shortfalls=chase_shortfalls(s),
+        )
 
 
 __all__ = [
