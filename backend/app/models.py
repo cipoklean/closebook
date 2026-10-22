@@ -108,6 +108,16 @@ class Supplier(Base):
     )
     airwallex_beneficiary_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     mcc: Mapped[Optional[str]] = mapped_column(String(16))
+    # --- beneficiary creation, from the app rather than from a script -------
+    # The beneficiary is created against the REAL sandbox, so the outcome has
+    # to be storable and displayable: a supplier that failed validation must be
+    # visibly failed, not silently missing its id.
+    beneficiary_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # The exact request we sent, so the corridor fields can be shown back and
+    # re-validated without guessing what was typed.
+    beneficiary_request_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Airwallex's own words, verbatim, when validation or creation is refused.
+    beneficiary_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class InvoiceReceivable(Base):
@@ -259,3 +269,24 @@ class BalanceSnapshot(Base):
     currency: Mapped[str] = mapped_column(String(3))
     available_minor: Mapped[int] = mapped_column(BigInteger)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class WorkspaceSettings(Base):
+    """The workspace's OWN policy, edited in the app.
+
+    Deliberately NOT in `.env`: these are business decisions the operator owns
+    (what floor to keep, how much may go out without a human), not deployment
+    configuration. `.env` holds credentials and endpoints; this holds the rules.
+
+    Single row, enforced by `settings_store.get_or_create()` reading id == 1
+    rather than by a constraint SQLite cannot express.
+    """
+
+    __tablename__ = "workspace_settings"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    budget_currency: Mapped[str] = mapped_column(String(3), default="USD")
+    reserve_floor_minor: Mapped[int] = mapped_column(BigInteger, default=500_000)
+    auto_pay_limit_minor: Mapped[int] = mapped_column(BigInteger, default=250_000)
+    # How much FX drift the plan leaves as headroom, in percent.
+    fx_tolerance_pct: Mapped[float] = mapped_column(Float, default=0.50)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

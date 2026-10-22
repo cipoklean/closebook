@@ -553,6 +553,7 @@ NAV = [
     ("money-out", "Money out", "/app?tab=money-out", _I["out"]),
     ("ok", "Needs your OK", "/app?tab=ok", _I["ok"]),
     ("ai", "AI activity", "/app?tab=ai", _I["ai"]),
+    ("setup", "Setup", "/app?tab=setup", _I["out"]),
 ]
 
 
@@ -1372,14 +1373,278 @@ def _ai(c: dict) -> str:
         'setting.</span></div>'))
 
 
+# ---- setup --------------------------------------------------------------
+# Six screens, all of them WRITE THE BOOK and none of them move money. There is
+# no transfer or conversion form anywhere on this page by design: money moves
+# only through planner -> policy -> executor, and the way to keep that true is
+# to give the UI nothing to call.
+_CURRENCY_HINT = "3-letter code, e.g. USD"
+
+
+def _field(name: str, label: str, *, span: str = "x-span-3", kind: str = "text",
+           value: str = "", placeholder: str = "", hint: str = "",
+           required: bool = False, step: str = "") -> str:
+    req = " required" if required else ""
+    extra = f' step="{e(step)}"' if step else ""
+    hint_html = f'<span class="x-hint">{e(hint)}</span>' if hint else ""
+    return (f'<div class="x-field {span}"><label for="f-{e(name)}">{e(label)}</label>'
+            f'<input class="x-input" id="f-{e(name)}" name="{e(name)}" type="{e(kind)}"'
+            f' value="{e(value)}" placeholder="{e(placeholder)}"{extra}{req}>'
+            f'{hint_html}</div>')
+
+
+def _select(name: str, label: str, options: list[tuple[str, str]], *,
+            span: str = "x-span-3", hint: str = "") -> str:
+    if not options:
+        return (f'<div class="x-field {span}"><label for="f-{e(name)}">'
+                f'{e(label)}</label><select class="x-select" id="f-{e(name)}" '
+                f'name="{e(name)}" disabled>'
+                f'<option value="">nothing to pick yet</option></select>'
+                f'<span class="x-hint">{e(hint or "Create one above first.")}</span>'
+                f'</div>')
+    opts = "".join(f'<option value="{e(v)}">{e(t)}</option>' for v, t in options)
+    hint_html = f'<span class="x-hint">{e(hint)}</span>' if hint else ""
+    return (f'<div class="x-field {span}"><label for="f-{e(name)}">{e(label)}</label>'
+            f'<select class="x-select" id="f-{e(name)}" name="{e(name)}">{opts}</select>'
+            f'{hint_html}</div>')
+
+
+def _table(headers: list[str], rows: list[list[str]]) -> str:
+    if not rows:
+        return '<p class="x-empty">Nothing here yet.</p>'
+    head = "".join(f"<th>{e(h)}</th>" for h in headers)
+    body = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>"
+                   for r in rows)
+    return (f'<div class="x-table-wrap"><table class="x-table">'
+            f'<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>')
+
+
+def _cardhead(title: str, sub: str) -> str:
+    return (f'<div class="x-cardhead"><div><h3>{e(title)}</h3>'
+            f'<p>{e(sub)}</p></div></div>')
+
+
+def _pill(status: str, label: str = "") -> str:
+    """A status pill, using the classes this stylesheet actually defines.
+
+    (The first draft of the setup screen wrote `class="pill good"`, which is not
+    in the stylesheet at all — the pill would have rendered as plain text and a
+    warning state would have been invisible.)
+    """
+    key = (status or "").strip().upper()
+    tone = "info"
+    if key in ("PAID", "MATCHED", "PAYABLE", "VERIFIED", "OK", "SUCCESS", "SETTLED"):
+        tone = "good"
+    elif key in ("OPEN", "HELD", "PENDING", "PARTIAL", "SUBMITTED", "PROCESSING",
+                 "AWAITING_APPROVAL"):
+        tone = "warn"
+    elif key in ("OVERPAID", "FAILED", "CANCELLED", "REJECTED", "NO BENEFICIARY",
+                 "INVALID", "PROBLEM"):
+        tone = "bad"
+    return f'<span class="x-pill x-pill--{tone}">{e(label or key or "—")}</span>'
+
+
+def _setup(c: dict) -> str:
+    """The workspace builder. Everything shown was created here or at Airwallex."""
+    st = c.get("settings") or {}
+    ws = c.get("workspace") or {}
+    counts = ws.get("counts") or {}
+    out: list[str] = []
+
+    if c.get("flash_ok"):
+        out.append(f'<div class="x-note x-note--ok">{e(c["flash_ok"])}</div>')
+    if c.get("flash_err"):
+        out.append(f'<div class="x-note x-note--err">{e(c["flash_err"])}</div>')
+
+    if not any(counts.values()):
+        out.append(_card(inner=(
+            '<div class="x-cardhead"><div><h3>This workspace is empty</h3>'
+            '<p>Closebook ships with no sample invoices, suppliers or balances. '
+            'Everything it shows comes from what you create here plus what '
+            'Airwallex returns — so a plan you see on Home is a plan about your '
+            'own money.</p></div></div>'
+            '<p class="x-empty">Start with Settings, then add a customer, an '
+            'invoice, a supplier and a bill. Money in and money out come next.'
+            '</p>')))
+
+    # 1 ---- policy
+    ccy = st.get("budget_currency") or "USD"
+    out.append(_card(inner=(
+        _cardhead("Settings", "The rules the planner obeys. Stored in the "
+                              "workspace, not in a config file.")
+        + f'<form class="x-form" method="post" action="/setup/settings">'
+        + _field("budget_currency", "Budget currency", value=ccy,
+                 placeholder="USD", hint="The floor and the limit are in this currency.")
+        + _field("reserve_floor", "Reserve floor",
+                 value=f'{st.get("reserve_floor_minor", 0) / 100:.2f}',
+                 hint="Cash the planner will never spend.")
+        + _field("auto_pay_limit", "Automatic limit",
+                 value=f'{st.get("auto_pay_limit_minor", 0) / 100:.2f}',
+                 hint="Above this, a payment needs your approval.")
+        + _field("fx_tolerance_pct", "FX drift headroom (%)",
+                 value=f'{st.get("fx_tolerance_pct", 0.5)}',
+                 hint="Extra room a conversion leaves for a rate move.")
+        + f'<div class="x-submit"><button class="x-btn x-btn--primary" '
+          f'type="submit">Save settings</button>'
+          f'<span class="x-hint">Now: keep {e(st.get("reserve_floor") or "?")} '
+          f'back, approve anything over {e(st.get("auto_pay_limit") or "?")}.</span>'
+          f'</div></form>')))
+
+    # 2 ---- customers
+    cust_rows = [[e(x["name"]), e(x["country"] or "—"),
+                  e(x["email"] or "—"), str(x["open_count"])]
+                 for x in ws.get("customers", [])]
+    out.append(_card(inner=(
+        _cardhead("Customers", "Who owes you money.")
+        + '<form class="x-form" method="post" action="/setup/customers">'
+        + _field("name", "Customer name", span="x-span-4",
+                 placeholder="Brightline Trading", required=True)
+        + _field("country", "Country", span="x-span-2", placeholder="NG",
+                 hint="Optional")
+        + _field("email", "Email", span="x-span-4", placeholder="optional")
+        + '<div class="x-submit"><button class="x-btn x-btn--primary" '
+          'type="submit">Add customer</button></div></form>'
+        + _table(["Name", "Country", "Email", "Invoices"], cust_rows))))
+
+    # 3 ---- invoices
+    cust_opts = [(str(x["id"]), x["name"]) for x in ws.get("customers", [])]
+    inv_rows = []
+    for x in ws.get("invoices", []):
+        pill = _pill(x["status"])
+        inv_rows.append([f'<strong>{e(x["number"])}</strong>', e(x["customer"]),
+                         e(x["amount"]), e(x["paid"]), pill,
+                         e(x["due_date"] or "—")])
+    out.append(_card(inner=(
+        _cardhead("Invoices", "Money owed to you. Payments match against these "
+                              "numbers, so a messy reference is the interesting case.")
+        + '<form class="x-form" method="post" action="/setup/invoices">'
+        + _select("customer_id", "Customer", cust_opts, span="x-span-4")
+        + _field("number", "Invoice number", span="x-span-2",
+                 placeholder="INV-0041", required=True)
+        + _field("amount", "Amount", span="x-span-2", placeholder="12000",
+                 required=True)
+        + _field("currency", "Currency", span="x-span-2", placeholder="USD",
+                 hint=_CURRENCY_HINT)
+        + _field("due_date", "Due date", span="x-span-2", placeholder="2026-11-30",
+                 hint="YYYY-MM-DD")
+        + '<div class="x-submit"><button class="x-btn x-btn--primary" '
+          'type="submit">Add invoice</button></div></form>'
+        + _table(["Number", "Customer", "Amount", "Paid", "Status", "Due"],
+                 inv_rows))))
+
+    # 4 ---- suppliers
+    sup_rows = []
+    for x in ws.get("suppliers", []):
+        if x["beneficiary_id"]:
+            state = (_pill("PAYABLE")
+                     + f'<div class="x-mono">{e(x["beneficiary_id"])}</div>')
+        else:
+            state = (_pill("NO BENEFICIARY")
+                     + (f'<div class="x-hint">{e(x["beneficiary_error"])}</div>'
+                        if x["beneficiary_error"] else ""))
+        sup_rows.append([f'<strong>{e(x["name"])}</strong>', e(x["country"] or "—"),
+                         e(x["currency"] or "—"), e(x["payout_method"]), state])
+    out.append(_card(inner=(
+        _cardhead("Suppliers", "A supplier is only payable once Airwallex has "
+                               "given it a beneficiary. Validation runs first, "
+                               "and any refusal is shown in Airwallex's own words.")
+        + '<form class="x-form" method="post" action="/setup/suppliers">'
+        + _field("name", "Supplier name", span="x-span-3",
+                 placeholder="Atlanta Packaging", required=True)
+        + _field("country", "Bank country", span="x-span-2", placeholder="US",
+                 hint="2-letter code")
+        + _field("currency", "Currency", span="x-span-2", placeholder="USD",
+                 hint=_CURRENCY_HINT)
+        + _select("payout_method", "Payout method",
+                  [("LOCAL", "LOCAL"), ("SWIFT", "SWIFT")], span="x-span-2")
+        + _field("entity_type", "Entity type", span="x-span-2",
+                 value="COMPANY", hint="PERSONAL or COMPANY")
+        + _field("account_name", "Account name", span="x-span-4",
+                 hint="Defaults to the supplier name")
+        + _field("account_number", "Account number", span="x-span-3",
+                 hint="For SWIFT in an IBAN country, this is the IBAN.")
+        + _field("routing_value", "Routing number", span="x-span-3",
+                 hint="LOCAL only — ABA for USD, sort code for GBP.")
+        + _field("bank_name", "Bank name", span="x-span-3")
+        + _field("swift_code", "SWIFT / BIC", span="x-span-3",
+                 hint="SWIFT only, e.g. INGBNL2A")
+        + _field("iban", "IBAN", span="x-span-4",
+                 hint="SWIFT only, if it is not the account number above.")
+        + _field("city", "City", span="x-span-3")
+        + _field("street_address", "Street address", span="x-span-5")
+        + _field("postcode", "Postcode", span="x-span-2")
+        + _field("state", "State", span="x-span-2", hint="US only")
+        + _field("bank_account_category", "Account category", span="x-span-3",
+                 value="Checking", hint='USD only: "Checking" or "Savings"')
+        + '<div class="x-submit">'
+          '<button class="x-btn x-btn--primary" type="submit">'
+          'Validate and create beneficiary</button>'
+          '<span class="x-hint">This creates a real beneficiary in the '
+          'Airwallex sandbox. No money moves.</span></div></form>'
+        + _table(["Supplier", "Country", "Currency", "Rail", "Airwallex"],
+                 sup_rows))))
+
+    # 5 ---- bills
+    sup_opts = [(str(x["id"]), x["name"]) for x in ws.get("suppliers", [])]
+    inv_nums = [x["number"] for x in ws.get("invoices", [])]
+    pay_rows = []
+    for x in ws.get("payables", []):
+        dep = (f'<span class="x-pill x-pill--warn">after {e(x["depends_on"])}</span>'
+               if x["depends_on"] else '<span class="x-hint">none</span>')
+        pay_rows.append([f'<strong>{e(x["number"])}</strong>', e(x["supplier"]),
+                         e(x["amount"]), _pill(x["status"]), dep,
+                         e(x["payout_method"] or "—")])
+    out.append(_card(inner=(
+        _cardhead("Bills to pay", "What you owe. A bill only becomes payable "
+                                  "once its supplier has a beneficiary.")
+        + '<form class="x-form" method="post" action="/setup/payables">'
+        + _select("supplier_id", "Supplier", sup_opts, span="x-span-3")
+        + _field("number", "Your reference", span="x-span-2", placeholder="PO-7001",
+                 required=True, hint="Half of the payment's identity")
+        + _field("amount", "Amount", span="x-span-2", placeholder="1800",
+                 required=True)
+        + _field("currency", "Currency", span="x-span-2", placeholder="USD",
+                 hint=_CURRENCY_HINT)
+        + _field("criticality", "Priority", span="x-span-1", value="3",
+                 kind="number", hint="1-5")
+        + _field("due_date", "Due date", span="x-span-2", placeholder="2026-11-30")
+        + _field("depends_on", "Pay only after invoice", span="x-span-3",
+                 hint=("Optional. One of: " + ", ".join(inv_nums)) if inv_nums
+                      else "Optional. No invoices exist yet.")
+        + '<div class="x-submit"><button class="x-btn x-btn--primary" '
+          'type="submit">Add bill</button></div></form>'
+        + _table(["Reference", "Supplier", "Amount", "Status", "Depends on",
+                  "Rail"], pay_rows))))
+
+    # 6 ---- start fresh
+    out.append(_card(inner=(
+        _cardhead("Start fresh", "Archive this workspace to a file and empty it.")
+        + '<p class="x-hint">Every customer, invoice, supplier, bill, match and '
+          'ledger entry is archived first — nothing is destroyed without a '
+          'copy. Your reserve floor and automatic limit are kept, because they '
+          'are policy rather than data. <strong>Airwallex transfers that already '
+          'exist are not cancelled</strong>: this empties the book, not the bank.'
+          '</p>'
+        + '<details><summary class="x-hint">Show the Start fresh form</summary>'
+          "<form class=\"x-form\" method=\"post\" action=\"/workspace/reset\" "
+          "onsubmit=\"return confirm('Archive and empty this workspace?')\">"
+        + _field("confirm", "Type START FRESH to confirm", span="x-span-6",
+                 placeholder="START FRESH", required=True)
+        + '<div class="x-submit"><button class="x-btn" type="submit">'
+          'Archive and start fresh</button></div></form></details>')))
+
+    return "".join(out)
+
+
 _TABS = {"home": _home, "money-in": _money_in, "money-out": _money_out,
-         "ok": _ok, "ai": _ai}
+         "ok": _ok, "ai": _ai, "setup": _setup}
 _SUBS = {
     "home": "Everything money did since the last time you looked.",
     "money-in": "What landed, and what it was for.",
     "money-out": "What you owe, and where each payment is.",
     "ok": "Waiting on you — over the limit, or unclear.",
     "ai": "Every model call, and the rule that checked it.",
+    "setup": "Build the workspace Closebook runs on. No sample data.",
 }
 
 

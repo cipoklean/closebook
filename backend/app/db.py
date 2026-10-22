@@ -48,6 +48,27 @@ class DB:
     def session(self) -> Session:
         return self.SessionLocal()
 
+    @contextmanager
+    def session_scope(self):
+        """`with db.session_scope() as s:` — commit on success, rollback on error.
+
+        Bound to THIS instance's engine. The module-level `session_scope()` is
+        the same thing bound to `get_default_db()`, and BOTH must exist: the
+        app holds a `DB` object and the tests hold the module default, and a
+        helper that only exists on one of them is a helper whose first caller
+        crashes. (It did: the setup routes and the workspace reset both wrote
+        `_db.session_scope()` before this method existed.)
+        """
+        s = self.session()
+        try:
+            yield s
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise
+        finally:
+            s.close()
+
 
 def get_db(db: DB):
     """FastAPI dependency factory returning a request-scoped session."""

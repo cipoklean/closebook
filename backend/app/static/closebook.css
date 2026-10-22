@@ -434,3 +434,45 @@ a { color: inherit; }
 .x-blockers { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 4px; }
 .x-blockers li { list-style: disc; font-size: 13px; line-height: 1.45; }
 .x-callnote .x-blockers { margin: 0; }
+
+/* ---- setup forms -------------------------------------------------------
+   The setup screens are real forms the operator fills in, so they get real
+   form styling: a labelled field, a full-width input, and a submit that lines
+   up. Deliberately plain — nothing here is a control the money path reads. */
+.x-form { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
+.x-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.x-field > label { font-size: 13px; font-weight: 600; color: var(--x-muted); }
+.x-field > .x-hint { font-size: 12px; color: var(--x-faint); line-height: 1.4; }
+.x-input, .x-select {
+  appearance: none; box-sizing: border-box; width: 100%; min-height: 44px;
+  padding: 0 12px; border-radius: var(--x-r-s); border: 1px solid var(--x-line-2);
+  background: var(--x-card); color: var(--x-ink); font: 400 15px/1.2 var(--x-sans);
+}
+.x-select { background-image: none; cursor: pointer; }
+.x-input:focus, .x-select:focus { outline: 2px solid var(--x-accent); outline-offset: 1px; border-color: var(--x-accent); }
+.x-input::placeholder { color: var(--x-faint); }
+.x-span-2 { grid-column: span 2; }
+.x-span-3 { grid-column: span 3; }
+.x-span-4 { grid-column: span 4; }
+.x-span-5 { grid-column: span 5; }
+.x-span-6 { grid-column: span 6; }
+.x-span-8 { grid-column: span 8; }
+.x-span-12 { grid-column: span 12; }
+.x-submit { grid-column: span 12; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+
+/* A refusal is shown where the form is, not in a toast nobody reads. */
+.x-note { border-radius: var(--x-r-s); padding: 12px 14px; font-size: 14px; line-height: 1.5; margin-bottom: 16px; }
+.x-note--ok { background: var(--x-good-t); color: var(--x-good); }
+.x-note--err { background: var(--x-bad-t); color: var(--x-bad); }
+.x-empty { color: var(--x-faint); font-size: 14px; padding: 10px 0; }
+
+.x-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.x-table th { text-align: left; font-size: 12px; letter-spacing: 0.03em; text-transform: uppercase; color: var(--x-faint); font-weight: 600; padding: 8px 10px 8px 0; border-bottom: 1px solid var(--x-line); }
+.x-table td { padding: 10px 10px 10px 0; border-bottom: 1px solid var(--x-line); vertical-align: top; }
+.x-table tr:last-child td { border-bottom: none; }
+.x-mono { font-family: var(--x-mono); font-size: 12.5px; word-break: break-all; }
+@media (max-width: 720px) {
+  .x-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .x-span-2, .x-span-3, .x-span-4, .x-span-5, .x-span-6, .x-span-8 { grid-column: span 2; }
+  .x-table-wrap { overflow-x: auto; }
+}

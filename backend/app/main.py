@@ -263,6 +263,208 @@ def _process_pending() -> None:
                 log.exception("settlement failed for %s", transfer_id)
 
 
+# --------------------------------------------------------------- setup (P1)
+# Every screen here WRITES ONLY THE BOOK. None of these routes can move money:
+# there is no call to create-transfer, create-conversion or issuing anywhere
+# below. Money still moves only through planner -> policy -> executor.
+#
+# Errors come back as a redirect carrying a plain sentence, so a refusal is
+# visible on the page that caused it rather than in a stack trace.
+
+def _require_sandbox() -> Optional[str]:
+    """Sandbox-only guard for anything that creates a REAL Airwallex object."""
+    base = (_settings.awx_base_url or "")
+    if "sandbox" not in base:
+        return (f"Refused: {base} is not a sandbox host. Closebook only ever "
+                f"talks to the Airwallex sandbox.")
+    return None
+
+
+def _back(request: Request, tab: str = "setup", ok: str = "", err: str = ""):
+    """Redirect back to the page with ONE message. No flash state to lose."""
+    from urllib.parse import urlencode
+    from fastapi.responses import RedirectResponse
+    q = {"tab": tab}
+    if ok:
+        q["ok"] = ok
+    if err:
+        q["err"] = err
+    return RedirectResponse(f"/app?{urlencode(q)}", status_code=303)
+
+
+def _beneficiary_client():
+    from .airwallex.beneficiaries import Beneficiaries
+    from .airwallex.client import AirwallexClient
+    return Beneficiaries(AirwallexClient())
+
+
+@app.post("/setup/settings")
+async def setup_settings(request: Request):
+    """Save the workspace's policy. Database, not .env."""
+    from .domain.settings_store import SettingsRefused, save
+
+    b = await _read_body(request)
+    try:
+        with _db.session_scope() as s:
+            save(s, budget_currency=str(b.get("budget_currency") or "USD"),
+                 reserve_floor=str(b.get("reserve_floor") or ""),
+                 auto_pay_limit=str(b.get("auto_pay_limit") or ""),
+                 fx_tolerance_pct=str(b.get("fx_tolerance_pct") or "0.50"))
+        return _back(request, ok="Settings saved. The planner and the tiles both "
+                                 "read these numbers.")
+    except SettingsRefused as exc:
+        return _back(request, err=str(exc))
+
+
+@app.post("/setup/customers")
+async def setup_customers(request: Request):
+    from .domain.workspace import WorkspaceRefused, create_customer
+
+    b = await _read_body(request)
+    try:
+        with _db.session_scope() as s:
+            row = create_customer(s, name=str(b.get("name") or ""),
+                                  email=str(b.get("email") or ""),
+                                  country=str(b.get("country") or ""))
+            name = row.name
+        return _back(request, ok=f"Added customer {name}.")
+    except WorkspaceRefused as exc:
+        return _back(request, err=str(exc))
+
+
+@app.post("/setup/invoices")
+async def setup_invoices(request: Request):
+    from .domain.workspace import WorkspaceRefused, create_invoice
+
+    b = await _read_body(request)
+    try:
+        with _db.session_scope() as s:
+            row = create_invoice(
+                s, customer_id=int(b.get("customer_id") or 0),
+                number=str(b.get("number") or ""),
+                currency=str(b.get("currency") or ""),
+                amount=str(b.get("amount") or ""),
+                due_date=str(b.get("due_date") or ""))
+            num = row.number
+        return _back(request, ok=f"Added invoice {num}.")
+    except (WorkspaceRefused, ValueError) as exc:
+        return _back(request, err=str(exc))
+
+
+@app.post("/setup/suppliers")
+async def setup_suppliers(request: Request):
+    """Create the supplier AND its real Airwallex beneficiary.
+
+    The buyer and the API result are stored together, so a supplier whose
+    beneficiary was refused is a visible row carrying Airwallex's own words —
+    not a missing row somebody has to remember to retry.
+    """
+    from .domain.beneficiary_form import validate_and_create
+    from .domain.workspace import WorkspaceRefused, create_supplier, record_beneficiary
+
+    guard = _require_sandbox()
+    if guard:
+        return _back(request, err=guard)
+
+    b = await _read_body(request)
+    form = {k: (v if isinstance(v, str) else "") for k, v in b.items()}
+    try:
+        with _db.session_scope() as s:
+            sup = create_supplier(
+                s, name=str(b.get("name") or ""),
+                country=str(b.get("country") or ""),
+                currency=str(b.get("currency") or ""),
+                payout_method=str(b.get("payout_method") or "LOCAL"))
+            supplier_id, supplier_name = sup.id, sup.name
+    except WorkspaceRefused as exc:
+        return _back(request, err=str(exc))
+
+    outcome = validate_and_create(None, form, beneficiaries=_beneficiary_client())
+
+    with _db.session_scope() as s:
+        record_beneficiary(s, supplier_id, request=outcome.request,
+                           beneficiary_id=outcome.beneficiary_id,
+                           status=outcome.status, error=outcome.error)
+
+    if outcome.ok:
+        return _back(request, ok=f"{supplier_name} is payable — Airwallex "
+                                 f"beneficiary {outcome.beneficiary_id} "
+                                 f"({outcome.status}).")
+    return _back(request, err=f"{supplier_name} was saved but its beneficiary "
+                              f"was refused. {outcome.error}")
+
+
+@app.post("/setup/suppliers/{supplier_id}/beneficiary")
+async def setup_supplier_beneficiary(supplier_id: int, request: Request):
+    """Retry beneficiary creation for a supplier whose first attempt failed."""
+    from .domain.beneficiary_form import validate_and_create
+    from .domain.workspace import record_beneficiary
+    from .models import Supplier
+
+    guard = _require_sandbox()
+    if guard:
+        return _back(request, err=guard)
+
+    b = await _read_body(request)
+    form = {k: (v if isinstance(v, str) else "") for k, v in b.items()}
+    with _db.session_scope() as s:
+        sup = s.get(Supplier, supplier_id)
+        if sup is None:
+            return _back(request, err="That supplier no longer exists.")
+        name = sup.name
+
+    outcome = validate_and_create(None, form, beneficiaries=_beneficiary_client())
+    with _db.session_scope() as s:
+        record_beneficiary(s, supplier_id, request=outcome.request,
+                           beneficiary_id=outcome.beneficiary_id,
+                           status=outcome.status, error=outcome.error)
+    if outcome.ok:
+        return _back(request, ok=f"{name} is payable — beneficiary "
+                                 f"{outcome.beneficiary_id} ({outcome.status}).")
+    return _back(request, err=f"{name}: {outcome.error}")
+
+
+@app.post("/setup/payables")
+async def setup_payables(request: Request):
+    from .domain.workspace import WorkspaceRefused, create_payable
+
+    b = await _read_body(request)
+    try:
+        with _db.session_scope() as s:
+            row = create_payable(
+                s, supplier_id=int(b.get("supplier_id") or 0),
+                currency=str(b.get("currency") or ""),
+                amount=str(b.get("amount") or ""),
+                number=str(b.get("number") or ""),
+                depends_on=str(b.get("depends_on") or ""),
+                criticality=int(b.get("criticality") or 3),
+                due_date=str(b.get("due_date") or ""))
+            num = row.number
+        return _back(request, ok=f"Added bill {num}. The planner will look at it "
+                                 f"on the next event.")
+    except (WorkspaceRefused, ValueError) as exc:
+        return _back(request, err=str(exc))
+
+
+@app.post("/workspace/reset")
+async def workspace_reset(request: Request):
+    """Archive the book to a file, then empty it. Confirmation required."""
+    from .domain.workspace import WorkspaceRefused, archive_and_reset
+
+    b = await _read_body(request)
+    try:
+        arch = archive_and_reset(_db, confirm=str(b.get("confirm") or ""))
+        total = sum(arch.cleared.values())
+        return _back(request, ok=f"Workspace archived to {arch.path} and cleared "
+                                 f"({total} rows). Your reserve floor and limit "
+                                 f"were kept.")
+    except WorkspaceRefused as exc:
+        return _back(request, err=str(exc))
+    except Exception as exc:
+        log.exception("workspace reset failed")
+        return _back(request, err=f"Could not reset the workspace: {exc}")
+
+
 @app.get("/", response_class=HTMLResponse)
 def landing() -> str:
     """The landing page. Illustrative copy only — no live figures."""
@@ -271,9 +473,13 @@ def landing() -> str:
 
 
 @app.get("/app", response_class=HTMLResponse)
-def app_page(tab: str = "home") -> str:
+def app_page(tab: str = "home", ok: str = "", err: str = "") -> str:
     """The operator app. Everything on it was decided by the deterministic layer
     before this function ran — the page only presents.
+
+    `ok`/`err` are the one-line result of a setup POST, carried on the query
+    string rather than in a session: a redirect with a query string cannot go
+    stale, and there is no flash state to lose.
 
     Falls back to a plain page with links to the JSON endpoints rather than an
     error, so a rendering fault never hides the state.
@@ -288,6 +494,10 @@ def app_page(tab: str = "home") -> str:
                 "<h1>Closebook</h1><p>The app could not read state. "
                 "Try <a href='/state'>/state</a> or <a href='/healthz'>/healthz</a>."
                 "</p></body></html>")
+    if ok:
+        ctx["flash_ok"] = ok
+    if err:
+        ctx["flash_err"] = err
     return render_app(ctx, tab=tab, health=healthz())
 
 

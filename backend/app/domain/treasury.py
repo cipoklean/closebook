@@ -288,9 +288,15 @@ def current_plan(db: DB, budget: Optional[BudgetSettings] = None) -> Plan:
     This is the single place the app turns stored rows into a treasury plan, so
     a hold reason shown in the UI is the same string the planner produced — not
     a paraphrase a view invented.
+
+    The policy comes from the WORKSPACE ROW in the database (setting_store),
+    not from the vendored JSON: the floor and the limit are the operator's to
+    change from the app, and the plan has to obey the ones on screen.
     """
-    budget = budget or load_budget()
+    from .settings_store import workspace_budget
+
     s = db.session()
+    budget = budget or workspace_budget(s)
     return build_plan(
         payables_from_db(s),
         cash_position(db, budget, session=s),

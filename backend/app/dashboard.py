@@ -49,14 +49,20 @@ def budget_block(s=None) -> dict:
 
     The forecast is DERIVED from the open receivables rather than read from a
     config number, so it cannot drift from the invoices it describes.
+
+    The limits are read from the WORKSPACE ROW (the operator's own settings),
+    in MINOR units as stored — this used to multiply major units by 100, which
+    is only right for a 2-exponent currency and only by luck for USD.
     """
     from .db import get_default_db
-    from .domain.policy import load_budget
+    from .domain.settings_store import as_budget, read as read_settings
     from .domain.treasury import forecast_from_db, DEMO_RATES
 
-    b = load_budget()
+    session = s or get_default_db().session()
+    row = read_settings(session)
+    b = as_budget(row)
     try:
-        fc = forecast_from_db(s or get_default_db().session(), DEMO_RATES)
+        fc = forecast_from_db(session, DEMO_RATES)
         forecast_lines = fc.lines
         forecast_total = fc.total_minor()
     except Exception:
@@ -64,8 +70,9 @@ def budget_block(s=None) -> dict:
         forecast_lines, forecast_total = [], 0
     return {
         "currency": b.currency,
-        "reserve_floor_minor": int(b.reserve_floor_usd * 100),
-        "auto_pay_limit_minor": int(b.auto_pay_limit_usd * 100),
+        "reserve_floor_minor": int(row.reserve_floor_minor),
+        "auto_pay_limit_minor": int(row.auto_pay_limit_minor),
+        "fx_tolerance_pct": float(row.fx_tolerance_pct),
         # FORECAST ONLY. Named so no reader mistakes it for spendable cash.
         "forecast_lines": forecast_lines,
         "forecast_minor": forecast_total,
@@ -789,8 +796,19 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
         # second, separately-worded cash reason would put the same fact on the
         # page twice in two different sentences.
 
+        # The Setup screens read the workspace they are about to change, so a
+        # refusal and the list it applies to are always the same generation.
+        from .domain.settings_store import describe as _describe
+        from .domain.settings_store import read as _read_settings
+        from .domain.workspace import snapshot as _workspace_snapshot
+
+        _ws = _workspace_snapshot(s)
+        _st = _describe(_read_settings(s))
+
         return {
             "budget": budget,
+            "settings": _st,
+            "workspace": _ws,
             "money": money,
             "cash": rep.cash_by_currency,
             "suspense": rep.suspense_by_currency,
