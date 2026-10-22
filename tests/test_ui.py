@@ -27,6 +27,7 @@ from app.domain.planner import ACT_PAY, Step
 from app.domain.matching import Candidate
 from app.main import app
 from app.models import AgentTrace, StepStatus
+from app.money import money_str
 from app.ui import e, money, render_app, render_landing
 
 
@@ -244,13 +245,25 @@ class TestLabelMapping:
         assert "Promised to suppliers" in html
         assert "5,000.00" in html
 
-    def test_free_to_spend_subtracts_promised_and_the_floor(self, db):
-        """free = cash - promised - reserve floor, per currency."""
+    def test_free_to_spend_subtracts_promised_in_flight_and_the_floor(self, db):
+        """free = cash - promised - in flight - reserve floor, per currency."""
         _payable(db, number="PO-7201", currency="USD", amount=500_000)
         ctx = build_context([])
         m = ctx["money"]
         cash_usd = int(ctx["cash"].get("USD", 0))
-        assert m["free"]["USD"] == cash_usd - 500_000 - m["reserve_floor_minor"]
+        assert m["free"]["USD"] == (
+            cash_usd - m["promised"].get("USD", 0)
+            - m["in_flight"].get("USD", 0) - m["reserve_floor_minor"])
+
+    def test_a_payable_costs_the_plans_funding_amount_not_the_bare_invoice(self, db):
+        """A SWIFT payable costs the invoice PLUS the flat rail fee, which is
+        what the plan carries. The tile must show the plan's number — costing it
+        at the bare invoice would understate what has to be there."""
+        _payable(db, number="PO-7208", currency="USD", amount=500_000)
+        m = build_context([])["money"]
+        line = next(ln for ln in m["lines"] if ln["payable_number"] == "PO-7208")
+        assert line["amount_minor"] > 500_000, "the rail fee must be included"
+        assert m["promised"]["USD"] == line["amount_minor"]
 
     def test_the_floor_is_charged_only_to_the_budget_currency(self, db):
         _payable(db, number="PO-7202", currency="USD", amount=100_000)
@@ -292,9 +305,13 @@ class TestLabelMapping:
         _payable(db, number="PO-7206", currency="USD", amount=250_000)
         ctx_b = build_context([])
         assert ctx_a["money"]["free"]["USD"] != ctx_b["money"]["free"]["USD"]
-        # one more promise of 2,500.00 reduces free-to-spend by exactly that
+        # free-to-spend falls by exactly the amount the PLAN says PO-7206 costs
+        # (2,500.00 plus its flat rail fee) — the tile uses the planner's number,
+        # so the two can never disagree.
+        line = next(ln for ln in ctx_b["money"]["lines"]
+                    if ln["payable_number"] == "PO-7206")
         assert (ctx_a["money"]["free"]["USD"]
-                - ctx_b["money"]["free"]["USD"]) == 250_000
+                - ctx_b["money"]["free"]["USD"]) == line["amount_minor"]
 
     def test_an_empty_book_shows_no_currency_rows(self, db):
         """No cash and no payables means nothing to list — not a wall of 0.00."""
@@ -1295,3 +1312,204 @@ class TestStepsBlock:
         blk = steps_block(db.session())
         assert blk["approvable"] == []
         assert blk["problems"] == []
+
+
+# ------------------------------------------- funded currency, in flight, floor
+class TestFundingCurrencyIsWhatHasToBeThere:
+    """A EUR payable bought with USD is a USD obligation.
+
+    The tile used to value every payable in its INVOICE currency, so a EUR
+    9,000 bill reported "Short by EUR 9,000.00" against a business that held no
+    EUR and was never short of any — it was simply going to convert. These
+    tests pin the funding-currency rule and the in-flight split.
+    """
+
+    def _cash(self, db, ccy, minor):
+        """Seed a real ledger cash balance, the way the seed does."""
+        from app.db import session_scope
+        from app.domain.ledger import post
+        with session_scope() as s:
+            post(s, f"seed:{ccy}", [(f"cash:{ccy}", minor, 0, ccy),
+                                    ("receivable_clearing", 0, minor, ccy)])
+
+    def _step(self, db, *, payable, kind, obj, status, currency="USD",
+              amount=0, sell_currency=None, sell_amount=0,
+              buy_currency=None, buy_amount=0, run_id=None):
+        import json as _json
+        from app.db import session_scope
+        from app.models import PlanStep, StepType
+        with session_scope() as s:
+            s.add(PlanStep(
+                run_id=run_id, type=StepType[kind],
+                payload_json=_json.dumps({
+                    "payable_number": payable,
+                    "action": "FX" if kind == "FX" else "PAY",
+                    "amount_minor": amount,
+                    "currency": currency,
+                    "sell_currency": sell_currency,
+                    "sell_amount_minor": sell_amount,
+                    "buy_currency": buy_currency,
+                    "buy_amount_minor": buy_amount,
+                }),
+                reason="seeded", status=status, airwallex_object_id=obj))
+
+    def _plan_funding(self, payable):
+        """What the REAL plan says this payable costs — never a re-derivation."""
+        from app.db import get_default_db
+        from app.domain.treasury import current_plan
+        return next(s for s in current_plan(get_default_db()).steps
+                    if s.payable_number == payable and s.action == "FX")
+
+    def test_an_in_flight_eur_transfer_funded_from_usd_is_not_a_eur_shortfall(self, db):
+        self._cash(db, "USD", 1_640_000)                      # USD 16,400.00
+        _payable(db, number="PO-7501", currency="EUR", amount=900_000)
+        # the conversion the plan makes, then the transfer that was sent
+        self._step(db, payable="PO-7501", kind="FX", obj="conv-7501",
+                   status=StepStatus.SUBMITTED, sell_currency="USD",
+                   sell_amount=1_034_600, buy_currency="EUR", buy_amount=901_285)
+        self._step(db, payable="PO-7501", kind="TRANSFER", obj="tr-7501",
+                   status=StepStatus.SUBMITTED, currency="EUR", amount=901_285)
+
+        ctx = build_context([])
+        m = ctx["money"]
+        line = next(ln for ln in m["lines"] if ln["payable_number"] == "PO-7501")
+
+        # costed in USD — the currency that actually has to be there
+        assert line["currency"] == "USD"
+        assert line["source"] == "conversion"
+        # the number is the PLAN's, drift headroom included, not a new rate
+        assert line["amount_minor"] == self._plan_funding("PO-7501").sell_amount_minor
+        # sent, so it is in flight and NOT still promised
+        assert line["where"] == "in_flight"
+        assert "PO-7501" not in [
+            ln["payable_number"] for ln in m["lines"] if ln["where"] == "promised"]
+        # counted exactly once, in USD
+        assert m["in_flight"]["USD"] == line["amount_minor"]
+
+        # THE DEFECT: no EUR appears anywhere in the free/shortfall arithmetic
+        assert "EUR" not in m["free"]
+        assert "EUR" not in m["shortfall"]
+        assert "EUR" not in m["promised"]
+        # and the page never claims a EUR shortfall
+        html = render_app(ctx, tab="home")
+        assert "Short by EUR" not in html
+        assert "EUR -" not in html
+
+    def test_the_in_flight_amount_is_shown_and_not_dropped(self, db):
+        """Dropping it would understate what is committed; double counting it
+        would overstate it. It appears exactly once, under In flight."""
+        self._cash(db, "USD", 1_640_000)
+        _payable(db, number="PO-7501", currency="EUR", amount=900_000)
+        self._step(db, payable="PO-7501", kind="TRANSFER", obj="tr-7501",
+                   status=StepStatus.SUBMITTED, currency="EUR", amount=901_285)
+        m = build_context([])["money"]
+        html = render_app(build_context([]), tab="home")
+        assert "In flight" in html
+        assert money_str(m["in_flight"]["USD"], "USD") in html
+
+    def test_a_real_shortfall_after_fx_still_warns_and_names_the_payable(self, db):
+        self._cash(db, "USD", 100_000)                       # USD 1,000.00 only
+        _payable(db, number="PO-7502", currency="USD", amount=5_000_000)
+        ctx = build_context([])
+        m = ctx["money"]
+
+        assert m["headline_shortfall_minor"] > 0, "a real shortfall must be flagged"
+        assert m["breaching"], "the tile must name the payable that breaches"
+        assert m["breaching"][0]["payable_number"] == "PO-7502"
+        html = render_app(ctx, tab="home")
+        assert "Short by USD" in html
+        assert "PO-7502" in html
+        assert "reserve floor" in html
+
+    def test_the_floor_is_charged_only_to_the_budget_currency_after_fx(self, db):
+        """GBP cash must not absorb a USD reserve."""
+        self._cash(db, "GBP", 1_000_000)
+        ctx = build_context([])
+        m = ctx["money"]
+        assert m["reserve_applies_to"] == "USD"
+        assert m["free"]["GBP"] == 1_000_000
+        assert "USD" not in m["shortfall"] or m["shortfall"]["USD"] == m["reserve_floor_minor"]
+
+    def test_with_headroom_the_headline_is_a_plain_free_figure(self, db):
+        self._cash(db, "USD", 10_000_000)                    # USD 100,000.00
+        _payable(db, number="PO-7503", currency="USD", amount=100_000)
+        ctx = build_context([])
+        m = ctx["money"]
+        assert m["headline_shortfall_minor"] == 0
+        html = render_app(ctx, tab="home")
+        assert "after promised payments and the USD 5,000.00 reserve floor" in html
+        assert "Short by USD" not in html
+
+    def test_a_payable_with_no_conversion_is_called_out_in_plain_words(self, db):
+        """An unpaid, unheld currency with no conversion planned must say so,
+        not silently become a shortfall in the wrong currency."""
+        from app.db import session_scope
+        from app.domain.ledger import post
+        with session_scope() as s:                            # hold only GBP
+            post(s, "seed:GBP", [("cash:GBP", 1_000_000, 0, "GBP"),
+                                 ("receivable_clearing", 0, 1_000_000, "GBP")])
+        # CNY is unpriceable in DEMO_RATES? no — it is priced, but we hold none,
+        # so the planner DOES plan a conversion. Use a currency the planner
+        # refuses to price, which is the genuine "no conversion planned" case.
+        _payable(db, number="PO-7504", currency="AED", amount=100_000)
+        m = build_context([])["money"]
+        line = next(ln for ln in m["lines"] if ln["payable_number"] == "PO-7504")
+        assert line["source"] in ("unfunded", "no_plan")
+        assert line["note"], "an unfundable payable must carry an explanation"
+
+
+class TestAmountsAllReadTheSameWay:
+    """'GBP 3,200.00', never '3200 GBP'. Both shapes were on screen at once."""
+
+    def test_the_hold_reason_is_currency_first(self, db):
+        from app.db import session_scope
+        from app.models import Customer, InvoicePayable, InvoiceReceivable
+        from app.models import PayStatus, PayoutMethod, RecStatus, Supplier
+        with session_scope() as s:
+            c = Customer(name="Harrow & Co")
+            s.add(c)
+            s.flush()
+            rec = InvoiceReceivable(number="INV-0042", customer_id=c.id,
+                                    currency="GBP", amount_minor=800_000,
+                                    amount_paid_minor=480_000,
+                                    status=RecStatus.PARTIAL)
+            s.add(rec)
+            s.flush()
+            sup = Supplier(name="Shenzhen Weave Co", payout_method=PayoutMethod.LOCAL)
+            s.add(sup)
+            s.flush()
+            s.add(InvoicePayable(number="PO-7505", supplier_id=sup.id,
+                                 currency="USD", amount_minor=700_000,
+                                 status=PayStatus.HELD, criticality=3,
+                                 depends_on_receivable_id=rec.id))
+        ctx = build_context([])
+        for tab in ("home", "money-out", "ok"):
+            html = render_app(ctx, tab=tab)
+            assert "GBP 3,200.00" in html, tab
+            assert "3200 GBP" not in html, tab
+
+    def test_the_budget_limits_read_as_money(self, db):
+        ctx = build_context([])
+        html = render_app(ctx, tab="home")
+        assert "USD 2,500.00" in html          # the auto-pay limit
+        assert "USD 5,000.00" in html          # the reserve floor
+        assert "USD 2500.0" not in html
+        assert "USD 5000.0" not in html
+
+    def test_money_str_is_grouped_and_currency_first(self):
+        assert money_str(320_000, "GBP") == "GBP 3,200.00"
+        assert money_str(1_034_600, "USD") == "USD 10,346.00"
+        assert money_str(0, "EUR") == "EUR 0.00"
+        assert money_str(-60_128_500, "USD") == "USD -601,285.00"
+
+    def test_the_wire_formatter_stays_wire_shaped(self):
+        """to_major_str feeds Airwallex. It strips trailing zeros and must never
+        gain a thousands separator — "3,200.00" is rejected as malformed, and
+        the two formatters exist precisely so they cannot be swapped."""
+        from app.money import to_major_str
+        assert to_major_str(320_000, "GBP") == "3200"     # zeros stripped, no comma
+        assert "," not in to_major_str(123_456_789, "USD")
+        assert to_major_str(123_456_789, "USD") == "1234567.89"
+        # and the display formatter is the opposite on both counts
+        assert money_str(320_000, "GBP") == "GBP 3,200.00"
+        assert money_str(123_456_789, "USD") == "USD 1,234,567.89"

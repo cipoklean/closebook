@@ -20,6 +20,9 @@ _STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 # recorded in agent_trace. Importing the thresholds here lets the page name the
 # real numbers without re-deriving the verdict.
 from .domain.policy import MATCH_CONFIDENCE_AUTO, MATCH_CONFIDENCE_ESCALATE
+# ONE display formatter for every amount, so no view can invent its own shape
+# ("3200 GBP" vs "USD 2,500.00" both appeared on this page).
+from .money import money_str
 
 # --------------------------------------------------------------- helpers
 def e(v) -> str:
@@ -585,7 +588,8 @@ def _home(c: dict) -> str:
     b = c["budget"]
     susp = c["suspense"] or {}
 
-    cash_str = " · ".join(f"{k} {money(v)}" for k, v in cash.items()) or "no cash yet"
+    cash_str = (" · ".join(money_str(v, k) for k, v in sorted(cash.items()))
+                or "no cash yet")
 
     cards = []
     m = c["money"]
@@ -605,44 +609,88 @@ def _home(c: dict) -> str:
         f'landed.</div>'
     )))
 
-    # 2. What we owe. This is the number "Cash set aside" was standing in for —
-    # it was never that: the old figure was EXPECTED INFLOWS (money coming in),
-    # so it neither matched the cash held nor described an obligation.
-    promised_str = " · ".join(f"{k} {money(v)}" for k, v in m["promised"].items())
+    # 2. What we owe, in the currency that will PAY for it, excluding anything
+    # already sent. "GBP 3,200.00", never "3200 GBP" — the project had both
+    # shapes on screen at once and they read as different quantities.
+    promised_str = " · ".join(
+        money_str(v, k) for k, v in sorted(m["promised"].items()))
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["shield"]}</span>'
         '<div class="x-label">Promised to suppliers</div>'
         f'<div class="x-fig">{e(promised_str) if promised_str else "Nothing owed"}</div>'
-        '<div class="x-statnote">Open payables, per currency. A part-payment '
-        'does not release one.</div>'
+        '<div class="x-statnote">Unpaid, not yet sent, costed in the currency '
+        'that buys them. A part-payment does not release one.</div>'
     )))
 
-    # 3. Free to spend = cash - promised - the reserve floor (on the budget's
-    # currency only). A negative figure is a genuine shortfall and is shown as
-    # one, rather than as a "free" number larger than the cash we hold.
-    free_rows = "".join(
-        f'<div>{e(ccy)} {money(v)}</div>' for ccy, v in m["free"].items()) \
-        or "<div>Nothing to spend yet</div>"
-    short = m["shortfall"]
-    if short:
-        short_str = " · ".join(f"{k} {money(v)}" for k, v in short.items())
-        free_note = (f'<div class="x-statnote" style="color:var(--x-bad)">'
-                     f'Short by {e(short_str)}. Cash on hand does not cover what '
-                     f'is promised plus the {e(m["reserve_applies_to"])} '
-                     f'{money(m["reserve_floor_minor"])} reserve floor.</div>')
+    # 3. Sent but not settled. This money is committed and gone from the
+    # spendable balance, so it must be neither dropped nor still called
+    # "promised" — counted exactly once, here.
+    inflight_str = " · ".join(
+        money_str(v, k) for k, v in sorted(m["in_flight"].items()))
+    n_inflight = len([ln for ln in m["lines"] if ln["where"] == "in_flight"])
+    inflight_note = (
+        f'{n_inflight} sent to the bank and not settled yet — a sandbox '
+        'transfer is not a completed payment. Counted once, here, not again as '
+        'promised.')
+    cards.append(_card(span="x-span-3", inner=(
+        f'<span class="x-stat-ico">{_I["clock"]}</span>'
+        '<div class="x-label">In flight</div>'
+        f'<div class="x-fig">{e(inflight_str) if inflight_str else "Nothing sent"}</div>'
+        f'<div class="x-statnote">{inflight_note}</div>'
+    )))
+
+    # 4. Free to spend — ONE honest headline in the budget currency, with the
+    # per-currency working behind Details. The old tile answered per currency
+    # and so reported a EUR shortfall for a EUR bill that USD was always going
+    # to buy.
+    hccy = m["headline_currency"]
+    floor_txt = money_str(m["reserve_floor_minor"], m["reserve_applies_to"])
+    if m["headline_shortfall_minor"]:
+        short_txt = money_str(m["headline_shortfall_minor"], hccy)
+        who = m["breaching"][0] if m["breaching"] else None
+        if who:
+            headline = (f'Short by {short_txt} — paying '
+                        f'{who["payable_number"]} '
+                        f'({money_str(who["amount_minor"], who["currency"])}) '
+                        f'would take cash below the {floor_txt} reserve floor.')
+        else:
+            headline = (f'Short by {short_txt} after promised payments and the '
+                        f'{floor_txt} reserve floor.')
+        head_cls = ' style="color:var(--x-bad)"'
     else:
-        free_note = (f'<div class="x-statnote">Cash minus what is promised, '
-                     f'minus the {e(m["reserve_applies_to"])} '
-                     f'{money(m["reserve_floor_minor"])} reserve floor.</div>')
+        headline = (f'{money_str(m["headline_free_minor"], hccy)} after promised '
+                    f'payments and the {floor_txt} reserve floor.')
+        head_cls = ""
+    # Working, per currency, so the headline number is checkable.
+    work = "".join(
+        f'<div>{e(ccy)}: cash {money(c["cash"].get(ccy, 0))} '
+        f'− promised {money(m["promised"].get(ccy, 0))} '
+        f'− in flight {money(m["in_flight"].get(ccy, 0))}'
+        + (f' − floor {money(m["reserve_floor_minor"])}' if ccy == hccy else '')
+        + f' = {money(m["free"].get(ccy, 0))}</div>'
+        for ccy in sorted(m["free"]))
+    unfunded_note = ""
+    if m["unfunded"]:
+        bits = ", ".join(f'{u["payable_number"]} ({u["note"]})'
+                         for u in m["unfunded"])
+        unfunded_note = (f'<div class="x-statnote" style="color:var(--x-bad)">'
+                         f'No conversion planned for {e(bits)}.</div>')
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["bolt"]}</span>'
         '<div class="x-label">Free to spend</div>'
-        f'<div class="x-fig">{free_rows}</div>'
-        + free_note
+        f'<div class="x-fig"{head_cls}>{e(headline)}</div>'
+        + unfunded_note
+        + f'<details class="x-hist"><summary>Details</summary><div>{work}</div>'
+          + ("".join(
+              f'<div>{e(ln["payable_number"])} · {e(ln["where"].replace("_", " "))} · '
+              f'{e(money_str(ln["amount_minor"], ln["currency"]))}'
+              + (f' · {e(ln["note"])}' if ln["note"] else '')
+              + '</div>' for ln in m["lines"]) or '<div>Nothing outstanding.</div>')
+          + '</details>'
     )))
 
     n_unmatched = len(c["unmatched"])
-    susp_str = " · ".join(f"{k} {money(v)}" for k, v in susp.items())
+    susp_str = " · ".join(money_str(v, k) for k, v in sorted(susp.items()))
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["in"]}</span>'
         '<div class="x-label">Money we couldn\'t match</div>'
@@ -653,9 +701,9 @@ def _home(c: dict) -> str:
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["scale"]}</span>'
         '<div class="x-label">Automatic limit</div>'
-        f'<div class="x-fig">{e(bud_ccy)} {money(b["auto_pay_limit_minor"])}</div>'
+        f'<div class="x-fig">{e(money_str(b["auto_pay_limit_minor"], bud_ccy))}</div>'
         f'<div class="x-statnote">Per payment. Anything over it needs a person. '
-        f'Reserve floor {e(bud_ccy)} {money(m["reserve_floor_minor"])}.</div>'
+        f'Reserve floor {e(floor_txt)}.</div>'
     )))
 
     # banner — must agree with the Problems list, the held payments AND the

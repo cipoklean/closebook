@@ -39,7 +39,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_UP
 from typing import Iterable, Optional
 
-from ..money import minor_for, to_major_str, to_minor
+from ..money import minor_for, money_str, to_major_str, to_minor
 from .policy import (
     AUTO_PAY_LIMIT_USD, BudgetSettings, CommittedCash, PayablePriority,
     RESERVE_FLOOR_USD, breaches_reserve_floor, priority_key, prioritise,
@@ -166,12 +166,10 @@ class Plan:
         for i, s in enumerate(self.steps):
             tag = "APPROVAL" if s.needs_approval else "auto"
             if s.action == ACT_FX:
-                amt = (f"{to_major_str(s.sell_amount_minor, s.sell_currency or 'USD')} "
-                       f"{s.sell_currency} -> "
-                       f"{to_major_str(s.buy_amount_minor, s.buy_currency or 'USD')} "
-                       f"{s.buy_currency}")
+                amt = (f"{money_str(s.sell_amount_minor, s.sell_currency or 'USD')}"
+                       f" -> {money_str(s.buy_amount_minor, s.buy_currency or 'USD')}")
             elif s.action in (ACT_PAY, ACT_DEFER):
-                amt = f"{to_major_str(s.amount_minor, s.currency)} {s.currency}"
+                amt = money_str(s.amount_minor, s.currency)
                 if s.payable_number:
                     amt += f" ({s.payable_number} {s.supplier})"
             else:
@@ -227,7 +225,7 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
             continue
         plan.steps.append(Step(
             action=ACT_CHASE,
-            reason=(f"{inv_number} is {to_major_str(shortfall, 'USD')} short; "
+            reason=(f"{inv_number} is {money_str(shortfall, 'USD')} short; "
                     f"chasing before we rely on that cash"),
             payable_number=inv_number,
             amount_minor=shortfall,
@@ -253,8 +251,8 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
         if not p.dependency_met:
             short_txt = ""
             if p.dependency_open_minor > 0:
-                short_txt = (f" ({to_major_str(p.dependency_open_minor, p.dependency_currency)} "
-                             f"{p.dependency_currency} still outstanding)")
+                short_txt = (f" ({money_str(p.dependency_open_minor, p.dependency_currency)}"
+                             f" still outstanding)")
             plan.steps.append(Step(
                 action=ACT_DEFER,
                 payable_number=p.number, supplier=p.supplier,
@@ -283,7 +281,7 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
         move_minor = total_payout_minor(p.amount_minor, p.currency, p.payout_method)
         fee_txt = ""
         if move_minor != p.amount_minor:
-            fee_txt = (f" (incl. {to_major_str(move_minor - p.amount_minor, p.currency)} "
+            fee_txt = (f" (incl. {money_str(move_minor - p.amount_minor, p.currency)} "
                        f"{p.payout_method} fee)")
 
         held = working.get(p.currency.upper(), 0)
@@ -314,9 +312,9 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
                     payable_number=p.number, supplier=p.supplier,
                     amount_minor=move_minor, currency=p.currency,
                     payout_method=p.payout_method,
-                    reason=(f"needs {to_major_str(sell_minor, 'USD')} USD to buy "
-                            f"{to_major_str(move_minor, p.currency)} {p.currency}, "
-                            f"but only {to_major_str(usd_held, 'USD')} is available "
+                    reason=(f"needs {money_str(sell_minor, 'USD')} to buy "
+                            f"{money_str(move_minor, p.currency)}, "
+                            f"but only {money_str(usd_held, 'USD')} is available "
                             f"— capacity, not policy"),
                     policy_reason="insufficient_balance",
                 ))
@@ -331,10 +329,10 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
                     payable_number=p.number, supplier=p.supplier,
                     amount_minor=move_minor, currency=p.currency,
                     payout_method=p.payout_method,
-                    reason=(f"converting {to_major_str(sell_minor, 'USD')} would "
+                    reason=(f"converting {money_str(sell_minor, 'USD')} would "
                             f"drop committed cash to "
-                            f"{to_major_str(committed_after, 'USD')}, below the "
-                            f"USD {budget.reserve_floor_usd} reserve floor — "
+                            f"{money_str(committed_after, 'USD')}, below the "
+                            f"{money_str(int(budget.reserve_floor_usd * 100), 'USD')} reserve floor — "
                             f"deferring, not trimming"),
                     policy_reason="reserve_floor",
                 ))
@@ -342,7 +340,7 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
 
             fx_step = Step(
                 action=ACT_FX,
-                reason=(f"buy the {to_major_str(move_minor, p.currency)} "
+                reason=(f"buy the {money_str(move_minor, p.currency)} "
                         f"{p.currency} that {p.number} needs{fee_txt}, including "
                         f"{fx_tolerance_pct}% drift tolerance"),
                 sell_currency="USD", sell_amount_minor=sell_minor,
@@ -368,8 +366,8 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
                 amount_minor=move_minor, currency=p.currency,
                 payout_method=p.payout_method,
                 reason=(f"paying {p.number} would take committed cash to "
-                        f"{to_major_str(committed_after, 'USD')}, under the "
-                        f"USD {budget.reserve_floor_usd} floor"),
+                        f"{money_str(committed_after, 'USD')}, under the "
+                        f"{money_str(int(budget.reserve_floor_usd * 100), 'USD')} floor"),
                 policy_reason="reserve_floor",
                 chained_to=fx_index,
             ))
@@ -392,7 +390,7 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
             payout_method=p.payout_method,
             needs_approval=needs_approval,
             approval_reason=why,
-            reason=(f"{p.number} to {p.supplier}: {to_major_str(move_minor, p.currency)} "
+            reason=(f"{p.number} to {p.supplier}: {money_str(move_minor, p.currency)} "
                     f"{p.currency}{fee_txt} by {p.payout_method} — {why}"),
             policy_reason="within_policy" if not needs_approval else "needs_approval",
             chained_to=fx_index,

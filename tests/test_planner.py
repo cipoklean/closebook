@@ -79,8 +79,10 @@ def test_partial_receivable_does_not_unblock_payable():
                       dependency_currency="GBP")
     plan = build_plan([partial], beat1_position(), load_budget())
     assert plan.steps[0].action == ACT_DEFER
-    # the shortfall is GBP, not USD — the reason must name the right currency
-    assert "3200 GBP still outstanding" in plan.steps[0].reason
+    # the shortfall is GBP, not USD — the reason must name the right currency,
+    # and every amount reads "CCY 1,234.56" (never "3200 GBP").
+    assert "GBP 3,200.00 still outstanding" in plan.steps[0].reason
+    assert "3200 GBP" not in plan.steps[0].reason
     assert "USD" not in plan.steps[0].reason
 
 

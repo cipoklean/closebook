@@ -29,7 +29,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Iterable, Optional
 
-from ..money import CURRENCY_EXPONENT, minor_for, to_minor
+from ..money import CURRENCY_EXPONENT, minor_for, money_str, to_minor
 
 # ---- defaults (overridable via .env / committed_cash.json) --------------
 RESERVE_FLOOR_USD = Decimal("5000")       # never plan below this
@@ -162,9 +162,9 @@ def requires_approval(amount_minor: int, currency: str,
                       f"refusing to treat an unpriced currency as within limits")
     limit_minor = int(auto_limit_usd * 100)
     if usd > limit_minor:
-        return True, (f"USD {usd/100:,.2f} exceeds the auto-pay limit of "
-                      f"USD {auto_limit_usd}")
-    return False, f"USD {usd/100:,.2f} is within the auto-pay limit"
+        return True, (f"{money_str(usd, 'USD')} exceeds the auto-pay limit of "
+                      f"{money_str(limit_minor, 'USD')}")
+    return False, f"{money_str(usd, 'USD')} is within the auto-pay limit"
 
 
 def swift_fee_minor(currency: str = "EUR") -> int:

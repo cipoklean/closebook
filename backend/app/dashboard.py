@@ -11,9 +11,13 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Optional
 
 from .domain.agent_tools import ALLOWED_TOOLS
+# The ONE in-flight list, shared with incident recovery. A private copy here is
+# exactly how a second definition of "still moving" gets out of step — and this
+# set is what decides whether a replacement payment may be created.
+from .domain.incidents import in_flight as _live_in_flight
 from .models import (
     AgentTrace, Approval, ApprovalStatus, Customer, Inflow, InvoicePayable,
     InvoiceReceivable, MatchStatus, PayStatus, PlanStep, StepStatus, StepType,
@@ -53,44 +57,125 @@ def budget_block() -> dict:
     }
 
 
-def money_block(s, cash: dict, budget: dict) -> dict:
-    """Cash, what is promised, and what is genuinely free to spend.
+def money_block(s, cash: dict, budget: dict, plan=None,
+                payables: Optional[list] = None) -> dict:
+    """Cash, what is promised, what is already in flight, and what is free.
 
-    `free = cash - promised - reserve floor`, computed PER CURRENCY. The floor is
-    a single-currency policy (the budget's), so it is charged only against that
-    currency rather than smeared across every balance — otherwise a GBP balance
-    would silently absorb a USD reserve.
+    Three rules this encodes, each of which was wrong before:
 
-    A negative result is a real shortfall and is reported as one. Showing a
-    "free" figure larger than the cash actually held, with no explanation, was
-    the original defect.
+    1. **An in-flight payment is not still promised.** A payable whose newest
+       step is SUBMITTED, or whose bank status is in flight, has been sent — the
+       money is committed and on its way. It moves out of "promised" and into
+       "in flight". It is counted exactly ONCE: dropping it would understate
+       what is committed, and double counting it would overstate it.
+    2. **Cost every payable in its FUNDING currency.** A EUR payable bought with
+       USD is a USD obligation. Valuing it in EUR produced "Short by EUR
+       9,000.00" against a business that was never short of EUR — it was simply
+       going to convert. The planned conversion amount (which the planner sized
+       WITH drift headroom) is used as-is; no new rate is invented here.
+    3. **The floor is charged to the budget currency only.** A GBP balance must
+       not silently absorb a USD reserve.
     """
-    promised: dict[str, int] = {}
-    for p in s.query(InvoicePayable).all():
-        if p.status == PayStatus.PAID:
-            continue
-        promised[p.currency] = promised.get(p.currency, 0) + p.amount_minor
+    from .domain.treasury import current_plan, funding_for
+    from .db import get_default_db
+
+    if plan is None:
+        try:
+            plan = current_plan(get_default_db())
+        except Exception:
+            log.exception("could not build the plan for money_block")
+            plan = None
+
+    rows = payables
+    if rows is None:
+        rows = [{"number": p.number, "supplier": p.supplier.name if p.supplier else None,
+                 "display_status": p.status.value, "live_status": None}
+                for p in s.query(InvoicePayable).all()]
 
     floor = budget["reserve_floor_minor"]
     budget_ccy = budget["currency"]
+    # What we can pay FROM: balances plus the budget currency itself (we are
+    # allowed to convert into it, so it is a funding source even at zero held).
+    held = set(cash) | {budget_ccy}
+
+    promised: dict[str, int] = {}
+    in_flight: dict[str, int] = {}
+    lines: list[dict] = []
+    unfunded: list[dict] = []
+
+    for p in rows:
+        num = p.get("number")
+        if not num:
+            continue
+        f = funding_for(plan, num, held)
+        live = (p.get("live_status") or "").upper()
+        settled = live in ("PAID", "COMPLETED", "SUCCESS")
+        sent = (p.get("display_status") == "SUBMITTED" or _live_in_flight(live))
+        if settled:
+            # The bank says it is done. The ledger will carry the debit; do not
+            # also carry it as an obligation.
+            where = "settled"
+        elif sent:
+            in_flight[f.currency] = in_flight.get(f.currency, 0) + f.amount_minor
+            where = "in_flight"
+        else:
+            promised[f.currency] = promised.get(f.currency, 0) + f.amount_minor
+            where = "promised"
+
+        line = {
+            "payable_number": num,
+            "supplier": p.get("supplier"),
+            "currency": f.currency,
+            "amount_minor": f.amount_minor,
+            "source": f.source,
+            "note": f.note,
+            "where": where,
+            "payable_currency": p.get("currency"),
+            "payable_amount_minor": p.get("amount_minor"),
+            "live_status": p.get("live_status"),
+        }
+        lines.append(line)
+        if f.source == "unfunded" and where == "promised":
+            unfunded.append(line)
 
     free: dict[str, int] = {}
     shortfall: dict[str, int] = {}
-    for ccy in sorted(set(cash) | set(promised)):
-        held = int(cash.get(ccy, 0))
-        owed = int(promised.get(ccy, 0))
-        reserved = floor if ccy == budget_ccy else 0
-        net = held - owed - reserved
+    for ccy in sorted(set(cash) | set(promised) | set(in_flight)):
+        net = (int(cash.get(ccy, 0))
+               - int(promised.get(ccy, 0))
+               - int(in_flight.get(ccy, 0))
+               - (floor if ccy == budget_ccy else 0))
         free[ccy] = net
         if net < 0:
             shortfall[ccy] = -net
 
+    # Which payable would take the position below the floor? Walk the still-to-
+    # be-paid ones in plan order and name the one that cannot be covered.
+    breaching: list[dict] = []
+    remaining = (int(cash.get(budget_ccy, 0))
+                 - int(in_flight.get(budget_ccy, 0)) - floor)
+    for line in lines:
+        if line["where"] != "promised" or line["currency"] != budget_ccy:
+            continue
+        if line["amount_minor"] > remaining:
+            breaching.append(line)
+        else:
+            remaining -= line["amount_minor"]
+
     return {
         "promised": promised,
+        "in_flight": in_flight,
         "free": free,
         "shortfall": shortfall,
+        "lines": lines,
+        "unfunded": unfunded,
+        "breaching": breaching,
         "reserve_applies_to": budget_ccy,
         "reserve_floor_minor": floor,
+        # The ONE headline figure: the budget currency's free position.
+        "headline_currency": budget_ccy,
+        "headline_free_minor": free.get(budget_ccy, 0),
+        "headline_shortfall_minor": shortfall.get(budget_ccy, 0),
     }
 
 
@@ -604,7 +689,8 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
 
         return {
             "budget": budget,
-            "money": money_block(s, rep.cash_by_currency, budget),
+            "money": money_block(s, rep.cash_by_currency, budget,
+                                 plan=plan, payables=payables),
             "cash": rep.cash_by_currency,
             "suspense": rep.suspense_by_currency,
             "ledger_balanced": rep.balanced,

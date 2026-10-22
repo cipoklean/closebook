@@ -105,7 +105,8 @@ def test_within_auto_limit_no_approval():
 def test_above_auto_limit_needs_approval():
     needs, why = requires_approval(300_000, "USD")   # USD 3,000
     assert needs is True
-    assert str(AUTO_PAY_LIMIT_USD) in why
+    # the limit must read as money, not as the raw Decimal 2500.0
+    assert "USD 2,500.00" in why
 
 
 def test_auto_limit_uses_usd_equivalent():

@@ -53,6 +53,25 @@ def to_minor(amount_major: Decimal | str, currency: str) -> int:
     return int((d * factor).to_integral_value(rounding=ROUND_HALF_UP))
 
 
+def money_str(amount_minor: int, currency: str) -> str:
+    """HUMAN-facing "CCY 1,234.56" — currency first, grouped, always 2dp.
+
+    One function so every amount a person reads has the same shape. The project
+    had both "3200 GBP" (planner reasons) and "USD 2,500.00" (budget limits) on
+    screen at once, which reads as two different quantities.
+
+    NOT for the Airwallex boundary: the API needs `to_major_str` ("3200.00").
+    A thousands separator makes Airwallex reject the amount as malformed, so the
+    two formatters must never be swapped. `to_major_str` is the wire format,
+    this is the reading format.
+    """
+    try:
+        m = to_major(int(amount_minor), currency)
+        return f"{currency} {m:,.2f}"
+    except Exception:
+        return f"{currency} 0.00"
+
+
 def check_supported(currency: str) -> None:
     minor_for(currency)
 

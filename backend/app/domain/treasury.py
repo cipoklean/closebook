@@ -17,13 +17,16 @@ it lives here so both callers get it.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
 
 from ..db import DB
+from ..money import money_str
 from ..models import InvoicePayable, InvoiceReceivable, RecStatus
 from .planner import (
-    ACT_CHASE, CashPosition, Payable, Plan, build_plan,
+    ACT_CHASE, ACT_DEFER, ACT_ESCALATE, ACT_FX, ACT_PAY, CashPosition, Payable,
+    Plan, build_plan,
 )
 from .policy import BudgetSettings, CommittedCash, load_budget
 
@@ -85,6 +88,65 @@ def cash_position(db: DB, budget: BudgetSettings) -> CashPosition:
     )
 
 
+@dataclass
+class Funding:
+    """What a payable actually COSTS, in the currency that pays for it.
+
+    A EUR payable funded from USD is not a EUR obligation — we hold no EUR, so
+    the bill is really "buy EUR 9,012.85 with USD 10,346.00". Valuing it in EUR
+    reported a EUR 9,000 shortfall against a business that was never short of
+    EUR; it was simply going to convert. The funding currency is the one that
+    has to be there.
+    """
+    currency: str
+    amount_minor: int
+    # "conversion"  the plan converts another currency into this payable's
+    # "held"        paid straight from a currency we hold (no conversion needed)
+    # "unfunded"    we do NOT hold the currency and the plan plans no conversion
+    # "no_plan"     the plan says nothing about this payable at all
+    source: str
+    note: str = ""
+
+
+def funding_for(plan, payable_number: str, held: set[str]) -> Funding:
+    """Cost a payable in its FUNDING currency, using the plan's own numbers.
+
+    The planned conversion amount is used verbatim — it already carries the
+    drift headroom the planner added so a 0.5% adverse move cannot leave the
+    payout short. Re-deriving it here would invent a second rate, and this
+    project has already been burned once by two modules disagreeing about a
+    rate while every isolated test passed.
+    """
+    steps = plan.payable_actions(payable_number) if plan is not None else []
+    fx = next((s for s in steps if s.action == ACT_FX), None)
+    pay = next((s for s in steps if s.action in (ACT_PAY, ACT_DEFER, ACT_ESCALATE)),
+               None)
+
+    if fx is not None:
+        sell_ccy = fx.sell_currency or "USD"
+        buy_ccy = fx.buy_currency or sell_ccy
+        return Funding(
+            currency=sell_ccy,
+            amount_minor=fx.sell_amount_minor,
+            source="conversion",
+            note=(f"paid from {sell_ccy}: the plan converts "
+                  f"{money_str(fx.sell_amount_minor, sell_ccy)} into "
+                  f"{money_str(fx.buy_amount_minor, buy_ccy)}"
+                  + (f" (incl. drift headroom)" if fx.rate else "")),
+        )
+
+    if pay is None:
+        return Funding("USD", 0, "no_plan",
+                       "the plan has no step for this payable")
+
+    if pay.currency in held:
+        return Funding(pay.currency, pay.amount_minor, "held", "")
+
+    return Funding(
+        pay.currency, pay.amount_minor, "unfunded",
+        f"no conversion is planned and we hold no {pay.currency}")
+
+
 def chase_shortfalls(session) -> dict[str, int]:
     """Invoices with money in but not closed — chase before relying on the cash."""
     out = {}
@@ -113,6 +175,6 @@ def current_plan(db: DB, budget: Optional[BudgetSettings] = None) -> Plan:
 
 
 __all__ = [
-    "DEMO_RATES", "ACT_CHASE", "cash_position", "chase_shortfalls",
-    "current_plan", "payables_from_db",
+    "DEMO_RATES", "ACT_CHASE", "Funding", "cash_position", "chase_shortfalls",
+    "current_plan", "funding_for", "payables_from_db",
 ]
