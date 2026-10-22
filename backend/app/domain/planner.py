@@ -92,6 +92,10 @@ class CashPosition:
     """
     balances: dict[str, int] = field(default_factory=dict)
     in_flight: dict[str, int] = field(default_factory=dict)
+    #: Received but NOT attributed to an invoice (a proposal awaiting approval,
+    #: or a payment that matched nothing). Real money in the bank, and still not
+    #: spendable — see `policy.available_cash_minor`.
+    suspense: dict[str, int] = field(default_factory=dict)
     forecast: Forecast = field(default_factory=Forecast)
     rates: dict[str, Decimal] = field(default_factory=dict)
     budget_currency: str = "USD"
@@ -102,10 +106,12 @@ class CashPosition:
 
     def available_minor(self, committed_this_run_minor: int = 0) -> int:
         """Cash free to spend, via the ONE rule in policy.available_cash_minor."""
+        bccy = self.budget_currency.upper()
         return available_cash_minor(
-            cash_minor=self.balances.get(self.budget_currency.upper(), 0),
-            in_flight_minor=self.in_flight.get(self.budget_currency.upper(), 0),
+            cash_minor=self.balances.get(bccy, 0),
+            in_flight_minor=self.in_flight.get(bccy, 0),
             committed_this_run_minor=committed_this_run_minor,
+            suspense_minor=self.suspense.get(bccy, 0),
             floor_minor=self.floor_minor)
 
     def usd_rate(self, currency: str) -> Optional[Decimal]:
@@ -343,7 +349,7 @@ def _restate_deferrals(plan, deferred_ctx, *, available, holdings, floor_minor,
 def build_plan(payables: Iterable[Payable], pos: CashPosition,
                budget: Optional[BudgetSettings] = None,
                fx_tolerance_pct: Decimal = Decimal("0.50"),
-               chase_shortfalls: dict[str, int] | None = None) -> Plan:
+               chase_shortfalls: dict[str, tuple[int, str]] | None = None) -> Plan:
     """Produce the ordered plan. Pure: same inputs -> same plan, always.
 
     `payables` may arrive in any order; `prioritise()` decides who is served
@@ -358,11 +364,20 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
     floor_minor = int(budget.reserve_floor_usd * minor_for(bccy))
 
     # Running capacity per currency: ledger cash MINUS what is already in
-    # flight, because money that has been sent cannot be spent twice. This is
-    # the only capacity number the planner uses, and it is real money.
+    # flight MINUS what is unattributed. This is the only capacity number the
+    # planner uses, and it is real money.
+    #
+    # SUSPENSE COMES OFF EVERY CURRENCY, not just the budget one — and it is not
+    # enough to subtract it in `_available`, which only looks at the budget
+    # currency. A GBP bill paid from suspicious GBP never consults the USD floor
+    # (`pay_cost` is 0 when the bill is not in the budget currency), so the
+    # capacity it spends from is this dict. Subtracting suspense only in the one
+    # place let a GBP supplier be paid from GBP that no invoice had claimed.
     working = dict(pos.balances)
     for ccy, amt in (pos.in_flight or {}).items():
         working[ccy.upper()] = working.get(ccy.upper(), 0) - int(amt)
+    for ccy, amt in (pos.suspense or {}).items():
+        working[ccy.upper()] = working.get(ccy.upper(), 0) - abs(int(amt))
 
     def _available(also_spend_minor: int = 0) -> int:
         """THE one available-cash rule, in the budget currency.
@@ -372,6 +387,12 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
         capacity as it is appended), so passing it again here would count the same
         money twice. That mistake made PO-7002 report a USD 11,692.00 hole when
         the real one was USD 1,346.00.
+
+        SUSPENSE IS NOT PASSED HERE EITHER, for exactly the same reason: it is
+        already subtracted out of `working` above, for every currency. Passing it
+        again double-counted it — a USD 7,000 unattributed deposit flipped
+        PO-2001 from PAY to DEFER even though the deposit changed nothing about
+        what was spendable.
         """
         return available_cash_minor(
             cash_minor=working.get(bccy, 0),
@@ -379,16 +400,19 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
             floor_minor=floor_minor)
 
     # ---- chase steps first: they recover cash, they never spend it --------
-    for inv_number, shortfall in (chase_shortfalls or {}).items():
+    for inv_number, entry in (chase_shortfalls or {}).items():
+        # (shortfall_minor, currency) — the currency is the INVOICE's, so a GBP
+        # gap is never reported as a USD one.
+        shortfall, chase_ccy = int(entry[0]), str(entry[1])
         if shortfall <= 0:
             continue
         plan.steps.append(Step(
             action=ACT_CHASE,
-            reason=(f"{inv_number} is {money_str(shortfall, 'USD')} short; "
+            reason=(f"{inv_number} is {money_str(shortfall, chase_ccy)} short; "
                     f"chasing before we rely on that cash"),
             payable_number=inv_number,
             amount_minor=shortfall,
-            currency="USD",
+            currency=chase_ccy,
         ))
 
     # ---- who gets paid, in policy order -----------------------------------
@@ -547,9 +571,13 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
                 payable_number=p.number, supplier=p.supplier,
                 amount_minor=move_minor, currency=p.currency,
                 payout_method=p.payout_method,
-                reason="; ".join(blockers),
+                # A step can collect the same sentence twice (the capacity gate
+                # and the floor gate can both fire on one number). Repeating it
+                # in the reason reads as two separate problems when there is one;
+                # keep the order, drop the duplicates.
+                reason="; ".join(dict.fromkeys(blockers)),
                 policy_reason=codes[0],
-                blockers=blockers,
+                blockers=list(dict.fromkeys(blockers)),
                 blocker_codes=codes,
                 chained_to=fx_index,
                 funding_currency=fund_ccy,

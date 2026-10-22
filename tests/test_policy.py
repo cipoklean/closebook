@@ -42,12 +42,34 @@ def test_available_cash_can_go_negative_and_says_so():
 
 def test_expected_inflows_are_not_an_input():
     """The signature has no place to put them. That is deliberate: money that has
-    been invoiced and not landed used to fund payments, and that is the bug."""
+    been invoiced and not landed used to fund payments, and that is the bug.
+
+    `suspense_minor` IS a parameter, and it is the opposite kind of number: not
+    money we hope for, but money we HAVE and have not attributed. It comes off
+    the spendable total for the same reason expected inflows can never add to
+    it — a payment must stand on money that is unambiguously ours to spend.
+    """
     import inspect
     params = set(inspect.signature(available_cash_minor).parameters)
     assert "expected_inflows_minor" not in params
+    assert "forecast_minor" not in params
     assert params == {"cash_minor", "in_flight_minor",
-                      "committed_this_run_minor", "floor_minor"}
+                      "committed_this_run_minor", "suspense_minor",
+                      "floor_minor"}
+
+
+def test_suspense_is_subtracted_from_what_can_be_spent():
+    """Received but unattributed money must not fund a payment.
+
+    It is in the bank and in the ledger, so leaving it in made a supplier
+    payable with money that may have to be refunded tomorrow — and the refund
+    then comes out of cash that is already gone.
+    """
+    assert available_cash_minor(cash_minor=1_000_000, suspense_minor=400_000,
+                                floor_minor=500_000) == 100_000
+    # and without it, the same position looks 400,000 richer than it is
+    assert available_cash_minor(cash_minor=1_000_000,
+                                floor_minor=500_000) == 500_000
 
 
 # ---- the forecast: shown, never spent -----------------------------------

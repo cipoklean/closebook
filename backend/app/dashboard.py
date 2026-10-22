@@ -81,7 +81,8 @@ def budget_block(s=None) -> dict:
 
 
 def money_block(s, cash: dict, budget: dict, plan=None,
-                payables: Optional[list] = None) -> dict:
+                payables: Optional[list] = None,
+                suspense: Optional[dict] = None) -> dict:
     """Cash, what is promised, what is already in flight, and what is free.
 
     Three rules this encodes, each of which was wrong before:
@@ -200,9 +201,15 @@ def money_block(s, cash: dict, budget: dict, plan=None,
         if f_src == "unfunded" and where == "promised":
             unfunded.append(line)
 
+    # Money received but NOT attributed to an invoice. It is in the bank, and it
+    # is not spendable — a supplier paid with it can be paid again tomorrow when
+    # the payment it came from is refunded. Subtracted here AND in the planner,
+    # through the same rule, and shown separately so it never disappears.
+    suspense = {k: int(abs(v)) for k, v in (suspense or {}).items()}
+
     free: dict[str, int] = {}
     shortfall: dict[str, int] = {}
-    for ccy in sorted(set(cash) | set(promised) | set(in_flight)):
+    for ccy in sorted(set(cash) | set(promised) | set(in_flight) | set(suspense)):
         # THE ONE RULE, called — not re-implemented. The planner calls the same
         # function, which is the entire point: these two used to be separate
         # arithmetic answering the same question two ways.
@@ -210,6 +217,7 @@ def money_block(s, cash: dict, budget: dict, plan=None,
             cash_minor=int(cash.get(ccy, 0)),
             in_flight_minor=int(in_flight.get(ccy, 0)),
             committed_this_run_minor=int(promised.get(ccy, 0)),
+            suspense_minor=int(suspense.get(ccy, 0)),
             floor_minor=(floor if ccy == budget_ccy else 0))
         free[ccy] = net
         if net < 0:
@@ -222,6 +230,7 @@ def money_block(s, cash: dict, budget: dict, plan=None,
     remaining = available_cash_minor(
         cash_minor=int(cash.get(budget_ccy, 0)),
         in_flight_minor=int(in_flight.get(budget_ccy, 0)),
+        suspense_minor=int(suspense.get(budget_ccy, 0)),
         floor_minor=floor)
     for line in lines:
         if line["where"] != "promised" or line["currency"] != budget_ccy:
@@ -242,6 +251,7 @@ def money_block(s, cash: dict, budget: dict, plan=None,
     return {
         "promised": promised,
         "in_flight": in_flight,
+        "suspense": suspense,
         "free": free,
         "shortfall": shortfall,
         "lines": lines,
@@ -865,6 +875,7 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
                              and not p["airwallex_object_id"]]
 
         money = money_block(s, rep.cash_by_currency, budget,
+                            suspense=rep.suspense_by_currency,
                             plan=plan, payables=payables)
 
         # NO cash-basis merge any more. The planner now uses the SAME rule the

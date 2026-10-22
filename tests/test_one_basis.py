@@ -18,7 +18,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from app.db import get_default_db, reset_default_db, session_scope  # noqa: E402
 from app.dashboard import build_context  # noqa: E402
 from app.domain.ledger import post, reconcile  # noqa: E402
-from app.domain.planner import ACT_DEFER, ACT_FX, ACT_PAY, build_plan  # noqa: E402
+from app.domain.planner import (  # noqa: E402
+    ACT_CHASE, ACT_DEFER, ACT_FX, ACT_PAY, build_plan,
+)
 from app.domain.policy import available_cash_minor, load_budget  # noqa: E402
 from app.domain.treasury import cash_position, current_plan, payables_from_db  # noqa: E402
 from app.models import (  # noqa: E402
@@ -442,3 +444,141 @@ class TestAnUnfundableBillIsNotAShortfallInItsOwnCurrency:
                 continue
             assert (line["currency"], line["amount_minor"]) == \
                    (st.funding_currency, st.funding_amount_minor), line
+
+
+class TestSuspenseCashCannotFundAPayment:
+    """Money received but not attributed is in the bank and is NOT spendable.
+
+    A payment that lands below the auto band sits in `unapplied_cash` until a
+    human decides. Leaving it in the spendable total meant the planner could pay
+    a supplier with money that may have to be refunded tomorrow — and the refund
+    then comes out of cash that is already gone.
+    """
+
+    def test_a_proposal_parks_the_cash_and_the_planner_cannot_spend_it(self, db):
+        from app.domain import intake as I
+        from app.domain.treasury import cash_position, current_plan
+        from app.domain.policy import load_budget
+
+        _receivable("INV-1002", "GBP", 800_000)
+        _payable("PO-BIG", "GBP", 480_000)
+        # A part payment that reads at 0.70: below the band, so it is PROPOSED.
+        r = I.ingest_deposit(db, {"id": "s1", "currency": "GBP", "amount": 4800,
+                                  "payer_name": "Harrow and Company",
+                                  "reference": "chq 1OO2 part", "status": "SETTLED"})
+        assert r.disposition == "PROPOSED"
+
+        pos = cash_position(db, load_budget())
+        assert pos.balances.get("GBP") == 480_000, "the cash IS there"
+        assert pos.suspense.get("GBP") == 480_000, "and it is held, not spendable"
+
+        step = next(s for s in current_plan(db).steps
+                    if s.payable_number == "PO-BIG")
+        assert step.action == ACT_DEFER, \
+            "a supplier must not be paid with money nobody has attributed yet"
+        assert step.blocker_codes[0] in ("insufficient_balance", "reserve_floor",
+                                         "waits_for_inflow")
+
+    def test_the_tile_excludes_it_and_still_shows_it(self, db):
+        from app.domain import intake as I
+        _cash("USD", 1_000_000)
+        _receivable("INV-1002", "USD", 800_000)
+        I.ingest_deposit(db, {"id": "s2", "currency": "USD", "amount": 4000,
+                              "payer_name": "Nobody", "reference": "junk ref",
+                              "status": "SETTLED"})
+        m = build_context([])["money"]
+        assert m["suspense"].get("USD") == 400_000
+        # The deposit ADDS to cash: 10,000 seeded + 4,000 received = 14,000.
+        # Then suspense comes off, then the floor: 14,000 - 4,000 - 5,000 = 5,000.
+        # Without the suspense term this would read 9,000 — 4,000 of spendable
+        # money that belongs to nobody yet.
+        from app.domain.policy import available_cash_minor
+        assert m["free"].get("USD") == 500_000
+        assert m["free"]["USD"] == available_cash_minor(
+            cash_minor=1_400_000, suspense_minor=400_000, floor_minor=500_000)
+        assert m["free"]["USD"] != available_cash_minor(
+            cash_minor=1_400_000, floor_minor=500_000)
+        html = render_app(build_context([]), tab="home")
+        assert "unallocated" in html, "the money is still visible, just not spendable"
+
+    def test_an_approved_proposal_stops_being_suspense(self, db):
+        """Once a human approves it the money is attributed, so it is spendable."""
+        from app.domain import intake as I
+        from app.domain.ledger import approve_inflow
+        from app.domain.treasury import cash_position
+        from app.domain.policy import load_budget
+        from app.models import Inflow
+        from app.db import session_scope
+
+        _receivable("INV-1002", "GBP", 800_000)
+        I.ingest_deposit(db, {"id": "s3", "currency": "GBP", "amount": 4800,
+                              "payer_name": "Harrow and Company",
+                              "reference": "chq 1OO2 part", "status": "SETTLED"})
+        with session_scope() as s:
+            approve_inflow(s, s.query(Inflow).one(), approved_by="test")
+        pos = cash_position(db, load_budget())
+        assert pos.suspense.get("GBP", 0) == 0
+        assert pos.balances.get("GBP") == 480_000
+
+
+def test_suspense_is_counted_once_in_the_plan_not_twice(db):
+    """SUSPENSE COMES OFF `working`, SO THE RULE MUST NOT TAKE IT OFF AGAIN.
+
+    `working` is the planner's per-currency capacity and it already excludes
+    unattributed cash. Subtracting it a second time inside the available-cash
+    rule counted the same money twice — a USD 7,000 deposit that changed nothing
+    about what was spendable flipped PO-2001 from PAY to DEFER, which is the same
+    "two answers to one question" defect this file exists to prevent.
+
+    The property that makes it checkable: a deposit that lands ENTIRELY in
+    suspense must not change the plan at all. It is invisible to spending.
+    """
+    from app.domain.treasury import cash_position, current_plan, payables_from_db
+    from app.domain.policy import load_budget
+    from app.domain.planner import build_plan, CashPosition
+
+    _cash("USD", 1_200_000)
+    _payable("PO-A", "USD", 180_000)
+    payables = payables_from_db(db.session())
+    budget = load_budget()
+    rates = cash_position(db, budget).rates
+    floor = int(budget.reserve_floor_usd * 100)
+
+    def _plan(balances, suspense):
+        return build_plan(payables,
+                          CashPosition(balances=balances, suspense=suspense,
+                                       floor_minor=floor, rates=rates),
+                          budget)
+
+    before = _plan({"USD": 1_200_000}, {})
+    after = _plan({"USD": 1_900_000}, {"USD": 700_000})
+    assert [s.action for s in before.steps] == [s.action for s in after.steps], \
+        "money we cannot attribute must not change what we do"
+    assert before.steps[0].action == ACT_PAY
+    assert after.steps[0].action == ACT_PAY
+
+    # and it is genuinely not spendable: with the same cash 100% unattributed,
+    # the bill cannot be paid at all
+    tight = _plan({"USD": 700_000}, {"USD": 700_000})
+    assert tight.steps[0].action == ACT_DEFER
+    # the account "holds" 7,000 but none of it is attributable, so the honest
+    # reading is that it holds nothing we may spend
+    assert "insufficient_balance" in tight.steps[0].blocker_codes
+
+
+def test_a_chase_names_the_invoices_own_currency(db):
+    """A GBP gap must not be reported as USD.
+
+    `chase_shortfalls` returned bare amounts and the planner labelled every one
+    "USD", so an INV-1002 gap of GBP 3,200 printed as "USD 3,200.00" — the wrong
+    unit on the number the operator takes to the customer. The currency now
+    travels with the amount.
+    """
+    from app.domain.treasury import chase_shortfalls, current_plan
+    _receivable("INV-1002", "GBP", 800_000, paid=480_000)
+    assert chase_shortfalls(db.session())["INV-1002"] == (320_000, "GBP")
+
+    step = next(s for s in current_plan(db).steps if s.action == ACT_CHASE)
+    assert step.currency == "GBP"
+    assert "GBP 3,200.00" in step.reason
+    assert "USD" not in step.reason

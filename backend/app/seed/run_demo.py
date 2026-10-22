@@ -48,7 +48,7 @@ def _cash_position(db: DB, budget) -> CashPosition:
     return _cash_position_impl(db, budget)
 
 
-def _chase_shortfalls(db: DB) -> dict[str, int]:
+def _chase_shortfalls(db: DB) -> dict[str, tuple[int, str]]:
     """Deprecated shim: the real assembly is domain/treasury.chase_shortfalls."""
     from ..domain.treasury import chase_shortfalls
     return chase_shortfalls(db.session())

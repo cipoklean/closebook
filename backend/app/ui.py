@@ -694,7 +694,10 @@ def _home(c: dict) -> str:
     work = "".join(
         f'<div>{e(ccy)}: cash {money(c["cash"].get(ccy, 0))} '
         f'− promised {money(m["promised"].get(ccy, 0))} '
-        f'− in flight {money(m["in_flight"].get(ccy, 0))}'
+        + (f' − in flight {money(m["in_flight"].get(ccy, 0))}'
+           if m["in_flight"].get(ccy) else '')
+        + (f' − unallocated {money(m["suspense"].get(ccy, 0))}'
+           if m["suspense"].get(ccy) else '')
         + (f' − floor {money(m["reserve_floor_minor"])}' if ccy == hccy else '')
         + f' = {money(m["free"].get(ccy, 0))}</div>'
         for ccy in sorted(m["free"]))

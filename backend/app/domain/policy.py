@@ -54,14 +54,24 @@ class PolicyError(Exception):
 # ---- THE ONE AVAILABLE-CASH RULE ----------------------------------------
 def available_cash_minor(*, cash_minor: int, in_flight_minor: int = 0,
                          committed_this_run_minor: int = 0,
+                         suspense_minor: int = 0,
                          floor_minor: int = 0) -> int:
     """Cash genuinely free to spend. THE single basis for the whole system.
 
-        available = cash - in flight - promised already this run - reserve floor
+        available = cash - in flight - promised this run - suspense - floor
 
     Every term is REAL money. Expected inflows are deliberately ABSENT: money
     that has been invoiced but has not landed cannot pay anybody, and a system
     that lets it fund a payment is a system that bounces transfers.
+
+    SUSPENSE IS SUBTRACTED TOO, and it is real money — that is exactly why. It
+    is cash we have received but have NOT attributed to an invoice: a payment
+    awaiting a human's approval, or one that matched nothing at all. It sits in
+    the bank and the ledger, so counting it as spendable means a supplier can be
+    paid with money that may have to be refunded tomorrow, and the refund then
+    comes out of cash that is already gone. It is shown separately ("Money we
+    couldn't match") so it never silently disappears from the page — the point
+    is that it stops being SPENDABLE, not that it stops being visible.
 
     Both the planner's reserve-floor check and the dashboard tiles call this, so
     they cannot drift apart again. They used to be two different answers to "can
@@ -74,7 +84,8 @@ def available_cash_minor(*, cash_minor: int, in_flight_minor: int = 0,
     currency, so a floor measured against it could never bind.
     """
     return (int(cash_minor) - int(in_flight_minor)
-            - int(committed_this_run_minor) - int(floor_minor))
+            - int(committed_this_run_minor) - int(suspense_minor)
+            - int(floor_minor))
 
 
 @dataclass

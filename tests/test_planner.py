@@ -207,7 +207,7 @@ def test_plan_is_deterministic():
 # ---- beat 3's chase step ------------------------------------------------
 def test_chase_step_is_planned_and_spends_nothing():
     plan = build_plan(ALL_THREE, beat1_position(), load_budget(),
-                      chase_shortfalls={"INV-0042": 320_000})
+                      chase_shortfalls={"INV-0042": (320_000, "GBP")})
     chase = [s for s in plan.steps if s.action == ACT_CHASE]
     assert len(chase) == 1
     assert chase[0].payable_number == "INV-0042"
@@ -217,7 +217,7 @@ def test_chase_step_is_planned_and_spends_nothing():
 
 def test_zero_shortfall_produces_no_chase():
     plan = build_plan(ALL_THREE, beat1_position(), load_budget(),
-                      chase_shortfalls={"INV-0042": 0})
+                      chase_shortfalls={"INV-0042": (0, "GBP")})
     assert not [s for s in plan.steps if s.action == ACT_CHASE]
 
 
@@ -247,7 +247,7 @@ def test_step_payload_is_json_serialisable():
 
 def test_summary_renders_every_step():
     plan = build_plan(ALL_THREE, beat1_position(), load_budget(),
-                      chase_shortfalls={"INV-0042": 320_000})
+                      chase_shortfalls={"INV-0042": (320_000, "GBP")})
     text = plan.summary()
     assert "PO-7003" in text
     assert "CHASE" in text

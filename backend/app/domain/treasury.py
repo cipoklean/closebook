@@ -193,6 +193,11 @@ def cash_position(db: DB, budget: BudgetSettings,
     return CashPosition(
         balances={k: int(v) for k, v in rep.cash_by_currency.items()},
         in_flight=in_flight_by_currency(s),
+        # Received but not attributed. Real cash, and not spendable: see
+        # `policy.available_cash_minor`. Without this the plan could pay a
+        # supplier with money that a human has not yet agreed belongs to any
+        # invoice — and that may have to be refunded.
+        suspense={k: int(abs(v)) for k, v in (rep.suspense_by_currency or {}).items()},
         forecast=forecast_from_db(s, DEMO_RATES),
         rates=DEMO_RATES,
         budget_currency=budget.currency,
@@ -288,13 +293,20 @@ def funding_for(plan, payable_number: str, held: set[str],
         f"no conversion is planned and we hold no {pay.currency}")
 
 
-def chase_shortfalls(session) -> dict[str, int]:
-    """Invoices with money in but not closed — chase before relying on the cash."""
+def chase_shortfalls(session) -> dict[str, tuple[int, str]]:
+    """Invoices with money in but not closed — chase before relying on the cash.
+
+    Returns `{number: (shortfall_minor, currency)}`. The currency travels WITH
+    the amount because the shortfall is in the INVOICE's currency, and a chase
+    step that labelled a GBP 3,200 gap as "USD 3,200.00" sends the operator to
+    the customer with the wrong number in the wrong unit — the same class of
+    wrong-currency reason this planner was already fixed for once.
+    """
     out = {}
     for r in session.query(InvoiceReceivable).all():
         short = max(0, r.amount_minor - r.amount_paid_minor)
         if short > 0 and r.amount_paid_minor > 0:
-            out[r.number] = short
+            out[r.number] = (short, r.currency)
     return out
 
 
