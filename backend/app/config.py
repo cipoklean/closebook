@@ -5,11 +5,14 @@ hard rule: `AWX_BASE_URL` must stay on the sandbox host for this hackathon.
 """
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+log = logging.getLogger("closebook.config")
 
 # config.py lives at backend/app/config.py; parents[2] is the repo root
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -95,5 +98,38 @@ class Settings(BaseSettings):
 
 
 @lru_cache
-def get_settings() -> Settings:
+def _settings_cached() -> Settings:
     return Settings()
+
+
+_ENV_STAMP: list[float] = [0.0]
+
+
+def _env_path() -> Path:
+    # config.py lives at backend/app/config.py; parents[2] is the repo root
+    return Path(__file__).resolve().parents[2] / ".env"
+
+
+def get_settings() -> Settings:
+    """Settings for the CURRENT state of `.env`, not for the moment it started.
+
+    The cache is kept — parsing `.env` on every attribute access is pointless —
+    but it is DROPPED the moment the file changes on disk. That is the whole
+    difference between "edit your PIN and it works" and "edit your PIN, type it
+    correctly, and be told 'That PIN is not right'" because the process has been
+    holding the old value since it booted.
+
+    Everything that reads a secret the operator can change mid-session and then
+    immediately test must go through here rather than through a module-level
+    snapshot taken at import.
+    """
+    stamp = 0.0
+    try:
+        stamp = _env_path().stat().st_mtime
+    except OSError:
+        pass
+    if stamp != _ENV_STAMP[0]:
+        _ENV_STAMP[0] = stamp
+        _settings_cached.cache_clear()
+        log.info("settings reloaded: .env changed on disk")
+    return _settings_cached()

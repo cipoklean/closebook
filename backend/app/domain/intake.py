@@ -543,6 +543,20 @@ def forget_accounts_cache() -> None:
     _ACCOUNTS_CACHE["items"] = []
 
 
+def reading_is_a_proposal(result) -> bool:
+    """Did this reading find something to allocate?
+
+    ONE rule, used by both the write path and the route that reports it. A
+    re-ask never applies money, so a reading that names an allocation is a
+    PROPOSAL awaiting a human whatever the matcher called it — a full allocation
+    at 0.89 comes back "MATCHED" while sitting below the auto band, and treating
+    that as "nothing proposed" both wiped a good proposal and told the operator
+    the payment had been read as matched when nothing had moved.
+    """
+    return bool(result.allocations) and result.status in (
+        "MATCHED", "PROPOSED", "PARTIAL", "OVERPAID")
+
+
 def reask_model(db, inflow_id: int, *, llm=None):
     """Ask the model about an inflow AGAIN, without touching the cash.
 
@@ -599,7 +613,13 @@ def reask_model(db, inflow_id: int, *, llm=None):
         inflow.match_method = result.method
         inflow.match_confidence = float(result.confidence or 0.0)
         inflow.match_reason = result.reason
-        if result.status == "PROPOSED":
+        # RE-ASKING NEVER APPLIES MONEY, so anything it found to allocate is a
+        # PROPOSAL awaiting a human — whatever the matcher called it. Deriving
+        # this from `result.status` alone was wrong: a full allocation read at
+        # 0.89 comes back "MATCHED" (it IS a full match) while sitting BELOW the
+        # auto band, so the stored proposal was wiped and the payment was left
+        # awaiting a human with no proposal and no explanation.
+        if reading_is_a_proposal(result):
             import json as _json
             inflow.proposed_json = _json.dumps({
                 "status": result.status,
@@ -617,6 +637,9 @@ def reask_model(db, inflow_id: int, *, llm=None):
         else:
             inflow.proposed_json = None
             inflow.review_state = None
+        # The REASON survives both branches: it is the only thing telling the
+        # operator what the second look found, and clearing the proposal must
+        # not also clear the sentence explaining why there isn't one.
         src = getattr(getattr(llm, "cfg", None), "model", "") or ""
         _trace_model(s, inflow=inflow, result=result, llm=llm, why_not="")
         return result, src

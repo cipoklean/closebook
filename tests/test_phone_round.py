@@ -361,3 +361,137 @@ class TestPhoneLayoutAndHonestCopy:
             assert "needs your approval" in html, tab
             assert 'action="/money-out/run"' in html, tab
             assert "Needs your OK" in html, tab
+
+
+# ---- the PIN itself -------------------------------------------------------
+class TestEditingThePinTakesEffectWithoutARestart:
+    """The operator added the PIN they wanted, typed it correctly, and was told
+    it was wrong — because the running process had loaded `.env` ten minutes
+    earlier and `get_settings()` is cached for the life of the process. A secret
+    you can edit and then immediately test must be read fresh."""
+
+    def test_the_cache_is_dropped_when_the_file_changes(self, tmp_path, monkeypatch):
+        """End to end and honest: the WATCHED file changes mtime, the value comes
+        from the environment (which pydantic-settings reads ahead of dotenv), so
+        this proves the reload actually re-reads rather than merely clearing."""
+        import os
+        import time
+
+        from app import config as C
+
+        watched = tmp_path / ".env"
+        watched.write_text("DEMO_APPROVER_PIN=1111\n")
+        monkeypatch.setattr(C, "_env_path", lambda: watched)
+        monkeypatch.setenv("DEMO_APPROVER_PIN", "1111")
+        C._ENV_STAMP[0] = 0.0
+        C._settings_cached.cache_clear()
+        assert C.get_settings().demo_approver_pin.get_secret_value() == "1111"
+
+        # the operator edits the file: new mtime, new value
+        monkeypatch.setenv("DEMO_APPROVER_PIN", "2222")
+        os.utime(watched, (time.time() + 5, time.time() + 5))
+
+        got = C.get_settings().demo_approver_pin.get_secret_value()
+        assert got == "2222", f"still holding {got}: the edit did not take effect"
+
+    def test_the_stamp_is_what_triggers_it(self, tmp_path, monkeypatch):
+        """The mechanism, stated plainly: same mtime -> the same cached object;
+        new mtime -> the cache is dropped."""
+        from app import config as C
+
+        watched = tmp_path / ".env"
+        watched.write_text("DEMO_APPROVER_PIN=1111\n")
+        monkeypatch.setattr(C, "_env_path", lambda: watched)
+        C._ENV_STAMP[0] = 0.0
+        C._settings_cached.cache_clear()
+        first = C.get_settings()
+        assert C.get_settings() is first, "an unchanged file must not reparse"
+
+        import os
+        import time
+        os.utime(watched, (time.time() + 5, time.time() + 5))
+        assert C.get_settings() is not first, "a changed file must be re-read"
+
+    def test_the_gate_reads_the_setting_at_call_time(self, client, monkeypatch):
+        """Even without touching the file: the route must not decide on a
+        module-level snapshot from import."""
+        from app.main import _check_pin
+        from app.config import get_settings
+        from pydantic import SecretStr
+
+        monkeypatch.setattr(get_settings(), "demo_approver_pin", SecretStr("9999"),
+                            raising=False)
+        assert _check_pin("9999") is None
+        assert _check_pin("1111") is not None
+
+    def test_a_wrong_pin_says_so_and_the_right_one_gets_through(self, client, db):
+        """Against the real route, with nothing resolved by either call."""
+        _invoice()
+        _deposit(db)
+        bad = _post(client, "/inflows/1/resolve",
+                    {"what": "match", "pin": "000000", "by": "david"})
+        assert "not right" in bad.json()["err"].lower()
+
+        # an unknown CHOICE, so the PIN passes and nothing is applied
+        good = _post(client, "/inflows/1/resolve",
+                     {"what": "look at it later", "pin": PIN, "by": "david"})
+        assert "not right" not in good.json()["err"].lower(), good.json()
+        with session_scope() as s:
+            assert s.query(Inflow).one().review_state == "PENDING", \
+                "neither call was supposed to resolve anything"
+
+    def test_a_reask_never_wipes_a_good_proposal(self, client, db, monkeypatch):
+        """A full allocation read below the auto band comes back MATCHED. That
+        is a PROPOSAL, not an applied payment, and re-asking must not clear it.
+        This is what left a live payment awaiting a human with no proposal."""
+        from app.domain import intake as I2
+
+        class Stub:
+            last_error = None
+            cfg = type("C", (), {"model": "stub/model"})()
+
+            def propose(self, inflow, cands):
+                # a FULL allocation, but the code caps the model at 0.89
+                return {"allocations": [{"invoice_number": "INV-1003",
+                                         "amount": 4400}],
+                        "confidence": 0.95, "rationale": "names lumen stores"}
+
+        _invoice()
+        _deposit(db)
+        monkeypatch.setattr(I2, "matcher_from_settings", lambda: (Stub(), ""))
+        with session_scope() as s:
+            row = s.query(Inflow).one()
+            row.proposed_json = '{"stale": true}'
+            row.review_state = "PENDING"
+
+        r = _post(client, "/inflows/1/reask", {})
+        assert r.json()["ok"], r.json()
+        with session_scope() as s:
+            row = s.query(Inflow).one()
+            assert row.review_state == "PENDING", \
+                "re-asking never applies money, so the payment must still wait"
+            assert row.proposed_json and "stale" not in row.proposed_json, \
+                "the reading was replaced, not cleared"
+            assert row.match_confidence <= 0.89, "the cap still holds"
+        html = client.get("/app?tab=ok").text
+        assert 'value="match"' in html, \
+            "a proposal that fits must still offer Match"
+
+    def test_the_message_says_asking_again_applies_nothing(self, client, db,
+                                                           monkeypatch):
+        from app.domain import intake as I2
+
+        class Stub:
+            last_error = None
+            cfg = type("C", (), {"model": "stub/model"})()
+
+            def propose(self, inflow, cands):
+                return {"allocations": [{"invoice_number": "INV-1003",
+                                         "amount": 4400}],
+                        "confidence": 0.95, "rationale": "names lumen stores"}
+
+        _invoice()
+        _deposit(db)
+        monkeypatch.setattr(I2, "matcher_from_settings", lambda: (Stub(), ""))
+        body = _post(client, "/inflows/1/reask", {}).json()
+        assert "never applies anything" in body["ok"], body

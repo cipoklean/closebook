@@ -362,7 +362,7 @@ async def approve(step_id: int, request: Request) -> dict:
     pin = str(body.get("pin") or "")
     by = str(body.get("approved_by") or "dashboard")
     # A missing SecretStr is not an empty one; treat both as "closed".
-    _pin_field = _settings.demo_approver_pin
+    _pin_field = get_settings().demo_approver_pin
     configured = (_pin_field.get_secret_value()
                    if _pin_field is not None else "")
     if not configured:
@@ -384,7 +384,7 @@ async def reject(step_id: int, request: Request) -> dict:
     by = str(body.get("rejected_by") or "dashboard")
     reason = str(body.get("reason") or "")
     # A missing SecretStr is not an empty one; treat both as "closed".
-    _pin_field = _settings.demo_approver_pin
+    _pin_field = get_settings().demo_approver_pin
     configured = (_pin_field.get_secret_value()
                    if _pin_field is not None else "")
     if not configured:
@@ -516,8 +516,14 @@ def _check_pin(pin: str) -> Optional[str]:
 
     Closed rather than open when no PIN is configured: an approval endpoint with
     no secret is worse than no endpoint.
+
+    Reads `get_settings()` at CALL time, not the `_settings` snapshot taken at
+    import. The snapshot is right for things fixed at boot and wrong for the one
+    value an operator edits and then immediately tests — the PIN was typed
+    correctly into the page and refused, because the process had loaded `.env`
+    ten minutes earlier.
     """
-    field = _settings.demo_approver_pin
+    field = get_settings().demo_approver_pin
     configured = (field.get_secret_value() if field is not None else "")
     if not configured:
         return ("DEMO_APPROVER_PIN is not configured — the approval endpoint is "
@@ -549,11 +555,15 @@ async def reask_inflow_route(inflow_id: int, request: Request):
         return _back(request, tab="ok", err=note)
 
     conf = float(result.confidence or 0.0)
-    if result.status == "PROPOSED":
+    # A RE-ASK NEVER APPLIES, so say that rather than echoing a status that
+    # reads as though it did. The rule comes from intake, not from here.
+    from .domain.intake import reading_is_a_proposal
+
+    if reading_is_a_proposal(result):
         return _back(request, tab="ok", ok=(
             f"Asked again. Read as {result.status} via {result.method} at "
-            f"{conf:.2f} — below the automatic threshold, so nothing has been "
-            f"applied and it is waiting for your decision. {result.reason}"))
+            f"{conf:.2f} — asking again never applies anything, so this is a "
+            f"proposal waiting for your decision. {result.reason}"))
     if result.method == "LLM" and conf == 0:
         return _back(request, tab="ok", ok=(
             f"Asked again. The model still could not place this one, so it stays "
@@ -682,7 +692,7 @@ async def reject_inflow_route(inflow_id: int, request: Request):
     pin = str(b.get("pin") or "")
     by = str(b.get("rejected_by") or "dashboard")
     reason = str(b.get("reason") or "")
-    _pin_field = _settings.demo_approver_pin
+    _pin_field = get_settings().demo_approver_pin
     configured = (_pin_field.get_secret_value() if _pin_field is not None else "")
     if not configured:
         return _back(request, tab="ok",

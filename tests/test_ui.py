@@ -1298,8 +1298,11 @@ class TestApproveWiring:
     def test_closed_without_a_configured_pin(self, db, monkeypatch):
         from app.config import Settings
         _pending_step(db)
-        monkeypatch.setattr("app.main._settings",
-                            Settings.model_construct(demo_approver_pin=None))
+        # The gate reads get_settings() at call time now, not the snapshot
+        # taken at import, so a test must stand in for the READER.
+        monkeypatch.setattr("app.main.get_settings",
+                            lambda: Settings.model_construct(
+                                demo_approver_pin=None))
         body = _client().post("/approvals/1/approve",
                               data={"pin": "1234"}).json()
         assert "not configured" in (body.get("detail") or "")
