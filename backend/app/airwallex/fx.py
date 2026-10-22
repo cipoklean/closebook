@@ -121,4 +121,20 @@ class FX:
                             money_amounts_minor=amounts, request_id=request_id, is_simulation=False)
 
 
+    def conversion_of(self, conversion_id: str) -> dict:
+        """Read a booked conversion back. READ-ONLY.
+
+        Settlement needs the ACTUAL amounts and the ACTUAL rate. The create
+        response carries them and the executor keeps only the object id, so the
+        real numbers have to be re-readable — otherwise the ledger would have to
+        be booked from the plan's forecast, which is a rate with 0.5% of
+        deliberate headroom baked in.
+
+        Verified live: `GET /api/v1/fx/conversions/40eaec35-…` returns
+        `status: SETTLED`, `sell_amount: 10315.0 USD`, `buy_amount: 9065.36 EUR`,
+        `client_rate: 1.137848`.
+        """
+        return self._c.call("GET", f"/api/v1/fx/conversions/{conversion_id}")
+
+
 __all__ = ["FX", "Quote"]

@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .airwallex.webhooks import WebhookHandler
 from .config import get_settings
-from .db import DB, get_db
+from .db import DB, get_db, get_default_db
 from .domain.incidents import Incident, Recovery, handle_event, parse_payload
 from .models import InvoicePayable, InvoiceReceivable
 
@@ -231,6 +231,7 @@ def _process_pending() -> None:
         log.info("processing webhook %s (%s)", ev.event_id, ev.name)
         payload = parse_payload(ev.payload)
         live_status = None
+        transfer_id = None
         if ev.name in {"payout.transfer.failed", "payout.transfer.cancelled",
                        "payout.transfer.paid"}:
             transfer_id = payload.get("transfer_id") or payload.get("transaction_id")
@@ -244,6 +245,22 @@ def _process_pending() -> None:
         if incident.recovery is not Recovery.IGNORE:
             log.warning("INCIDENT %s", incident.describe())
             INCIDENTS.append(incident)
+
+        # A VERIFIED, LOOKED-UP terminal status also settles the books. The
+        # lookup above is what makes this safe: a `failed` webhook on a
+        # still-PROCESSING transfer leaves live_status non-terminal, so
+        # settle_transfer posts nothing rather than removing money that has not
+        # moved. Keyed to the transfer id, so a retried webhook posts nothing
+        # the second time.
+        if transfer_id and live_status:
+            try:
+                from .settle import settle_transfer
+                outcomes = settle_transfer(get_default_db().session(),
+                                           transfer_id, live_status)
+                for o in outcomes:
+                    log.info("settlement: %s", o)
+            except Exception:
+                log.exception("settlement failed for %s", transfer_id)
 
 
 @app.get("/", response_class=HTMLResponse)

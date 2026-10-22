@@ -226,6 +226,11 @@ class LedgerEntry(Base):
     credit_minor: Mapped[int] = mapped_column(BigInteger, default=0)
     currency: Mapped[str] = mapped_column(String(3))
     ref: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    # When the posting happened. Needed to answer "paid today" from the ledger
+    # itself rather than from a plan step's timestamp, which is when the payment
+    # was PLANNED — a different moment, and for a retry a different day.
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=True)
 
 
 class WebhookEvent(Base):

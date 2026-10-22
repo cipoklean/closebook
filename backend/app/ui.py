@@ -37,6 +37,29 @@ def money(minor, ccy="USD") -> str:
         return "0.00"
 
 
+def blockers_html(p: dict) -> str:
+    """EVERY reason this payable is not being paid, one line each.
+
+    ONE source for all three tabs. A hold consumed one reason and printed it in
+    three slightly different places; a payment blocked by two rules would then
+    tell the reader to clear the first, watch nothing happen, and have no idea
+    why. `plan_blockers` carries the planner's own list (dependency, floor,
+    capacity) and the dashboard appends the cash-basis floor reason computed by
+    the same code the tiles use.
+    """
+    items = [x for x in (p.get("plan_blockers") or []) if x]
+    if not items:
+        fallback = p.get("plan_reason") or p.get("step_reason")
+        items = [fallback] if fallback else []
+    if not items:
+        return '<p>Held by policy. Open Money out for the full rule.</p>'
+    if len(items) == 1:
+        return f'<p>{e(items[0])}</p>'
+    return ('<ul class="x-blockers">'
+            + "".join(f'<li>{e(x)}</li>' for x in items)
+            + '</ul>')
+
+
 def _flag(cond, cls) -> str:
     return f" {cls}" if cond else ""
 
@@ -698,6 +721,29 @@ def _home(c: dict) -> str:
         f'<div class="x-statnote">{n_unmatched} payment'
         f'{"s" if n_unmatched != 1 else ""} held</div>'
     )))
+
+    # 5. Paid today — settled payouts, read from the ledger. An FX conversion is
+    # deliberately absent: it moved money between our own currencies and paid
+    # nobody, so listing it as a payment would overstate what went out.
+    paid = m.get("paid_today") or []
+    if paid:
+        paid_rows = "".join(
+            f'<div>{e(p["payable_number"])} · '
+            f'{e(money_str(p["amount_minor"], p["currency"]))}'
+            f'{" · " + e(str(p["posted_at"])[:19]) if p.get("posted_at") else ""}</div>'
+            for p in paid)
+        paid_body = (f'<div class="x-fig">{len(paid)} settled</div>'
+                     f'<details class="x-hist"><summary>Details</summary>'
+                     f'<div>{paid_rows}</div></details>')
+    else:
+        paid_body = ('<div class="x-fig">Nothing yet</div>'
+                     '<div class="x-statnote">Settled payouts appear here once '
+                     'the bank confirms them and the books record the outflow.</div>')
+    cards.append(_card(span="x-span-3", inner=(
+        f'<span class="x-stat-ico">{_I["out"]}</span>'
+        '<div class="x-label">Paid today</div>' + paid_body
+    )))
+
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["scale"]}</span>'
         '<div class="x-label">Automatic limit</div>'
@@ -802,21 +848,23 @@ def _home(c: dict) -> str:
         elif st in ("CANCELLED", "FAILED"):
             icon, cls = _I["x"], "is-bad"
             head = f'{p["number"]} ({p["supplier"] or "supplier"}) failed'
-            body = p.get("step_reason") or "Check the problem list."
+            # `body` is HTML from here on (blockers_html below), so this branch
+            # must produce HTML too — the shared append no longer escapes it.
+            body = f'<p>{e(p.get("step_reason") or "Check the problem list.")}</p>'
         else:
             icon, cls = _I["warn"], "is-warn"
             head = f'{p["number"]} ({p["supplier"] or "supplier"}) is held'
             # NEVER "Waiting on policy." — a held payment owes the reader the
             # specific rule and its numbers (which invoice, how much, what
-            # limit), and the planner already computed exactly that.
-            body = (p.get("plan_reason") or p.get("step_reason")
-                    or "Held by policy. Open Money out for the full rule.")
+            # limit), and the planner already computed exactly that. ALL of
+            # them, not the first.
+            body = blockers_html(p)
         pill = ('<span class="x-pill x-pill--bad">Problem</span>' if cls == "is-bad"
                 else f'<span class="x-pill x-pill--'
                      f'{"good" if cls == "is-good" else "warn"}">'
                      f'{e(st)}</span>')
         todo.append(f'<li><span class="x-todo-ico {cls}">{icon}</span>'
-                    f'<div><b>{e(head)}</b><p>{e(body)}</p></div>{pill}</li>')
+                    f'<div><b>{e(head)}</b>{body}</div>{pill}</li>')
 
     todo_html = "".join(todo) or '<li><div><i>Nothing planned yet.</i></div></li>'
     checklist = _card(span="x-span-8", inner=(
@@ -863,7 +911,7 @@ def _home(c: dict) -> str:
             '</div></div><ul class="x-todo">' + "".join(
                 f'<li><span class="x-todo-ico is-warn">{_I["clock"]}</span>'
                 f'<div><b>{e(p["number"])} · {e(p["supplier"] or "supplier")}</b>'
-                f'<p>{e(p.get("plan_reason") or "held")}</p></div>'
+                f'{blockers_html(p)}</div>'
                 f'<span class="x-pill x-pill--warn">'
                 f'{e(p.get("plan_policy_reason") or "held")}</span></li>'
                 for p in c["waiting"])
@@ -1068,17 +1116,22 @@ def _money_out(c: dict) -> str:
             badge = f'<span class="x-pill x-pill--info">{e(st)}</span>'
 
         # WHY it is where it is. A step reason is what actually happened; a
-        # payable with no step yet has only the planner's rule — and that rule
-        # names the invoice, the amount and the limit, so it is the useful half.
-        # "Held" on its own tells a reader nothing they can act on.
-        reason = (p.get("step_reason") or "").strip()
-        if not reason:
-            reason = (p.get("plan_reason") or "").strip()
-        note = ""
-        if reason:
-            short = reason[:220] + ("…" if len(reason) > 220 else "")
+        # payable with no step yet has only the planner's rules — and those name
+        # the invoice, the amount and the limit, so they are the useful half.
+        # "Held" on its own tells a reader nothing they can act on. ALL the
+        # rules, not the first.
+        if p.get("plan_blockers"):
             note = (f'<div class="x-callnote" style="margin-top:20px">'
-                    f'{_I["info"]}<span>{e(short)}</span></div>')
+                    f'{_I["info"]}<div>{blockers_html(p)}</div></div>')
+        else:
+            reason = (p.get("step_reason") or "").strip()
+            if not reason:
+                reason = (p.get("plan_reason") or "").strip()
+            note = ""
+            if reason:
+                short = reason[:220] + ("…" if len(reason) > 220 else "")
+                note = (f'<div class="x-callnote" style="margin-top:20px">'
+                        f'{_I["info"]}<span>{e(short)}</span></div>')
 
         # Say what the BANK says. "SUBMITTED" is what we did; it is not a claim
         # that money moved, and never render it as "paid".
@@ -1236,7 +1289,7 @@ def _ok(c: dict) -> str:
             '<ul class="x-todo">' + "".join(
                 f'<li><span class="x-todo-ico is-warn">{_I["clock"]}</span>'
                 f'<div><b>{e(p["number"])} · {e(p["supplier"] or "supplier")}</b>'
-                f'<p>{e(p.get("plan_reason") or "held")}</p></div>'
+                f'{blockers_html(p)}</div>'
                 f'<span class="x-pill x-pill--warn">'
                 f'{e(p.get("plan_policy_reason") or "held")}</span></li>'
                 for p in waits)

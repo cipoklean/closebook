@@ -108,7 +108,8 @@ class Funding:
     note: str = ""
 
 
-def funding_for(plan, payable_number: str, held: set[str]) -> Funding:
+def funding_for(plan, payable_number: str, held: set[str],
+                *, conversion_posted: bool = False) -> Funding:
     """Cost a payable in its FUNDING currency, using the plan's own numbers.
 
     The planned conversion amount is used verbatim — it already carries the
@@ -116,11 +117,23 @@ def funding_for(plan, payable_number: str, held: set[str]) -> Funding:
     payout short. Re-deriving it here would invent a second rate, and this
     project has already been burned once by two modules disagreeing about a
     rate while every isolated test passed.
+
+    `conversion_posted` short-circuits all of that: once the conversion is IN
+    THE LEDGER, the bought currency is real cash, so the payout is funded from
+    the currency we now hold. Without this the ledger would hold the conversion
+    AND the tile would still charge the plan's conversion, counting the same
+    money twice.
     """
     steps = plan.payable_actions(payable_number) if plan is not None else []
     fx = next((s for s in steps if s.action == ACT_FX), None)
     pay = next((s for s in steps if s.action in (ACT_PAY, ACT_DEFER, ACT_ESCALATE)),
                None)
+
+    if conversion_posted and pay is not None:
+        return Funding(
+            pay.currency, pay.amount_minor, "converted",
+            f"funded from {pay.currency}: the conversion that bought it is "
+            f"already in the ledger, so it is cash we hold")
 
     if fx is not None:
         sell_ccy = fx.sell_currency or "USD"

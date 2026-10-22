@@ -86,7 +86,35 @@ def session_scope():
             raise
 
 
-def reset_default_db() -> None:
-    """Drop the cached DB so a new CLOSEBOOK_DATABASE_URL takes effect."""
+def reset_default_db(*, allow_demo_file: bool = False) -> None:
+    """Drop the cached DB so a new CLOSEBOOK_DATABASE_URL takes effect.
+
+    REFUSES to drop a handle onto the real demo database unless you say so.
+
+    Why: this function does NOT isolate anything. It only clears the cache, so
+    the next `get_default_db()` reopens whatever URL is configured — which,
+    outside the test suite, is `data/closebook.sqlite3`, the seeded demo data.
+    Calling it and then writing rows silently pollutes the demo (this actually
+    happened: two phantom payables and two "X" suppliers appeared in the demo
+    book and were only noticed when a tile read USD 10,500.00 where the
+    arithmetic said 7,000).
+
+    Isolated work belongs in a temp database, which is what the test suite does:
+
+        CLOSEBOOK_DATABASE_URL=sqlite:////tmp/scratch.sqlite3 python ...
+
+    To deliberately reopen the demo file, pass `allow_demo_file=True` and mean
+    it.
+    """
     global _default_db
+    url = os.environ.get("CLOSEBOOK_DATABASE_URL") or ""
+    if not allow_demo_file:
+        points_at_demo = (not url) or (str(_DATA_DIR / "closebook.sqlite3") in url)
+        if points_at_demo:
+            raise RuntimeError(
+                "reset_default_db() refused: CLOSEBOOK_DATABASE_URL is not set, "
+                "so this would reopen the DEMO database "
+                f"({_DATA_DIR / 'closebook.sqlite3'}). Point at a temp database "
+                "first, e.g. CLOSEBOOK_DATABASE_URL=sqlite:////tmp/scratch.sqlite3, "
+                "or pass allow_demo_file=True if you really mean the demo file.")
     _default_db = None

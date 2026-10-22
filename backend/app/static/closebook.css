@@ -427,3 +427,10 @@ a { color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .x-enter { animation: none; }
 }
+
+/* Every reason a payment is held, one per line. A hold with two blockers used
+   to print only the first, so a reader would clear it and still see nothing
+   move. Inline bullets keep it readable inside the existing list rows. */
+.x-blockers { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 4px; }
+.x-blockers li { list-style: disc; font-size: 13px; line-height: 1.45; }
+.x-callnote .x-blockers { margin: 0; }

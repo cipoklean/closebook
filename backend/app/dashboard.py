@@ -18,6 +18,7 @@ from .domain.agent_tools import ALLOWED_TOOLS
 # exactly how a second definition of "still moving" gets out of step — and this
 # set is what decides whether a replacement payment may be created.
 from .domain.incidents import in_flight as _live_in_flight
+from .money import money_str
 from .models import (
     AgentTrace, Approval, ApprovalStatus, Customer, Inflow, InvoicePayable,
     InvoiceReceivable, MatchStatus, PayStatus, PlanStep, StepStatus, StepType,
@@ -76,6 +77,7 @@ def money_block(s, cash: dict, budget: dict, plan=None,
     3. **The floor is charged to the budget currency only.** A GBP balance must
        not silently absorb a USD reserve.
     """
+    from .domain.settlement import paid_payouts, settled_txn_keys
     from .domain.treasury import current_plan, funding_for
     from .db import get_default_db
 
@@ -92,6 +94,12 @@ def money_block(s, cash: dict, budget: dict, plan=None,
                  "display_status": p.status.value, "live_status": None}
                 for p in s.query(InvoicePayable).all()]
 
+    # THE LEDGER decides what has settled — not the bank's live status and not
+    # the plan. If the tile trusted a bank PAID before anything was posted, the
+    # free-to-spend figure would jump at the moment the bank finished while cash
+    # had not moved yet.
+    posted_keys = settled_txn_keys(s)
+
     floor = budget["reserve_floor_minor"]
     budget_ccy = budget["currency"]
     # What we can pay FROM: balances plus the budget currency itself (we are
@@ -107,20 +115,37 @@ def money_block(s, cash: dict, budget: dict, plan=None,
         num = p.get("number")
         if not num:
             continue
-        f = funding_for(plan, num, held)
+        # Has this payable's CONVERSION been posted? If so the bought currency
+        # is real cash and the payout is funded from it, not from the plan.
+        fx_id = p.get("fx_object_id")
+        conversion_posted = bool(fx_id) and fx_id in posted_keys
+        f = funding_for(plan, num, held, conversion_posted=conversion_posted)
+
+        st = (p.get("display_status") or "").upper()
         live = (p.get("live_status") or "").upper()
-        settled = live in ("PAID", "COMPLETED", "SUCCESS")
-        sent = (p.get("display_status") == "SUBMITTED" or _live_in_flight(live))
-        if settled:
-            # The bank says it is done. The ledger will carry the debit; do not
-            # also carry it as an obligation.
+        payout_id = p.get("airwallex_object_id")
+        bank_says_done = live in ("PAID", "COMPLETED", "SUCCESS", "SETTLED")
+        in_ledger = bool(payout_id) and payout_id in posted_keys
+
+        if in_ledger:
             where = "settled"
-        elif sent:
-            in_flight[f.currency] = in_flight.get(f.currency, 0) + f.amount_minor
+        elif st == "SUBMITTED" or _live_in_flight(live) or bank_says_done:
+            # Sent, and the cash has not left the ledger yet — so it stays
+            # committed. A bank that has finished but whose posting has not
+            # landed is still in flight, which is exactly why free-to-spend
+            # cannot move until the ledger does.
             where = "in_flight"
         else:
-            promised[f.currency] = promised.get(f.currency, 0) + f.amount_minor
+            # Unpaid and unsent. A failed payout lands here too: nothing was
+            # posted, the supplier is still owed, so it is still promised.
             where = "promised"
+
+        # Counted EXACTLY ONCE, in its funding currency. Settled money is out of
+        # the arithmetic because the ledger has already taken it out of cash.
+        if where == "in_flight":
+            in_flight[f.currency] = in_flight.get(f.currency, 0) + f.amount_minor
+        elif where == "promised":
+            promised[f.currency] = promised.get(f.currency, 0) + f.amount_minor
 
         line = {
             "payable_number": num,
@@ -133,6 +158,9 @@ def money_block(s, cash: dict, budget: dict, plan=None,
             "payable_currency": p.get("currency"),
             "payable_amount_minor": p.get("amount_minor"),
             "live_status": p.get("live_status"),
+            "posted": in_ledger,
+            "bank_says_done": bank_says_done,
+            "display_status": st,
         }
         lines.append(line)
         if f.source == "unfunded" and where == "promised":
@@ -151,6 +179,12 @@ def money_block(s, cash: dict, budget: dict, plan=None,
 
     # Which payable would take the position below the floor? Walk the still-to-
     # be-paid ones in plan order and name the one that cannot be covered.
+    #
+    # NOTE the basis: this is the CASH basis (ledger cash less what is already in
+    # flight), which is a different question from the planner's reserve floor —
+    # that one is measured against the committed-cash budget. Both are real, and
+    # they can disagree. The wording says which one it is, because a floor
+    # statement with no basis on it is the kind of number a judge cannot check.
     breaching: list[dict] = []
     remaining = (int(cash.get(budget_ccy, 0))
                  - int(in_flight.get(budget_ccy, 0)) - floor)
@@ -158,6 +192,14 @@ def money_block(s, cash: dict, budget: dict, plan=None,
         if line["where"] != "promised" or line["currency"] != budget_ccy:
             continue
         if line["amount_minor"] > remaining:
+            after = remaining - line["amount_minor"]
+            line["cash_after_minor"] = after
+            line["cash_floor_reason"] = (
+                f"paying {line['payable_number']} "
+                f"({money_str(line['amount_minor'], line['currency'])}) would "
+                f"leave cash {money_str(after, budget_ccy)}, below the "
+                f"{money_str(floor, budget_ccy)} floor")
+            line["cash_floor_code"] = "cash_reserve_floor"
             breaching.append(line)
         else:
             remaining -= line["amount_minor"]
@@ -176,7 +218,16 @@ def money_block(s, cash: dict, budget: dict, plan=None,
         "headline_currency": budget_ccy,
         "headline_free_minor": free.get(budget_ccy, 0),
         "headline_shortfall_minor": shortfall.get(budget_ccy, 0),
+        # Settled payouts, straight from the ledger. Only payouts — an FX
+        # conversion moved money between our own currencies and paid nobody.
+        "paid_today": paid_payouts(s, since=_start_of_today()),
     }
+
+
+def _start_of_today():
+    from datetime import datetime, time, timezone
+    now = datetime.now(timezone.utc)
+    return datetime.combine(now.date(), time.min, tzinfo=timezone.utc)
 
 
 # ------------------------------------------------------- steps: problems
@@ -639,6 +690,21 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
             plan = None
             plan_steps = {}
 
+        # Which step object (if any) belongs to each payable, per action, so
+        # money_block can ask the LEDGER whether a conversion is already posted.
+        fx_object_by_payable: dict[str, str] = {}
+        for st_row in (s.query(PlanStep)
+                       .filter(PlanStep.type == StepType.FX)
+                       .filter(PlanStep.airwallex_object_id.isnot(None))
+                       .order_by(PlanStep.id.asc()).all()):
+            try:
+                pl = json.loads(st_row.payload_json or "{}")
+            except (ValueError, TypeError):
+                continue
+            num = pl.get("payable_number")
+            if num:
+                fx_object_by_payable[num] = st_row.airwallex_object_id
+
         payables = []
         for p in s.query(InvoicePayable).order_by(InvoicePayable.number).all():
             sup = suppliers.get(p.supplier_id)
@@ -669,6 +735,12 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
                 "plan_policy_reason": step.policy_reason if step else None,
                 "plan_needs_approval": bool(step.needs_approval) if step else False,
                 "plan_approval_reason": step.approval_reason if step else None,
+                # EVERY reason the planner gave, not just the first.
+                "plan_blockers": list(step.blockers) if step else [],
+                "plan_blocker_codes": list(step.blocker_codes) if step else [],
+                # The conversion step's Airwallex id, if one was ever executed
+                # for this payable. money_block checks it against the LEDGER.
+                "fx_object_id": fx_object_by_payable.get(p.number),
             })
 
         rep = reconcile(s)
@@ -687,12 +759,31 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
                              if p["plan_needs_approval"]
                              and not p["airwallex_object_id"]]
 
+        money = money_block(s, rep.cash_by_currency, budget,
+                            plan=plan, payables=payables)
+
+        # Merge the CASH-basis floor reason into each blocked payable, from the
+        # one computation the tiles use, so a hold reason cannot read one way on
+        # Home and another way on Money out.
+        cash_blocked = {ln["payable_number"]: ln for ln in money["breaching"]}
+        for p in payables:
+            extra = cash_blocked.get(p["number"])
+            if not extra:
+                continue
+            all_blockers = list(p.get("plan_blockers") or [])
+            if extra["cash_floor_reason"] not in all_blockers:
+                all_blockers.append(extra["cash_floor_reason"])
+            p["plan_blockers"] = all_blockers
+            p["plan_blocker_codes"] = list(p.get("plan_blocker_codes") or []) + \
+                [extra["cash_floor_code"]]
+            p["cash_after_minor"] = extra["cash_after_minor"]
+
         return {
             "budget": budget,
-            "money": money_block(s, rep.cash_by_currency, budget,
-                                 plan=plan, payables=payables),
+            "money": money,
             "cash": rep.cash_by_currency,
             "suspense": rep.suspense_by_currency,
+            "outflow": rep.outflow_by_account,
             "ledger_balanced": rep.balanced,
             "receivables": receivables,
             "payables": payables,

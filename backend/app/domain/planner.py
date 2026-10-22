@@ -127,6 +127,12 @@ class Step:
     needs_approval: bool = False
     approval_reason: str = ""
     policy_reason: str = ""
+    # EVERY reason this step is not happening, not just the first. A held
+    # payment that names one blocker invites the reader to clear it, expect
+    # movement, and be surprised by the next one. `reason` carries them joined;
+    # these carry them structured.
+    blockers: list[str] = field(default_factory=list)
+    blocker_codes: list[str] = field(default_factory=list)
     # linking
     unlocks: list[str] = field(default_factory=list)
     chained_to: Optional[int] = None   # index of the step this depends on
@@ -149,6 +155,8 @@ class Step:
             "needs_approval": self.needs_approval,
             "approval_reason": self.approval_reason,
             "policy_reason": self.policy_reason,
+            "blockers": list(self.blockers),
+            "blocker_codes": list(self.blocker_codes),
             "unlocks": self.unlocks,
             "reason": self.reason,
         }
@@ -247,23 +255,25 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
     ordered_payables = [payables[i] for i in sorted(range(len(payables)), key=_key)]
 
     for p in ordered_payables:
+        # EVERY reason this payable is not being paid, collected rather than
+        # returned at the first. PO-7002 is blocked by BOTH an unpaid customer
+        # invoice and the reserve floor; naming only the first tells the reader
+        # to go and chase INV-0042 and then be surprised when the payment still
+        # does not happen.
+        blockers: list[str] = []
+        codes: list[str] = []
+        fx_index = None
+
         # --- 1. dependency gate -------------------------------------------
         if not p.dependency_met:
             short_txt = ""
             if p.dependency_open_minor > 0:
-                short_txt = (f" ({money_str(p.dependency_open_minor, p.dependency_currency)}"
-                             f" still outstanding)")
-            plan.steps.append(Step(
-                action=ACT_DEFER,
-                payable_number=p.number, supplier=p.supplier,
-                amount_minor=p.amount_minor, currency=p.currency,
-                payout_method=p.payout_method,
-                reason=(f"waiting on {p.depends_on_receivable or 'its receivable'}"
-                        f"{short_txt} — a part-payment does not release the "
-                        f"supplier"),
-                policy_reason="dependency_not_met",
-            ))
-            continue
+                short_txt = (f", {money_str(p.dependency_open_minor, p.dependency_currency)}"
+                             f" still outstanding")
+            blockers.append(
+                f"waiting on {p.depends_on_receivable or 'its receivable'}"
+                f"{short_txt} — a part-payment does not release the supplier")
+            codes.append("dependency_not_met")
 
         # --- 2. priceable? -------------------------------------------------
         if not supported(p.currency):
@@ -274,6 +284,8 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
                 reason=(f"{p.currency} is not a supported currency; "
                         f"cannot price or convert it"),
                 policy_reason="unsupported_currency",
+                blockers=[f"{p.currency} is not a supported currency"],
+                blocker_codes=["unsupported_currency"],
             ))
             continue
 
@@ -286,8 +298,11 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
 
         held = working.get(p.currency.upper(), 0)
 
-        # --- 4. do we hold the currency? if not, plan the conversion ------
-        fx_index = None
+        # --- 4. do we hold the currency? if not, the conversion is needed --
+        # Everything in this block is a WHAT-IF: it computes what the floor
+        # would say without touching `working` or `committed_left`, because a
+        # blocked payable must leave the remaining capacity for the next one.
+        fx_plan = None            # (sell_minor, rate, committed_after)
         if held < move_minor:
             rate = pos.usd_rate(p.currency)
             if rate is None:
@@ -299,88 +314,87 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
                     reason=(f"no {p.currency} balance and no FX rate to buy it; "
                             f"a human decides"),
                     policy_reason="no_rate",
+                    blockers=[f"no {p.currency} balance and no FX rate to buy it"],
+                    blocker_codes=["no_rate"],
                 ))
                 continue
 
             sell_minor = _fx_sell_needed(move_minor, p.currency, rate,
                                          fx_tolerance_pct)
-            # capacity: do we hold the USD we're about to sell?
             usd_held = working.get("USD", 0)
             if usd_held < sell_minor:
-                plan.steps.append(Step(
-                    action=ACT_DEFER,
-                    payable_number=p.number, supplier=p.supplier,
-                    amount_minor=move_minor, currency=p.currency,
-                    payout_method=p.payout_method,
-                    reason=(f"needs {money_str(sell_minor, 'USD')} to buy "
-                            f"{money_str(move_minor, p.currency)}, "
-                            f"but only {money_str(usd_held, 'USD')} is available "
-                            f"— capacity, not policy"),
-                    policy_reason="insufficient_balance",
-                ))
-                continue
+                blockers.append(
+                    f"needs {money_str(sell_minor, 'USD')} to buy "
+                    f"{money_str(move_minor, p.currency)}, but only "
+                    f"{money_str(usd_held, 'USD')} is available — capacity, "
+                    f"not policy")
+                codes.append("insufficient_balance")
+            else:
+                committed_after_fx = committed_left - sell_minor
+                if breaches_reserve_floor(committed_after_fx, "USD",
+                                          floor_usd=budget.reserve_floor_usd):
+                    blockers.append(
+                        f"converting {money_str(sell_minor, 'USD')} would drop "
+                        f"committed cash to "
+                        f"{money_str(committed_after_fx, 'USD')}, below the "
+                        f"{money_str(int(budget.reserve_floor_usd * 100), 'USD')} "
+                        f"reserve floor — deferring, not trimming")
+                    codes.append("reserve_floor")
+                else:
+                    fx_plan = (sell_minor, rate, committed_after_fx)
 
-            # policy: does selling that much breach the reserve floor?
-            committed_after = committed_left - sell_minor
-            if breaches_reserve_floor(committed_after, "USD",
-                                      floor_usd=budget.reserve_floor_usd):
-                plan.steps.append(Step(
-                    action=ACT_DEFER,
-                    payable_number=p.number, supplier=p.supplier,
-                    amount_minor=move_minor, currency=p.currency,
-                    payout_method=p.payout_method,
-                    reason=(f"converting {money_str(sell_minor, 'USD')} would "
-                            f"drop committed cash to "
-                            f"{money_str(committed_after, 'USD')}, below the "
-                            f"{money_str(int(budget.reserve_floor_usd * 100), 'USD')} reserve floor — "
-                            f"deferring, not trimming"),
-                    policy_reason="reserve_floor",
-                ))
-                continue
+            if not blockers and fx_plan is not None:
+                # Actually plan the conversion and take the capacity.
+                sell_minor, rate, committed_after_fx = fx_plan
+                fx_step = Step(
+                    action=ACT_FX,
+                    reason=(f"buy the {money_str(move_minor, p.currency)} "
+                            f"that {p.number} needs{fee_txt}, "
+                            f"including {fx_tolerance_pct}% drift tolerance"),
+                    sell_currency="USD", sell_amount_minor=sell_minor,
+                    buy_currency=p.currency.upper(), buy_amount_minor=move_minor,
+                    rate=rate,
+                    payable_number=p.number,
+                    policy_reason="fund_payable",
+                )
+                fx_index = len(plan.steps)
+                plan.steps.append(fx_step)
+                committed_left = committed_after_fx
+                working["USD"] = working.get("USD", 0) - sell_minor
+                working[p.currency.upper()] = held + move_minor
 
-            fx_step = Step(
-                action=ACT_FX,
-                reason=(f"buy the {money_str(move_minor, p.currency)} "
-                        f"{p.currency} that {p.number} needs{fee_txt}, including "
-                        f"{fx_tolerance_pct}% drift tolerance"),
-                sell_currency="USD", sell_amount_minor=sell_minor,
-                buy_currency=p.currency.upper(), buy_amount_minor=move_minor,
-                rate=rate,
-                payable_number=p.number,
-                policy_reason="fund_payable",
-            )
-            fx_index = len(plan.steps)
-            plan.steps.append(fx_step)
-            committed_left = committed_after
-            working["USD"] = working.get("USD", 0) - sell_minor
-            working[p.currency.upper()] = held + move_minor
-
-        # --- 5. reserve floor on the payout itself ------------------------
+        # --- 5. reserve floor on the payout itself (what-if when blocked) ---
         pay_usd = pos.to_usd_minor(move_minor, p.currency)
-        committed_after = committed_left - pay_usd
-        if breaches_reserve_floor(committed_after, "USD",
+        committed_after_pay = committed_left - pay_usd
+        if breaches_reserve_floor(committed_after_pay, "USD",
                                   floor_usd=budget.reserve_floor_usd):
+            blockers.append(
+                f"paying {p.number} ({money_str(move_minor, p.currency)}) would "
+                f"leave cash {money_str(committed_after_pay, 'USD')}, below the "
+                f"{money_str(int(budget.reserve_floor_usd * 100), 'USD')} floor")
+            codes.append("reserve_floor")
+
+        # --- 6. anything blocking? one step, every reason ------------------
+        if blockers:
             plan.steps.append(Step(
                 action=ACT_DEFER,
                 payable_number=p.number, supplier=p.supplier,
                 amount_minor=move_minor, currency=p.currency,
                 payout_method=p.payout_method,
-                reason=(f"paying {p.number} would take committed cash to "
-                        f"{money_str(committed_after, 'USD')}, under the "
-                        f"{money_str(int(budget.reserve_floor_usd * 100), 'USD')} floor"),
-                policy_reason="reserve_floor",
+                reason="; ".join(blockers),
+                policy_reason=codes[0],
+                blockers=blockers,
+                blocker_codes=codes,
                 chained_to=fx_index,
             ))
             continue
 
-        # --- 6. approval threshold ---------------------------------------
+        # --- 7. approval threshold ---------------------------------------
         needs_approval, why = requires_approval(
             move_minor, p.currency, pos.rates,
             auto_limit_usd=budget.auto_pay_limit_usd)
-        if needs_approval:
-            needs_approval, why = True, why
 
-        committed_left = committed_after
+        committed_left = committed_after_pay
         working[p.currency.upper()] = working.get(p.currency.upper(), 0) - move_minor
 
         plan.steps.append(Step(
@@ -390,8 +404,8 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
             payout_method=p.payout_method,
             needs_approval=needs_approval,
             approval_reason=why,
-            reason=(f"{p.number} to {p.supplier}: {money_str(move_minor, p.currency)} "
-                    f"{p.currency}{fee_txt} by {p.payout_method} — {why}"),
+            reason=(f"{p.number} to {p.supplier}: {money_str(move_minor, p.currency)}"
+                    f"{fee_txt} by {p.payout_method} — {why}"),
             policy_reason="within_policy" if not needs_approval else "needs_approval",
             chained_to=fx_index,
         ))

@@ -161,6 +161,9 @@ class ReconciliationReport:
     payables_by_status: dict[str, list[str]] = field(default_factory=dict)
     cash_by_currency: dict[str, int] = field(default_factory=dict)
     suspense_by_currency: dict[str, int] = field(default_factory=dict)
+    # The outflow side: FX clearing, FX variance and each supplier payable.
+    # Reported so the outflow half of the books is visible, not implied.
+    outflow_by_account: dict[str, int] = field(default_factory=dict)
     unmatched_inflows: list[dict] = field(default_factory=list)
     ambiguous_inflows: list[dict] = field(default_factory=list)
     balanced: bool = True
@@ -213,6 +216,7 @@ def reconcile(db_session) -> ReconciliationReport:
 
     cash: dict[str, int] = {}
     suspense: dict[str, int] = {}
+    outflow: dict[str, int] = {}
     for e in db_session.query(LedgerEntry).all():
         net = e.debit_minor - e.credit_minor
         if e.account.startswith("cash:"):
@@ -222,8 +226,13 @@ def reconcile(db_session) -> ReconciliationReport:
         elif e.account == "unapplied_cash":
             suspense.setdefault(e.currency, 0)
             suspense[e.currency] += -net  # a credit is money we hold unapplied
+        elif (e.account in ("fx_clearing", "fx_variance")
+              or e.account.startswith("payable:")):
+            key = f"{e.account} {e.currency}"
+            outflow[key] = outflow.get(key, 0) + net
 
-    # every posting must balance per (txn, currency)
+    # every posting must balance per (txn, currency) — this now covers the
+    # outflows too, because they are posted through the same `post()`.
     by_txn: dict[tuple[str, str], tuple[int, int]] = {}
     for e in db_session.query(LedgerEntry).all():
         key = (e.txn_id, e.currency)
@@ -235,6 +244,7 @@ def reconcile(db_session) -> ReconciliationReport:
     # check had nothing to measure. Only `cash:*` accounts are cash.
     rep.cash_by_currency = {k: v for k, v in cash.items() if v != 0}
     rep.suspense_by_currency = {k: v for k, v in suspense.items() if v != 0}
+    rep.outflow_by_account = {k: v for k, v in outflow.items() if v != 0}
 
     from ..models import Inflow
     for i in db_session.query(Inflow).all():
