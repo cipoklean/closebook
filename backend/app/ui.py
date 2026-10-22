@@ -758,7 +758,11 @@ def _home(c: dict) -> str:
         else:
             icon, cls = _I["warn"], "is-warn"
             head = f'{p["number"]} ({p["supplier"] or "supplier"}) is held'
-            body = p.get("step_reason") or "Waiting on policy."
+            # NEVER "Waiting on policy." — a held payment owes the reader the
+            # specific rule and its numbers (which invoice, how much, what
+            # limit), and the planner already computed exactly that.
+            body = (p.get("plan_reason") or p.get("step_reason")
+                    or "Held by policy. Open Money out for the full rule.")
         pill = ('<span class="x-pill x-pill--bad">Problem</span>' if cls == "is-bad"
                 else f'<span class="x-pill x-pill--'
                      f'{"good" if cls == "is-good" else "warn"}">'
@@ -1015,10 +1019,16 @@ def _money_out(c: dict) -> str:
         else:
             badge = f'<span class="x-pill x-pill--info">{e(st)}</span>'
 
+        # WHY it is where it is. A step reason is what actually happened; a
+        # payable with no step yet has only the planner's rule — and that rule
+        # names the invoice, the amount and the limit, so it is the useful half.
+        # "Held" on its own tells a reader nothing they can act on.
         reason = (p.get("step_reason") or "").strip()
+        if not reason:
+            reason = (p.get("plan_reason") or "").strip()
         note = ""
         if reason:
-            short = reason[:150] + ("…" if len(reason) > 150 else "")
+            short = reason[:220] + ("…" if len(reason) > 220 else "")
             note = (f'<div class="x-callnote" style="margin-top:20px">'
                     f'{_I["info"]}<span>{e(short)}</span></div>')
 

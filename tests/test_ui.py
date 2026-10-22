@@ -853,6 +853,17 @@ class TestHeldPaymentsAreExplained:
         assert "on hold" in html
         assert "Nothing needs you right now" not in html
 
+    def test_the_vague_phrase_waiting_on_policy_is_gone(self, db):
+        """The exact wording item 2 was raised about. A hold must carry the rule
+        and its numbers, on every tab that shows it."""
+        self._held(db, depends_on="INV-0042")
+        ctx = build_context([])
+        for tab in ("home", "money-out", "ok"):
+            html = render_app(ctx, tab=tab)
+            assert "Waiting on policy" not in html, tab
+        assert "INV-0042" in render_app(ctx, tab="money-out")
+        assert "INV-0042" in render_app(ctx, tab="home")
+
     def test_the_ok_tab_shows_held_payments_too(self, db):
         """Header and tab must agree: if the header mentions a hold, the tab
         the header links to must show it."""
