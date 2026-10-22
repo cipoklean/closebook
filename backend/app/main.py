@@ -126,7 +126,7 @@ def _auto_execute() -> bool:
     return _require_sandbox() is None
 
 
-def _run_loop(source: str) -> str:
+def _run_loop(source: str, budget_s: float = 12.0) -> str:
     """Re-plan from live state after an event, and execute whatever is clear.
 
     Returns ONE plain sentence for the flash message. Never raises: a failure
@@ -135,8 +135,13 @@ def _run_loop(source: str) -> str:
     """
     from .domain.conductor import on_event
 
+    # NO MODEL IS EVER RUN FROM HERE. `conductor.on_event` builds a plan and
+    # sends clear steps; it has no language-model import and no path to one. The
+    # model's only job is reading a bank reference, which happens on the way IN
+    # (intake), never while an operator waits on a button.
+
     try:
-        run = on_event(_database(), source=source,
+        run = on_event(_database(), source=source, budget_s=budget_s,
                        execute=True, dry_run=not _auto_execute())
     except Exception as exc:                       # noqa: BLE001
         log.exception("the planning loop failed after %s", source)
@@ -522,6 +527,42 @@ def _check_pin(pin: str) -> Optional[str]:
     return None
 
 
+@app.post("/inflows/{inflow_id}/reask")
+async def reask_inflow_route(inflow_id: int, request: Request):
+    """Ask the model about this payment again. NO PIN, and no money moves.
+
+    Deliberately un-gated: it changes no balance, applies nothing and sends
+    nothing — it replaces a stored READING. Requiring a PIN to retry a failed
+    reading would train people to type their PIN at things that do not need it.
+    """
+    from .domain.intake import reask_model
+
+    try:
+        result, note = reask_model(_database(), inflow_id)
+    except Exception as exc:                       # noqa: BLE001
+        log.exception("re-ask failed for inflow %s", inflow_id)
+        return _back(request, tab="ok", err=(
+            f"Could not ask the model again ({type(exc).__name__}). The stored "
+            f"reading is unchanged."))
+
+    if result is None:
+        return _back(request, tab="ok", err=note)
+
+    conf = float(result.confidence or 0.0)
+    if result.status == "PROPOSED":
+        return _back(request, tab="ok", ok=(
+            f"Asked again. Read as {result.status} via {result.method} at "
+            f"{conf:.2f} — below the automatic threshold, so nothing has been "
+            f"applied and it is waiting for your decision. {result.reason}"))
+    if result.method == "LLM" and conf == 0:
+        return _back(request, tab="ok", ok=(
+            f"Asked again. The model still could not place this one, so it stays "
+            f"in suspense. {result.reason}"))
+    return _back(request, tab="ok", ok=(
+        f"Asked again. Read as {result.status} via {result.method} at "
+        f"{conf:.2f}. {result.reason}"))
+
+
 @app.post("/inflows/{inflow_id}/resolve")
 async def resolve_inflow_route(inflow_id: int, request: Request):
     """Resolve a suspended payment. THE ONLY THREE WAYS SUSPENSE CAN LEAVE.
@@ -530,62 +571,106 @@ async def resolve_inflow_route(inflow_id: int, request: Request):
       refund -> record a liability; the cash stays put and stops being spendable
       income -> release it as ours; it becomes spendable, and it needs a note
 
-    Every one of them re-runs the planner, and none can happen twice: the state
-    is checked and the ledger transaction is keyed to the inflow, so a second
-    press moves nothing.
+    Three things this route must never do, all learned the hard way:
+
+      * **Never build a message inside the transaction.** The first version
+        called `approve_inflow` and then formatted the reply using an attribute
+        that does not exist. It raised, `session_scope` rolled back, and a
+        resolution that had genuinely applied was undone — the operator saw a
+        failure and the books showed nothing. The work is committed FIRST, and
+        the sentence is built afterwards from plain values.
+      * **Never run the model here.** Resolving is a decision about money already
+        in the book; asking a language model to read a reference again would put
+        a network call with a 45-second timeout inside a button press.
+      * **Never hang.** The re-plan runs on a wall-clock budget, so the button
+        always ends in a sentence.
     """
     from .domain.ledger import (LedgerError, approve_inflow, resolve_income,
                                 resolve_refund, suspense_for)
     from .money import money_str
 
-    b = await _read_body(request)
-    pin = str(b.get("pin") or "")
-    by = str(b.get("by") or "dashboard")
-    what = str(b.get("what") or "").strip().lower()
-    reason = str(b.get("reason") or "").strip()
-    note = str(b.get("note") or "").strip()
+    try:
+        b = await _read_body(request)
+        pin = str(b.get("pin") or "")
+        by = (str(b.get("by") or "").strip() or "david")
+        what = str(b.get("what") or "").strip().lower()
+        reason = str(b.get("reason") or "").strip()
+        note = str(b.get("note") or "").strip()
 
-    refusal = _check_pin(pin)
-    if refusal:
-        return _back(request, tab="ok", err=refusal)
+        refusal = _check_pin(pin)
+        if refusal:
+            return _back(request, tab="ok", err=refusal)
 
-    if what not in ("match", "refund", "income"):
-        return _back(request, tab="ok",
-                     err="Pick what to do with this money: match it to an "
-                         "invoice, record a refund owed, or release it as income.")
+        if what not in ("match", "refund", "income", "reject"):
+            return _back(request, tab="ok",
+                         err="Pick what to do with this money: match it to an "
+                             "invoice, record a refund owed, release it as "
+                             "income, or leave it in suspense.")
 
-    session = _database().session_scope()
-    with session as s:
-        inflow = s.get(Inflow, inflow_id)
-        if inflow is None:
-            return _back(request, tab="ok", err="That payment no longer exists.")
-        ccy = inflow.currency
+        # ---- the work, in its own transaction, committed before any prose ----
+        summary = None
         try:
-            if what == "match":
-                matches = approve_inflow(s, inflow, approved_by=by)
-                applied = ", ".join(str(m.invoice_receivable_id) for m in matches)
-                amount = sum(m.amount_minor for m in matches) or inflow.amount_minor
-                ok_msg = (f"Matched. {money_str(amount, ccy)} has been applied to "
-                          f"invoice id(s) {applied}; the invoice and the ledger "
-                          f"have both moved.")
-            elif what == "refund":
-                amount = resolve_refund(s, inflow, reason=reason, by=by)
-                ok_msg = (f"Refund owed: {money_str(amount, ccy)} is now a "
-                          f"recorded liability. No transfer was sent, and the "
-                          f"money has stopped being spendable.")
-            else:
-                amount = resolve_income(s, inflow, note=note, by=by)
-                ok_msg = (f"Released as income: {money_str(amount, ccy)} is now "
-                          f"ours to spend. The ledger credits other_income and "
-                          f"the decision is recorded against {by}.")
+            with _database().session_scope() as s:
+                inflow = s.get(Inflow, inflow_id)
+                if inflow is None:
+                    return _back(request, tab="ok",
+                                 err="That payment no longer exists.")
+                ccy = inflow.currency
+                if what == "match":
+                    matches = approve_inflow(s, inflow, approved_by=by)
+                    amount = sum(m.amount_applied_minor for m in matches) or \
+                        inflow.amount_minor
+                    applied = ", ".join(str(m.invoice_receivable_id)
+                                        for m in matches)
+                    summary = ("match", amount, ccy, applied)
+                elif what == "reject":
+                    from .domain.ledger import reject_inflow
+                    reject_inflow(s, inflow, rejected_by=by, reason=reason)
+                    summary = ("reject", suspense_for(s, inflow), ccy, "")
+                elif what == "refund":
+                    amount = resolve_refund(s, inflow, reason=reason, by=by)
+                    summary = ("refund", amount, ccy, "")
+                else:
+                    amount = resolve_income(s, inflow, note=note, by=by)
+                    summary = ("income", amount, ccy, "")
+                # read inside; used outside, after the commit
+                remaining = suspense_for(s, inflow)
         except LedgerError as exc:
             return _back(request, tab="ok", err=str(exc))
-        remaining = suspense_for(s, inflow)
 
-    return _back(request, tab="ok", ok=(
-        ok_msg + (f" Still unresolved on this payment: "
-                  f"{money_str(remaining, ccy)}." if remaining else "")
-        + _run_loop("resolve")))
+        kind, amount, ccy, applied = summary
+        if kind == "match":
+            head = (f"Matched. {money_str(amount, ccy)} has been applied to "
+                    f"invoice id(s) {applied}; the invoice and the ledger have "
+                    f"both moved.")
+        elif kind == "reject":
+            head = (f"Left in suspense. {money_str(amount, ccy)} is still in the "
+                    f"book and still not spendable — decide where it belongs "
+                    f"when you know.")
+        elif kind == "refund":
+            head = (f"Refund owed: {money_str(amount, ccy)} is now a recorded "
+                    f"liability. No transfer was sent, and the money has stopped "
+                    f"being spendable.")
+        else:
+            head = (f"Released as income: {money_str(amount, ccy)} is now ours "
+                    f"to spend. The ledger credits other_income and the decision "
+                    f"is recorded against {by}.")
+
+        tail = (f" Still unresolved on this payment: "
+                f"{money_str(remaining, ccy)}." if remaining else "")
+
+        # The re-plan runs on a budget. If it runs out, the resolution stands and
+        # the page says so, because the money decision is already committed.
+        return _back(request, tab="ok",
+                     ok=head + tail + _run_loop("resolve"))
+    except Exception as exc:                       # noqa: BLE001
+        # An unexpected failure must still be a sentence, never a bare 500: the
+        # operator needs to know whether anything moved.
+        log.exception("resolve failed for inflow %s", inflow_id)
+        return _back(request, tab="ok", err=(
+            f"Something went wrong resolving that payment "
+            f"({type(exc).__name__}). Nothing was changed if the message did not "
+            f"say it was."))
 
 
 @app.post("/inflows/{inflow_id}/reject")
@@ -763,9 +848,21 @@ def _require_sandbox() -> Optional[str]:
 
 
 def _back(request: Request, tab: str = "setup", ok: str = "", err: str = ""):
-    """Redirect back to the page with ONE message. No flash state to lose."""
+    """Return ONE message, in whatever shape the caller can actually read.
+
+    A browser form gets a 303 with the message on the query string: no flash
+    state to lose, and it works with JavaScript turned off.
+
+    The page's own forms use `fetch`, and a fetch cannot see through a redirect —
+    it follows it, lands on 200 HTML, and a client that judges success by status
+    code then reports success for a REFUSAL. So when a caller asks for JSON, it
+    gets the message as JSON and decides on the message, not on the status.
+    """
     from urllib.parse import urlencode
-    from fastapi.responses import RedirectResponse
+    from fastapi.responses import JSONResponse, RedirectResponse
+
+    if "application/json" in (request.headers.get("accept") or ""):
+        return JSONResponse({"tab": tab, "ok": ok, "err": err, "done": True})
     q = {"tab": tab}
     if ok:
         q["ok"] = ok

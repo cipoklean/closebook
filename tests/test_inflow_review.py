@@ -188,11 +188,15 @@ class TestThePageOffersBothChoices:
         assert 'value="match"' in html
         assert 'value="refund"' in html
         assert 'value="income"' in html
-        assert "/reject" in html, "saying no is still allowed"
+        assert 'value="reject"' in html, "saying no is still an option"
         assert "INV-1002" in html, "the match option names the invoice it applies to"
-        assert 'name="pin"' in html
         assert 'name="reason"' in html, "a refund needs a reason"
         assert 'name="note"' in html, "releasing as income needs a note"
+        # ONE PIN PER ITEM. Two forms meant two "Your PIN" boxes on one card,
+        # which reads as "type it twice".
+        assert html.count('name="pin"') == 1, \
+            f"one PIN per item, found {html.count(chr(34) + 'pin' + chr(34))}"
+        assert "/inflows/1/reask" in html, "asking the model again needs no PIN"
 
     def test_a_settled_match_is_not_offered_for_review(self, client, db):
         _invoice(number="INV-1001", ccy="USD", minor=1_200_000,

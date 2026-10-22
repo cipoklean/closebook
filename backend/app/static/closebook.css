@@ -472,8 +472,48 @@ a { color: inherit; }
 .x-table td { padding: 10px 10px 10px 0; border-bottom: 1px solid var(--x-line); vertical-align: top; }
 .x-table tr:last-child td { border-bottom: none; }
 .x-mono { font-family: var(--x-mono); font-size: 12.5px; word-break: break-all; }
-@media (max-width: 720px) {
-  .x-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .x-span-2, .x-span-3, .x-span-4, .x-span-5, .x-span-6, .x-span-8 { grid-column: span 2; }
-  .x-table-wrap { overflow-x: auto; }
+/* ---- phones ---------------------------------------------------------------
+   Above 700px the page is a 12-column grid and the sidebar is the navigation.
+   Below it, ONE column, full-width tiles, and the bottom tab bar is the
+   navigation (`.x-tabs`, shown at <=767px above).
+
+   Tested at 390px wide, which is where this went wrong before: the old rule
+   set `.x-form` to TWO columns, so every tile was half the screen and the
+   figures were crushed; `.x-todo li` kept its three-column grid, so the badge
+   squeezed the middle column until the text broke one word per line; and
+   `.x-fig` had no wrapping, so a long money figure overflowed its card. */
+@media (max-width: 700px) {
+  .x-form { grid-template-columns: minmax(0, 1fr); }
+  .x-span-2, .x-span-3, .x-span-4, .x-span-5, .x-span-6,
+  .x-span-8, .x-span-12 { grid-column: 1 / -1; }
+  .x-submit { grid-column: 1 / -1; }
+
+  /* A figure must be able to wrap rather than run out of its card. */
+  .x-fig { font-size: 24px; overflow-wrap: anywhere; }
+  .x-fig--sm { font-size: 19px; }
+  .x-stat, .x-card, .x-cardhead, .x-meta, .x-statnote { min-width: 0; }
+  .x-cardhead { flex-direction: column; align-items: stretch; gap: 8px; }
+  .x-meta { flex-wrap: wrap; }
+  .x-statnote, .x-note, .x-help, .x-todo p { overflow-wrap: anywhere; }
+
+  /* One column, the icon above the text, the badge underneath. */
+  .x-todo li { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .x-todo-ico { width: 32px; height: 32px; }
+  .x-todo li > .x-pill { justify-self: start; }
+
+  /* Buttons and PIN boxes are full-width targets, not 40px slivers. */
+  .x-actions { flex-direction: column; align-items: stretch; }
+  .x-actions .x-btn { width: 100%; }
+  .x-pin { width: 100%; }
+  .x-pin input { width: 100%; }
+
+  .x-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .x-mono { overflow-wrap: anywhere; }
+}
+
+/* Narrower still: the landing page's nav and hero. */
+@media (max-width: 420px) {
+  .x-app-wrap { padding: 0 12px 96px; }
+  .x-fig { font-size: 21px; }
+  .x-card { padding: 16px; }
 }

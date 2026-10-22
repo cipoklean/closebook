@@ -203,10 +203,14 @@ class TestAppShell:
         assert 'class="x-tabs"' in render_app(_ctx(), tab="home")
 
     def test_no_mockup_toasts_survive(self):
+        """Guards against leftover PLACEHOLDER copy, not against real error
+        messages that happen to be worded similarly. A real failure message
+        saying what did not happen is exactly what this page should have."""
         for tab in TABS:
             html = render_app(_ctx(), tab=tab)
-            assert "nothing was recorded" not in html.lower()
             assert "Mockup:" not in html
+            assert "lorem ipsum" not in html.lower()
+            assert "TODO:" not in html
 
     def test_no_hardcoded_currency_figures(self):
         """A number on /app must come from the context, not from ui.py.

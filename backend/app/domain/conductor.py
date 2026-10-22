@@ -29,6 +29,7 @@ and there is no path from a language model to here.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -217,6 +218,7 @@ def _budget_and_position(db: DB):
 def on_event(db: DB, *, source: str, dry_run: bool = True,
              execute: bool = True,
              client: Any = None,
+             budget_s: Optional[float] = None,
              executor_factory: Optional[Callable[..., Executor]] = None) -> Run:
     """Re-plan from live state, then execute whatever is clear.
 
@@ -286,7 +288,19 @@ def on_event(db: DB, *, source: str, dry_run: bool = True,
         row_ids = {_key(step): row.id for step, row in zip(clear, rows)}
         skipped_keys = {_key(step) for step in skipped}
 
+    # A WALL-CLOCK BUDGET. This runs inside a button press, and a payment that
+    # has not been sent after a few seconds is better left to the next event than
+    # made to hold the operator's screen hostage. Steps not reached are HELD with
+    # the reason, so the page never claims more than happened.
+    started = time.monotonic()
     for step in clear:
+        if budget_s is not None and (time.monotonic() - started) > budget_s:
+            run.verdicts.append(Verdict(
+                payable_number=step.payable_number or "", action=step.action,
+                outcome="HELD",
+                detail=("the plan ran out of time this pass — nothing was sent "
+                        "and the next event will pick it up")))
+            continue
         if _key(step) in skipped_keys:
             run.verdicts.append(Verdict(
                 payable_number=step.payable_number or "", action=step.action,

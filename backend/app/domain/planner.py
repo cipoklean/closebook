@@ -65,6 +65,12 @@ class Payable:
     due_date: Optional[datetime] = None
     payout_method: str = "LOCAL"
     depends_on_receivable: Optional[str] = None
+    #: An earlier attempt at this payment was returned or failed. A replacement
+    #: is a NEW operation, not a retry — the original request_id is spent — so
+    #: the plan must say "needs your approval", not "PAY". Without this the plan
+    #: promised a payment the conductor would refuse, and the two disagreed on
+    #: screen.
+    previous_attempt_failed: bool = False
     # Dependency state, resolved by the caller from the ledger:
     dependency_met: bool = True
     dependency_open_minor: int = 0
@@ -613,6 +619,17 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
             auto_limit_usd=budget.auto_pay_limit_usd)
 
         working[p.currency.upper()] = working.get(p.currency.upper(), 0) - move_minor
+
+        # A REPLACEMENT NEEDS A HUMAN. An earlier attempt at this bill was
+        # returned or failed, so this payment is a new operation with the old
+        # request_id spent. The plan says so HERE as well as the conductor
+        # enforcing it, because a plan that says "PAY" while the sender refuses
+        # is a plan that lies on screen.
+        if getattr(p, "previous_attempt_failed", False):
+            needs_approval = True
+            why = ("an earlier payment for this bill was returned or failed, so "
+                   "this is a replacement; it needs your approval and a new "
+                   "payment reference before it can be sent")
 
         plan.steps.append(Step(
             action=ACT_PAY,

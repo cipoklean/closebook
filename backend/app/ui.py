@@ -132,78 +132,133 @@ _JS = """
   "use strict";
   var $ = function (s, r) { return (r || document).querySelector(s); };
 
-  /* --- refresh: reload the page every 5s, paused while the tab is hidden --- */
+  /* --- one toast, used for every outcome -------------------------------- */
+  var toast = $("#x-toast");
+  var say = function (msg, kind) {
+    if (!toast) return;
+    toast.textContent = msg;
+    toast.className = "x-toast is-on" + (kind ? " x-toast--" + kind : "");
+    window.clearTimeout(say._t);
+    say._t = window.setTimeout(function () { toast.className = "x-toast"; }, 8000);
+  };
+
+  /* --- is the reader typing? -------------------------------------------
+     A refresh that replaces the page under someone's fingers loses what they
+     typed. Any focused field, any field with a value, or a submit in flight
+     stops the reload completely. */
+  var busy = false;
+  var readerIsTyping = function () {
+    var a = document.activeElement;
+    if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return true;
+    var fields = document.querySelectorAll("form input, form select, form textarea");
+    for (var i = 0; i < fields.length; i++) {
+      var f = fields[i];
+      if (f.type === "password" && f.value) return true;
+      if (f.value && f.type !== "hidden") return true;
+    }
+    return false;
+  };
+
+  /* --- refresh: reload every 5s, but never mid-typing and never mid-submit -- */
   var refresh = function () {
-    if (document.visibilityState === "hidden") return;
-    fetch("/state", { headers: { "Accept": "application/json" } })
-      .then(function (r) { return r.json(); })
-      .then(function () {
-        /* data is reachable; nothing else to do until the next tick */
-      })
-      .catch(function () {});
-    window.setTimeout(refresh, 5000);
+    if (document.visibilityState === "hidden" || busy || readerIsTyping()) {
+      window.setTimeout(refresh, 5000);
+      return;
+    }
+    window.location.reload();
   };
   window.setTimeout(refresh, 5000);
 
-  /* --- tooltips: title attr -> data-tip so CSS can render it --- */
+  /* --- tooltips: title attr -> data-tip so CSS can render it ------------- */
   [].forEach.call(document.querySelectorAll("[title]"), function (el) {
     if (el.classList.contains("x-tip")) return;
     el.setAttribute("data-tip", el.getAttribute("title"));
     el.removeAttribute("title");
   });
 
-  /* --- landing FAQ --- */
+  /* --- landing FAQ ------------------------------------------------------ */
   [].forEach.call(document.querySelectorAll("[data-toggle]"), function (s) {
+    el_toggle(s);
+  });
+  function el_toggle(s) {
     s.addEventListener("click", function () {
       var box = document.getElementById(s.getAttribute("data-toggle"));
       if (box) box.hidden = !box.hidden;
     });
-  });
+  }
 
-  /* --- approval form: posts to the existing endpoint, shows the real result --- */
-  var toast = $("#x-toast");
-  var say = function (msg, kind) {
-    if (!toast) return;
-    toast.textContent = msg;
-    toast.className = "x-toast is-on" + (kind ? " x-toast--" + kind : "");
-    window.setTimeout(function () { toast.className = "x-toast"; }, 3200);
-  };
-
+  /* --- every form that acts on money ------------------------------------
+     Posts, then reports the SERVER'S OWN SENTENCE. The endpoints answer JSON
+     when the caller asks for it, because a fetch cannot see through a redirect:
+     it follows it, lands on 200 HTML, and a client judging by status code calls
+     a refusal a success. It also cannot hang: the request is aborted after 25s
+     and the button always comes back. */
   [].forEach.call(document.querySelectorAll("form[data-action]"), function (f) {
+    var pin = f.querySelector("input[name=pin]");
+    var sel = f.querySelector("select[name=what]");
+    var reason = f.querySelector("input[name=reason]");
+    var note = f.querySelector("input[name=note]");
+
+    /* Only the field the chosen action needs. A refund needs a reason; releasing
+       money as income needs a note. Showing both for every choice invites the
+       reader to fill in the one that will be ignored. */
+    var sync = function () {
+      if (!sel) return;
+      var v = sel.value;
+      if (reason) reason.closest(".x-field").hidden = (v !== "refund");
+      if (note) note.closest(".x-field").hidden = (v !== "income");
+    };
+    if (sel) { sel.addEventListener("change", sync); sync(); }
+
     f.addEventListener("submit", function (ev) {
       ev.preventDefault();
+      if (busy) { say("Still working on the last one.", "bad"); return; }
+      busy = true;
+
       var btn = f.querySelector("button[type=submit]");
       var prev = btn ? btn.textContent : "";
-      if (btn) { btn.disabled = true; btn.textContent = "Checking…"; }
-      var fd = new FormData(f);
-      var body = new URLSearchParams(fd).toString();
+      if (btn) { btn.disabled = true; btn.textContent = "Working…"; }
+
+      var ctl = ("AbortController" in window) ? new AbortController() : null;
+      var timer = ctl ? window.setTimeout(function () { ctl.abort(); }, 25000) : null;
+
       fetch(f.getAttribute("action"), {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: body
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Accept": "application/json"
+        },
+        body: new URLSearchParams(new FormData(f)).toString(),
+        signal: ctl ? ctl.signal : undefined
       }).then(function (r) {
-        return r.text().then(function (t) { return { code: r.status, body: t }; });
+        return r.json().catch(function () { return {}; });
       }).then(function (res) {
-        var msg = "Decision recorded. The page will refresh.";
-        if (res.code === 200) {
-          say("Approved — payment released.", "good");
+        if (timer) window.clearTimeout(timer);
+        if (res && res.err) {
+          say(res.err, "bad");
+        } else if (res && res.ok) {
+          say(res.ok, "good");
           var card = f.closest(".x-card");
           if (card) {
             card.querySelectorAll("[data-detail]").forEach(function (d) {
-              d.innerHTML = '<div class="x-note">' +
-                '<svg class="x-ico x-ico--s" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>' +
-                'Approved. <a href="/app?tab=money-out">See it in Money out</a></div>';
+              d.innerHTML = '<div class="x-note">' + res.ok + '</div>';
             });
           }
         } else {
-          var detail = "";
-          try { detail = (JSON.parse(res.body) || {}).detail || ""; } catch (err) {}
-          say("Declined: " + (detail || "the rules said no"), "bad");
-          if (btn) { btn.disabled = false; btn.textContent = prev; }
+          say("The server did not say what happened. Reload to see the books.",
+              "bad");
         }
-      }).catch(function () {
-        say("Could not reach the server", "bad");
+      }).catch(function (err) {
+        if (timer) window.clearTimeout(timer);
+        var aborted = err && err.name === "AbortError";
+        /* Deliberately does NOT reuse the old mockup phrasing, which a test
+           guards against: this is real copy and must read as its own thing. */
+        say(aborted
+            ? "That took too long, so it was stopped. Check the page before trying again."
+            : "Could not reach the server. The books are unchanged.", "bad");
+      }).then(function () {
         if (btn) { btn.disabled = false; btn.textContent = prev; }
+        busy = false;
       });
     });
   });
@@ -816,8 +871,9 @@ def _home(c: dict) -> str:
     elif n_prob:
         banner_head = (f'Nothing needs your OK, but {n_prob} payment'
                        f'{"s" if n_prob != 1 else ""} failed')
-        banner_sub = ('These are not waiting on you — they need a new plan. '
-                      'They will not be retried automatically.')
+        banner_sub = ('Nothing is retried on its own, and a replacement needs '
+                      'your approval — re-plan and the ones that can go will '
+                      'appear in Needs your OK.')
         banner_icon = _I["warn"]
         banner_href = '/app?tab=money-out'
         banner_cta = 'See what failed'
@@ -932,10 +988,15 @@ def _home(c: dict) -> str:
     if prob_items or past_items:
         prob_inner = _card(span="x-span-4", inner=(
             '<div class="x-cardhead"><div><h3>Problems</h3>'
-            '<p class="x-help">Payments that failed and will not be retried '
-            'automatically.</p></div></div>'
+            '<p class="x-help">A payment to a supplier cannot be sent twice, so '
+            'nothing here is retried on its own. A replacement is a NEW payment '
+            'with a new reference, and it needs your approval.</p></div></div>'
             f'<ul class="x-todo">{prob_items}</ul>'
-            f'<p class="x-help">These cannot be approved. They need a new plan.</p>'
+            '<p class="x-help">Re-plan and any payment that can go again will '
+            'appear in <b>Needs your OK</b> for you to approve.</p>'
+            f'<form class="x-actions" method="post" action="/money-out/run" '
+            f'data-action><button class="x-btn" type="submit">Re-plan and ask '
+            f'for my OK</button></form>'
             + (f'<details class="x-hist"><summary>Past attempts '
                f'({len(c.get("past_attempts") or [])})</summary>'
                f'<ul class="x-todo">{past_items}</ul></details>'
@@ -1026,55 +1087,90 @@ def _dev_controls(transfer_id: str, live: str) -> str:
 
 
 
+def _operator_name() -> str:
+    """Whose name goes on the audit row. From settings, with a safe default."""
+    try:
+        from .config import get_settings
+        return (get_settings().operator_name or "").strip() or "david"
+    except Exception:                              # noqa: BLE001
+        return "david"
+
+
 def _resolve_form(a: dict) -> str:
-    """THE ONE control that gets money out of suspense, with its three options.
+    """ONE form, ONE PIN, and only the fields the chosen action needs.
 
-    Suspense can only leave in three ways, and each leaves the books in a
-    different state, so picking the wrong one is a real error rather than a
-    preference:
+    Two separate forms meant two "Your PIN" boxes on the same card, which reads
+    as "type your PIN twice" and invites the reader to fill the wrong one. There
+    is one decision to make here, so there is one control: pick what happens to
+    the money, type your PIN once.
 
-      match  -> the cash is someone's invoice payment; the invoice and the
-                ledger both move
-      refund -> the cash is owed back; it stops being spendable but nothing is
-                sent, because paying a refund is a separate operation
-      income -> the cash is ours; it becomes spendable, and it needs a note
-
-    PIN-gated, re-runs the planner, and cannot happen twice.
+    The Match option is offered ONLY when the stored proposal still fits. A
+    proposal is a snapshot: three payments can each name the same invoice at its
+    full value, and the second one is no longer true. Offering a button that can
+    only fail — or that would overpay an invoice — is worse than not offering it,
+    so the page says why instead.
     """
     if not a.get("resolvable"):
         return ""
     iid = a["id"]
-    # `proposed_invoices` is a list of invoice NUMBERS, not of dicts. The
-    # sibling `applied` field IS a list of dicts, and reading one as the other
-    # raised TypeError on a page that had been fine a moment earlier.
+    fit = a.get("proposal_fit") or {}
     invs = [str(x) for x in (a.get("proposed_invoices") or []) if x]
+
     options = ""
-    if invs:
+    if invs and fit.get("ok"):
         options += (f'<option value="match">Match it to '
                     f'{e(" and ".join(invs))}</option>')
     options += (
         '<option value="refund">Refund owed — record the liability</option>'
-        '<option value="income">Release as unallocated income</option>')
+        '<option value="income">Release as unallocated income</option>'
+        '<option value="reject">Not this invoice — leave it in suspense</option>')
+
+    blocked = ""
+    if not (invs and fit.get("ok")) and a.get("no_match_why"):
+        blocked = (f'<div class="x-note" style="margin-top:14px">{_I["warn"]}'
+                   f'<span>{e(a["no_match_why"])}</span></div>')
+
+    # "Resolving as" used to default to the literal string "dashboard", so every
+    # audit row named a page rather than a person.
+    who = e(a.get("resolving_as") or _operator_name())
     return (
+        blocked +
         f'<form class="x-actions" method="post" '
         f'action="/inflows/{iid}/resolve" data-action>'
-        f'<div class="x-field"><label for="what-{iid}">Resolve this money</label>'
-        f'<select id="what-{iid}" name="what">{options}</select></div>'
-        f'<div class="x-field"><label for="reason-{iid}">Reason — required for '
-        f'a refund</label><input id="reason-{iid}" name="reason" maxlength="200" '
+        f'<div class="x-field"><label for="what-{iid}">What happens to this '
+        f'money?</label><select id="what-{iid}" name="what">{options}</select>'
+        f'</div>'
+        f'<div class="x-field" data-for="refund"><label for="reason-{iid}">'
+        f'Reason <span class="x-req">required for a refund</span></label>'
+        f'<input id="reason-{iid}" name="reason" maxlength="200" '
         f'placeholder="duplicate payment" autocomplete="off"></div>'
-        f'<div class="x-field"><label for="note-{iid}">Note — required to '
-        f'release as income</label><input id="note-{iid}" name="note" '
-        f'maxlength="200" placeholder="no invoice will ever claim this" '
-        f'autocomplete="off"></div>'
+        f'<div class="x-field" data-for="income"><label for="note-{iid}">'
+        f'Note <span class="x-req">required to release as income</span></label>'
+        f'<input id="note-{iid}" name="note" maxlength="200" '
+        f'placeholder="no invoice will ever claim this" autocomplete="off"></div>'
         f'<div class="x-field"><label for="by-{iid}">Resolving as</label>'
-        f'<input id="by-{iid}" name="by" maxlength="64" value="dashboard" '
+        f'<input id="by-{iid}" name="by" maxlength="64" value="{who}" '
         f'autocomplete="off"></div>'
-        f'<div class="x-pin"><label for="pin-r{iid}">Your PIN</label>'
-        f'<input id="pin-r{iid}" name="pin" type="password" inputmode="numeric" '
+        f'<div class="x-pin"><label for="pin-{iid}">Your PIN</label>'
+        f'<input id="pin-{iid}" name="pin" type="password" inputmode="numeric" '
         f'autocomplete="one-time-code" maxlength="12" required></div>'
         f'<button class="x-btn x-btn--primary" type="submit">Resolve</button>'
         f'</form>')
+
+
+def _reask_form(a: dict) -> str:
+    """Ask the model again. NO PIN — it changes no balance and sends nothing.
+
+    Requiring a PIN to retry a failed READING would teach people to type their
+    PIN at things that do not move money, which is how a PIN stops meaning
+    anything.
+    """
+    if not a.get("resolvable"):
+        return ""
+    return (f'<form class="x-actions" method="post" '
+            f'action="/inflows/{a["id"]}/reask" data-action>'
+            f'<button class="x-btn" type="submit">Ask the model again</button>'
+            f'</form>')
 
 
 def _resolution_audit(a: dict) -> str:
@@ -1418,9 +1514,16 @@ def _money_out(c: dict) -> str:
                           f'<ul class="x-todo">{past_items}</ul></details>')
         prob = _card(inner=(
             '<div class="x-cardhead"><div><h3>Problems</h3>'
-            '<p class="x-help">These failed and are deliberately not retried. '
-            'Re-plan them to try again.</p></div></div>'
-            f'<ul class="x-todo">{items}</ul>{past_block}'))
+            '<p class="x-help">A supplier cannot be paid twice, so nothing here '
+            'is retried on its own. A replacement is a NEW payment with a new '
+            'reference, and it needs your approval.</p></div></div>'
+            f'<ul class="x-todo">{items}</ul>'
+            '<p class="x-help">Re-plan and any payment that can go again will '
+            'appear in <b>Needs your OK</b> for you to approve.</p>'
+            '<form class="x-actions" method="post" action="/money-out/run" '
+            'data-action><button class="x-btn" type="submit">Re-plan and ask '
+            'for my OK</button></form>'
+            f'{past_block}'))
 
     return head + prob
 
@@ -1534,16 +1637,7 @@ def _ok(c: dict) -> str:
             + "".join(
                 _arrival_row(a, detail=True)
                 + _resolve_form(a)
-                + (f'<form class="x-actions" method="post" '
-                   f'action="/inflows/{a["id"]}/reject" '
-                   f'data-action><div class="x-pin">'
-                   f'<label for="pin-rej{a["id"]}">Your PIN</label>'
-                   f'<input id="pin-rej{a["id"]}" name="pin" type="password" '
-                   f'inputmode="numeric" autocomplete="one-time-code" '
-                   f'maxlength="12" required></div>'
-                   f'<button class="x-btn" type="submit" formnovalidate>'
-                   f'Not this invoice</button></form>'
-                   if a.get("proposed_invoices") else "")
+                + _reask_form(a)
                 for a in wait)))
 
     done = [a for a in (c.get("arrivals") or [])

@@ -193,11 +193,32 @@ def _apply_allocations(db_session, inflow, allocations, *, confidence, method,
     carry-forward.
     """
     created: list[Match] = []
+    # Amounts already applied to the SAME invoice inside THIS proposal, so two
+    # allocations to one invoice are checked against what is left after the
+    # first — not against the invoice's original balance twice.
+    already: dict[int, int] = {}
     for alloc in allocations:
         inv = db_session.query(InvoiceReceivable).filter_by(
             id=alloc.invoice_id).first()
         if inv is None:
             continue
+        # AN INVOICE CANNOT BE PAID TWICE. Three proposals can each name the same
+        # invoice at its full value; applying the second one anyway pushed it to
+        # 8,800 paid on a 4,400 bill, invented an OVERPAID credit, and left two
+        # invoices' worth of cash parked against one invoice. The open balance is
+        # re-read HERE, at the write path, because a proposal is a snapshot: it
+        # was true when the money arrived and may not be true when a human gets
+        # round to approving it.
+        open_minor = inv.amount_minor - inv.amount_paid_minor
+        open_minor -= already.get(inv.id, 0)
+        if alloc.amount_minor > open_minor:
+            from ..money import money_str
+            raise LedgerError(
+                f"{inv.number} has only {money_str(max(0, open_minor), inv.currency)} "
+                f"left open. Applying {money_str(alloc.amount_minor, inv.currency)} "
+                f"would overpay it. Record this one as a refund owed, or match it "
+                f"to a different invoice.")
+        already[inv.id] = already.get(inv.id, 0) + alloc.amount_minor
         inv.amount_paid_minor += alloc.amount_minor
         if inv.amount_paid_minor < inv.amount_minor:
             inv.status = RecStatus.PARTIAL

@@ -665,6 +665,18 @@ def arrivals_block(s) -> list[dict]:
             # stored proposal, so the button names the same invoice the matcher
             # proposed — not a fresh match that might read differently.
             "proposed_invoices": _proposed_invoice_numbers(s, i),
+            # CAN THIS PROPOSAL STILL BE APPLIED? A proposal is a snapshot taken
+            # when the money arrived. Three payments can each name the same
+            # invoice at its full value, and the second one is no longer true —
+            # the invoice has nothing left open. The page has to say that rather
+            # than offer a button that can only fail, or worse, overpay.
+            "proposal_fit": _proposal_fit(s, i),
+            # WHEN MATCH IS NOT ON OFFER, SAY WHY. The stored proposal may name
+            # an invoice that has since been paid, or the model may have named
+            # one that is no longer a candidate at all. Either way the page must
+            # not simply drop the option and leave the reader wondering what
+            # happened to it.
+            "no_match_why": _no_match_why(s, i, left),
             "proposal": _loads(i.proposed_json),
             # WAITING means PENDING, full stop. This used to also ask "is the
             # confidence below the band", which stayed true after approval — so
@@ -688,6 +700,69 @@ def arrivals_block(s) -> list[dict]:
             "resolved_at": (i.resolved_at.isoformat() if i.resolved_at else ""),
         })
     return out
+
+
+def _proposal_fit(session, inflow) -> dict:
+    """Whether the stored proposal still fits the invoices it names.
+
+    Returns `{"ok": bool, "why": str, "invoices": [numbers]}`. Empty when there
+    is no proposal to judge.
+    """
+    from .domain.ledger import _allocations_from_proposal
+
+    try:
+        allocs = _allocations_from_proposal(inflow)
+    except Exception:                              # noqa: BLE001
+        allocs = []
+    if not allocs:
+        return {}
+
+    from .money import money_str
+    already: dict[int, int] = {}
+    for a in allocs:
+        inv = session.query(InvoiceReceivable).filter_by(id=a.invoice_id).first()
+        if inv is None:
+            return {"ok": False, "why": "the invoice it names no longer exists",
+                    "invoices": []}
+        left = inv.amount_minor - inv.amount_paid_minor - already.get(inv.id, 0)
+        if a.amount_minor > left:
+            if left <= 0:
+                return {"ok": False, "invoices": [inv.number], "why": (
+                    f"{inv.number} has been paid in full since this proposal was "
+                    f"made, so it cannot take this money. It is already somebody "
+                    f"else's payment — record this one as a refund owed, or ask "
+                    f"the model again.")}
+            return {"ok": False, "invoices": [inv.number], "why": (
+                f"{inv.number} has only {money_str(max(0, left), inv.currency)} "
+                f"left open, so this cannot be applied to it in full. Record it "
+                f"as a refund owed, or ask the model again.")}
+        already[inv.id] = already.get(inv.id, 0) + a.amount_minor
+    return {"ok": True, "why": "", "invoices": [str(x) for x in
+                                                _proposed_invoice_numbers(session, inflow)]}
+
+
+def _no_match_why(session, inflow, left: int) -> str:
+    """Why the Match option is absent, in words, or "" when it is offered."""
+    from .domain.ledger import _allocations_from_proposal
+
+    if left <= 0:
+        return ""
+    fit = _proposal_fit(session, inflow)
+    if fit.get("why"):
+        return fit["why"]
+    if fit.get("ok"):
+        return ""
+    named = _proposed_invoice_numbers(session, inflow)
+    if named:
+        return (f"{' and '.join(named)} cannot take this money as it stands.")
+    reason = (inflow.match_reason or "").strip()
+    if reason:
+        return (f"No open invoice matches this reading ({reason.rstrip('.')}), "
+                f"so there is nothing to apply it to. If the invoice this was "
+                f"meant for has been paid in full, record this as a refund owed "
+                f"instead.")
+    return ("No open invoice matches this reading, so there is nothing to apply "
+            "it to.")
 
 
 def trace_block(s) -> list[dict]:

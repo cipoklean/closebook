@@ -24,7 +24,8 @@ from typing import Optional
 from ..db import DB
 from ..money import money_str
 from ..models import (
-    InvoicePayable, InvoiceReceivable, PlanStep, RecStatus, StepStatus, StepType,
+    InvoicePayable, InvoiceReceivable, PayStatus, PlanStep, RecStatus, StepStatus,
+    StepType,
 )
 from .planner import (
     ACT_CHASE, ACT_DEFER, ACT_ESCALATE, ACT_FX, ACT_PAY, CashPosition, Payable,
@@ -40,10 +41,32 @@ DEMO_RATES: dict[str, Decimal] = {
 }
 
 
+def _attempt_failed(session, number: str) -> bool:
+    """Whether an earlier payment for this bill was returned or failed.
+
+    Read from `plan_store`, which owns what "retired" means, so the plan and the
+    conductor cannot disagree about whether a payment may go out on its own.
+    """
+    from .planner import ACT_PAY, Step
+    from .plan_store import has_retired_attempt
+
+    return has_retired_attempt(session, Step(action=ACT_PAY, reason="",
+                                             payable_number=number))
+
+
 def payables_from_db(session) -> list[Payable]:
-    """Read the payables and resolve each dependency against the ledger."""
+    """The payables that STILL NEED PAYING, with each dependency resolved.
+
+    A settled bill is not a payable. PO-2001 was paid, the ledger had taken the
+    cash out and the invoice behind it was closed — and the planner still emitted
+    a DEFER for it every run, so the page listed a paid bill under "On hold" with
+    a reason about an invoice that had already landed. Anything already PAID
+    leaves the plan entirely.
+    """
     out: list[Payable] = []
     for p in session.query(InvoicePayable).all():
+        if p.status == PayStatus.PAID:
+            continue
         dep = p.depends_on_receivable_id
         dep_num = None
         dep_met = True
@@ -57,6 +80,7 @@ def payables_from_db(session) -> list[Payable]:
                 dep_ccy = r.currency
                 dep_met = (r.status == RecStatus.PAID)
         out.append(Payable(
+            previous_attempt_failed=_attempt_failed(session, p.number),
             number=p.number,
             supplier=p.supplier.name if p.supplier else "",
             currency=p.currency,

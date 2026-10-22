@@ -63,6 +63,10 @@ class Settings(BaseSettings):
 
     # Demo: shared PIN gating the approval endpoints.
     demo_approver_pin: SecretStr = Field(default=SecretStr(""))
+    # WHO IS DOING THE APPROVING. Audit rows used to be stamped "dashboard",
+    # which names a page rather than a person — the one field an auditor actually
+    # needs was the one field that could not answer "who decided this?".
+    operator_name: str = "david"
 
     # App
     closebook_hmac_secret: SecretStr = Field(default=SecretStr(""))

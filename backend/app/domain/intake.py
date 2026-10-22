@@ -541,3 +541,82 @@ def forget_accounts_cache() -> None:
     """Called after creating an account so the next render sees it."""
     _ACCOUNTS_CACHE["at"] = 0.0
     _ACCOUNTS_CACHE["items"] = []
+
+
+def reask_model(db, inflow_id: int, *, llm=None):
+    """Ask the model about an inflow AGAIN, without touching the cash.
+
+    This exists because the model's availability is not the operator's problem:
+    inflow 3 was escalated with "model proposed nothing (offline or provider
+    unavailable)" while the provider was having a bad afternoon, and from then on
+    the page showed a stale sentence about a model that had never actually been
+    asked twice. A wrong answer from a down provider is not a fact about the
+    payment.
+
+    It re-reads the reference, re-runs the whole matcher (deterministic tiers
+    first, then the model), and REPLACES the stored proposal. It posts NO ledger
+    entries: the cash was booked when the money arrived, and re-asking is not a
+    second receipt. Nothing already applied is undone — an inflow with no
+    suspense left is refused, because there is nothing to re-decide.
+
+    Returns `(result, why_not)`.
+    """
+    from .ledger import suspense_for
+    from .matching import match_inflow
+
+    with db.session_scope() as s:
+        inflow = s.get(Inflow, inflow_id)
+        if inflow is None:
+            return None, "That payment no longer exists."
+        if suspense_for(s, inflow) <= 0:
+            return None, ("Nothing is left in suspense on this payment, so there "
+                          "is nothing to re-read.")
+        if getattr(inflow, "review_state", None) in ("REFUND_OWED",
+                                                     "RELEASED_INCOME"):
+            return None, ("This payment has been resolved, so re-reading the "
+                          "reference would not change where the money is.")
+
+        candidates = candidates_from_db(s)
+        if not candidates:
+            return None, ("There are no open invoices to match against. Add the "
+                          "invoice first, then ask again.")
+        if llm is None:
+            llm, why = matcher_from_settings()
+            if llm is None:
+                return None, f"no model is configured: {why}"
+
+        # A MODEL FAILURE MUST NOT DESTROY THE GOOD READING. If the provider is
+        # down, `match_inflow` still returns the deterministic tiers' answer —
+        # exactly as it would have when the money first arrived.
+        result = match_inflow(inflow.amount_minor, inflow.currency, {
+            "payer_name": inflow.payer_name or "",
+            "reference_raw": inflow.reference_raw or "",
+        }, candidates, llm=llm)
+
+        inflow.match_status = (MatchStatus[result.status]
+                               if result.status in MatchStatus.__members__
+                               else MatchStatus.AMBIGUOUS)
+        inflow.match_method = result.method
+        inflow.match_confidence = float(result.confidence or 0.0)
+        inflow.match_reason = result.reason
+        if result.status == "PROPOSED":
+            import json as _json
+            inflow.proposed_json = _json.dumps({
+                "status": result.status,
+                "confidence": result.confidence,
+                "method": result.method,
+                "reason": result.reason,
+                "evidence": result.evidence,
+                "allocations": [{"invoice_id": a.invoice_id,
+                                 "amount_minor": a.amount_minor}
+                                for a in result.allocations],
+            }, default=str)
+            inflow.review_state = "PENDING"
+            inflow.reviewed_at = None
+            inflow.reviewed_by = None
+        else:
+            inflow.proposed_json = None
+            inflow.review_state = None
+        src = getattr(getattr(llm, "cfg", None), "model", "") or ""
+        _trace_model(s, inflow=inflow, result=result, llm=llm, why_not="")
+        return result, src
