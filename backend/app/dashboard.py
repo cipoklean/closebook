@@ -22,8 +22,8 @@ from .domain.policy import available_cash_minor
 from .money import money_str
 from .models import (
     AgentTrace, Approval, ApprovalStatus, Customer, Inflow, InvoicePayable,
-    InvoiceReceivable, MatchStatus, PayStatus, PlanStep, StepStatus, StepType,
-    Supplier,
+    InvoiceReceivable, Match, MatchStatus, PayStatus, PlanStep, StepStatus,
+    StepType, Supplier,
 )
 
 log = logging.getLogger("closebook.dashboard")
@@ -172,7 +172,13 @@ def money_block(s, cash: dict, budget: dict, plan=None,
         # the arithmetic because the ledger has already taken it out of cash.
         if where == "in_flight":
             in_flight[f_ccy] = in_flight.get(f_ccy, 0) + f_amt
-        elif where == "promised":
+        elif where == "promised" and f_src != "unfunded":
+            # An UNFUNDED payable is NOT counted as a promise in its own
+            # currency. We hold none of that currency and the plan has no
+            # conversion for it, so costing it in that currency invented a
+            # shortfall in a currency nobody was going to spend: a EUR 9,000
+            # supplier reported as "Short by EUR 9,012.85" while USD 15,250 sat
+            # in the account. It is surfaced separately, in plain words.
             promised[f_ccy] = promised.get(f_ccy, 0) + f_amt
 
         line = {
@@ -578,6 +584,53 @@ def incidents_block(incidents: list | None) -> list[dict]:
 
 
 # ------------------------------------------------------------- trace
+# ------------------------------------------------------- money that arrived
+def arrivals_block(s) -> list[dict]:
+    """Every deposit we took in, with the verdict that was recorded on it.
+
+    Read straight off `inflow` — method, confidence and reason are STORED, so
+    the three tabs that show this cannot disagree, and nothing re-derives a
+    decision after the fact. `awaiting_human` is the honest gate: a match below
+    the auto-apply band has moved the cash and the invoice but still needs a
+    person, so it belongs in "Needs your OK" as well as in Money in.
+    """
+    from .domain.policy import MATCH_CONFIDENCE_AUTO
+
+    rows = s.query(Inflow).order_by(Inflow.id.desc()).limit(60).all()
+    by_inflow: dict[int, list] = {}
+    for m in s.query(Match).all():
+        inv = s.query(InvoiceReceivable).filter_by(id=m.invoice_receivable_id).first()
+        by_inflow.setdefault(m.inflow_id, []).append({
+            "invoice": inv.number if inv else "?",
+            "applied_minor": m.amount_applied_minor,
+            "currency": inv.currency if inv else "",
+        })
+    out = []
+    for i in rows:
+        conf = i.match_confidence
+        out.append({
+            "id": i.id,
+            "currency": i.currency,
+            "amount_minor": i.amount_minor,
+            "payer": i.payer_name or "",
+            "reference": i.reference_raw or "",
+            "has_reference": bool((i.reference_raw or "").strip()),
+            "deposit_id": i.airwallex_deposit_id or "",
+            "match_status": i.match_status.value,
+            "method": i.match_method or "",
+            "confidence": conf,
+            "reason": i.match_reason or "",
+            "applied": by_inflow.get(i.id, []),
+            # "Needs your OK" is not the same question as "unmatched": a
+            # part-payment at 0.85 is applied AND needs a human to chase it.
+            "awaiting_human": (conf is not None
+                               and conf < MATCH_CONFIDENCE_AUTO
+                               and i.match_status != MatchStatus.MATCHED),
+            "settled_match": i.match_status == MatchStatus.MATCHED,
+        })
+    return out
+
+
 def trace_block(s) -> list[dict]:
     rows = s.query(AgentTrace).order_by(AgentTrace.id.desc()).limit(40).all()
     return [{
@@ -805,10 +858,21 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
         _ws = _workspace_snapshot(s)
         _st = _describe(_read_settings(s))
 
+        # The global accounts a simulated deposit can land in. Cached for a
+        # minute: rendering a page must not block on Airwallex, and a cold
+        # failure shows an empty list with an explanation rather than an error.
+        try:
+            from .domain.intake import accounts_cached
+            money_in_accounts = accounts_cached(get_default_db())
+        except Exception:
+            log.warning("could not list global accounts")
+            money_in_accounts = []
+
         return {
             "budget": budget,
             "settings": _st,
             "workspace": _ws,
+            "money_in_accounts": money_in_accounts,
             "money": money,
             "cash": rep.cash_by_currency,
             "suspense": rep.suspense_by_currency,
@@ -825,6 +889,8 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
             "incidents": incidents_block(incidents),
             "agent_trace": trace_block(s),
             "unmatched": unmatched_block(s),
+            "arrivals": arrivals_block(s),
+            "inflows_waiting": [a for a in arrivals_block(s) if a["awaiting_human"]],
             "allowed_tools": sorted(ALLOWED_TOOLS),
         }
     finally:

@@ -34,9 +34,25 @@ class Simulation:
 
     # --- deposits -------------------------------------------------------
     def deposit(self, *, global_account_id: str, amount_minor: int,
-                currency: str, payer_name: Optional[str] = None) -> dict:
-        """Simulate a deposit into a global account. Returns PENDING status,
-        but the balance is already credited — re-read before deciding."""
+                currency: str, payer_name: Optional[str] = None,
+                reference: Optional[str] = None,
+                status: Optional[str] = None) -> dict:
+        """Simulate a deposit into a global account.
+
+        `reference` is the free-text the operator typed, and it is the whole
+        point of the exercise: a MESSY reference is what makes the matcher earn
+        its keep. It is passed through untouched — no trimming, no normalising,
+        no "helpfully" filling in a blank one.
+
+        Confirmed against the Airwallex docs (2026-10-22) that the endpoint
+        accepts: amount, global_account_id, payer_bankname, payer_country,
+        payer_name, reference, statement_ref, status. `status` is one of
+        PENDING / REJECTED / SETTLED and defaults to SETTLED, so it is sent
+        explicitly and only when asked for.
+
+        NOTE: still no `currency` field — the deposit lands in the global
+        account's own currency and a currency sent here is silently discarded.
+        """
         from ..money import to_major_str
         body: dict = {
             "global_account_id": global_account_id,
@@ -44,7 +60,10 @@ class Simulation:
         }
         if payer_name:
             body["payer_name"] = payer_name
-        # NOTE: no currency field — it lands in the account's currency.
+        if reference is not None:
+            body["reference"] = reference
+        if status:
+            body["status"] = status
         return self._c.call("POST", "/api/v1/simulation/deposit/create",
                             json_body=body, is_simulation=True)
 

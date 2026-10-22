@@ -375,3 +375,36 @@ class TestASameCurrencyBillIsNotAConversion:
         assert step.action == ACT_DEFER
         # costed in the FUNDING currency, which is USD
         assert "USD" in step.blockers[-1]
+
+
+class TestAnUnfundableBillIsNotAShortfallInItsOwnCurrency:
+    """A EUR bill we hold no EUR for and have no conversion for must NOT be
+    reported as "Short by EUR 9,012.85".
+
+    That number was invented: nobody was going to spend EUR out of a GBP/USD
+    account, and it made a page with USD 15,250 in it read as overdrawn.
+    """
+
+    def test_an_unfunded_bill_does_not_create_a_shortfall_in_its_currency(self, db):
+        _cash("USD", 1_500_000)
+        _payable("PO-EUR", "EUR", 900_000)          # a currency we do not hold
+        m = build_context([])["money"]
+        assert "EUR" not in m["shortfall"], m["shortfall"]
+        assert "EUR" not in m["promised"], m["promised"]
+        assert m["unfunded"], "it must still be surfaced, in plain words"
+        assert "no conversion is planned" in m["unfunded"][0]["note"]
+
+    def test_a_FUNDED_foreign_bill_IS_costed_in_its_funding_currency(self, db):
+        """The guard must not switch off the case the funding lookup exists for."""
+        _cash("USD", 1_500_000)
+        _payable("PO-EUR", "EUR", 90_000)
+        m = build_context([])["money"]
+        assert m["promised"].get("USD"), "costed in the currency that buys it"
+        assert "EUR" not in m["promised"]
+
+    def test_the_free_headline_says_short_only_when_a_budget_currency_is_short(self, db):
+        _cash("USD", 1_500_000)
+        _payable("PO-EUR", "EUR", 900_000)
+        html = render_app(build_context([]), tab="home")
+        assert "Short by EUR" not in html
+        assert "Not costed here" in html

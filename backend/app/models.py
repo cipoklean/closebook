@@ -161,6 +161,13 @@ class Inflow(Base):
     reference_raw: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     match_status: Mapped[MatchStatus] = mapped_column(Enum(MatchStatus), default=MatchStatus.UNMATCHED)
+    # HOW it was matched, recorded with the inflow so a view never has to
+    # recompute a decision or dig a trace out of agent_trace. The tier that
+    # decided, its confidence, and the sentence it produced — the same values
+    # the ledger re-checked before applying anything.
+    match_method: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    match_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    match_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class Match(Base):
@@ -289,4 +296,11 @@ class WorkspaceSettings(Base):
     auto_pay_limit_minor: Mapped[int] = mapped_column(BigInteger, default=250_000)
     # How much FX drift the plan leaves as headroom, in percent.
     fx_tolerance_pct: Mapped[float] = mapped_column(Float, default=0.50)
+    # Deposits created BEFORE this are the account's history, not this
+    # workspace's money. Set when the workspace is created and reset by Start
+    # fresh. Without it, a new workspace inherits every deposit the sandbox
+    # account has ever received — a real integration starts from a date, and so
+    # does this one.
+    deposits_from: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

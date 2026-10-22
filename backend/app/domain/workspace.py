@@ -24,7 +24,7 @@ from typing import Optional
 from ..models import (
     AgentRun, AgentTrace, Approval, BalanceSnapshot, Customer, Inflow,
     InvoicePayable, InvoiceReceivable, LedgerEntry, Match, PayStatus, PayoutMethod,
-    PlanStep, RecStatus, Supplier, WebhookEvent,
+    PlanStep, RecStatus, Supplier, WebhookEvent, WorkspaceSettings,
 )
 from ..money import money_str, to_minor, to_major_str
 
@@ -331,6 +331,11 @@ def archive_and_reset(db, *, confirm: str, backup_dir: Path | None = None) -> Ar
 
     cleared: dict[str, int] = {}
     with db.session_scope() as s:
+        # A fresh workspace starts from NOW: deposits the account received
+        # before this moment are its history, not the new book's money.
+        row = s.get(WorkspaceSettings, 1)
+        if row is not None:
+            row.deposits_from = datetime.now(timezone.utc)
         for model in _WORKSPACE_TABLES:
             n = s.query(model).delete(synchronize_session=False)
             cleared[model.__tablename__] = int(n or 0)

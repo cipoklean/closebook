@@ -59,6 +59,7 @@ def _defaults() -> WorkspaceSettings:
         reserve_floor_minor=to_minor(DEFAULT_RESERVE_FLOOR, cur),
         auto_pay_limit_minor=to_minor(DEFAULT_AUTO_PAY_LIMIT, cur),
         fx_tolerance_pct=float(DEFAULT_FX_TOLERANCE_PCT),
+        deposits_from=utcnow(),
         updated_at=utcnow(),
     )
 
@@ -123,6 +124,7 @@ def describe(row: WorkspaceSettings) -> dict:
         "reserve_floor_minor": row.reserve_floor_minor,
         "auto_pay_limit_minor": row.auto_pay_limit_minor,
         "fx_tolerance_pct": row.fx_tolerance_pct,
+        "deposits_from": row.deposits_from,
         "reserve_floor": money_str(row.reserve_floor_minor, ccy),
         "auto_pay_limit": money_str(row.auto_pay_limit_minor, ccy),
         "updated_at": row.updated_at,

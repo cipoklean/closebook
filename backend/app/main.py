@@ -240,6 +240,25 @@ def _process_pending() -> None:
                     live_status = _transfer_client().status_of(transfer_id)
                 except Exception:
                     log.warning("lookup failed for %s", transfer_id)
+        # A deposit arriving by PUSH goes through the same intake the poller
+        # uses, so the two paths cannot disagree about what a deposit means or
+        # post the cash twice (the intake is keyed to the deposit id).
+        if "deposit" in (ev.name or "").lower():
+            try:
+                from .domain.intake import ingest_deposit
+                blob = payload if isinstance(payload, dict) else {}
+                inner = blob.get("data") if isinstance(blob.get("data"), dict) else None
+                for candidate in (inner, blob):
+                    if not candidate or not candidate.get("id"):
+                        continue
+                    res = ingest_deposit(_db, candidate)
+                    if res is not None:
+                        log.info("deposit webhook intake: %s %s (%.2f)",
+                                 res.status, res.applied, res.confidence)
+                        break
+            except Exception:
+                log.exception("deposit intake failed for %s", ev.event_id)
+
         incident = handle_event(ev.name, payload, event_id=ev.event_id,
                                 live_status=live_status)
         if incident.recovery is not Recovery.IGNORE:
@@ -261,6 +280,124 @@ def _process_pending() -> None:
                     log.info("settlement: %s", o)
             except Exception:
                 log.exception("settlement failed for %s", transfer_id)
+
+
+# ------------------------------------------------------------- money in (P2)
+# The ONLY route that creates a real deposit, and it is sandbox-gated twice:
+# here and inside intake.simulate_deposit(). It cannot pay anyone — there is no
+# transfer or conversion call anywhere on this path.
+
+@app.post("/money-in/simulate")
+async def money_in_simulate(request: Request):
+    """Simulate a customer payment landing in the sandbox.
+
+    The reference is passed through EXACTLY as typed, because a messy one is the
+    interesting case. The deposit then goes through the same intake the webhook
+    uses, so the fallback and the push path cannot disagree.
+    """
+    from .domain.intake import (accounts_cached, ingest_deposit, simulate_deposit)
+    from .money import money_str, to_minor
+
+    guard = _require_sandbox()
+    if guard:
+        return _back(request, tab="money-in", err=guard)
+
+    b = await _read_body(request)
+    asked_ccy = str(b.get("currency") or "").strip().upper()
+    amount = str(b.get("amount") or "").strip()
+    payer = str(b.get("payer_name") or "").strip()
+    reference = str(b.get("reference") or "")       # NOT stripped: typo'd on purpose
+    chosen = str(b.get("global_account_id") or "").strip()
+
+    try:
+        from .airwallex.client import AirwallexClient
+        client = AirwallexClient()
+        accts = accounts_cached(_db)
+        account = next((a for a in accts if a["id"] == chosen), None) if chosen else None
+        if account is None:
+            # No account chosen: pick the first ACTIVE one for the asked currency.
+            account = next((a for a in accts
+                            if a.get("usable") and a["currency"] == asked_ccy),
+                           None)
+        if account is None:
+            return _back(request, tab="money-in",
+                         err="Pick a global account to deposit into. Nothing "
+                             "ACTIVE was available for that currency.")
+
+        # The ACCOUNT decides the currency, not the form. The simulation
+        # endpoint has no currency field — the money lands in the account's own
+        # currency and a currency sent alongside it is silently discarded — so
+        # scaling the amount by the form's default would mis-scale every
+        # non-2-exponent currency and mislabel the result.
+        ccy = account["currency"] or asked_ccy
+        if ccy and asked_ccy and ccy != asked_ccy:
+            log.info("deposit: form asked for %s but account %s is %s",
+                     asked_ccy, account["id"], ccy)
+        ga_id = account["id"]
+
+        try:
+            amount_minor = to_minor(amount, ccy)
+        except Exception:
+            return _back(request, tab="money-in",
+                         err=f"Amount has to be a number like 12000. "
+                             f"Got {amount!r}.")
+        if amount_minor <= 0:
+            return _back(request, tab="money-in",
+                         err="Amount has to be more than zero.")
+
+        deposit = simulate_deposit(
+            client, global_account_id=ga_id, amount_minor=amount_minor,
+            currency=ccy, payer_name=payer, reference=reference)
+    except Exception as exc:
+        log.exception("simulated deposit failed")
+        return _back(request, tab="money-in",
+                     err=f"Airwallex refused the simulated deposit: {exc}")
+
+    dep_id = (deposit or {}).get("id") if isinstance(deposit, dict) else None
+    # The deposit's OWN currency is the last word on what was credited.
+    credited = ((deposit or {}).get("currency") or ccy).upper() \
+        if isinstance(deposit, dict) else ccy
+    try:
+        result = ingest_deposit(_db, deposit) if dep_id else None
+    except Exception as exc:
+        log.exception("intake failed for deposit %s", dep_id)
+        result = None
+
+    head = (f"Deposit {money_str(amount_minor, credited)}"
+            f"{' from ' + payer if payer else ''} created in the sandbox "
+            f"({credited} account ending "
+            f"{(account['account_number'] or '?')[-4:]})")
+    if result is None:
+        return _back(request, tab="money-in",
+                     ok=f"{head}. It will appear once Airwallex reports it.")
+    if result.duplicate:
+        return _back(request, tab="money-in", ok=f"{head}. {result.reason}")
+    applied = f" -> {', '.join(result.applied)}" if result.applied else ""
+    return _back(request, tab="money-in", ok=(
+        f"{head}. Matched {result.status} via {result.method} at "
+        f"{result.confidence:.2f}{applied}. {result.reason}"))
+
+
+@app.post("/money-in/poll")
+async def money_in_poll(request: Request):
+    """The polling fallback for a webhook that is late or never arrives."""
+    from .domain.intake import poll_deposits
+
+    guard = _require_sandbox()
+    if guard:
+        return _back(request, tab="money-in", err=guard)
+    try:
+        results = poll_deposits(_db)
+    except Exception as exc:
+        log.exception("deposit poll failed")
+        return _back(request, tab="money-in", err=f"Could not poll: {exc}")
+    if not results:
+        return _back(request, tab="money-in",
+                     ok="Checked Airwallex: no new deposits since the last one.")
+    bits = "; ".join(f"{r.deposit_id[:8]} {r.status} "
+                     f"({r.confidence:.2f}, {r.method})" for r in results)
+    return _back(request, tab="money-in",
+                 ok=f"Picked up {len(results)} deposit(s) by polling: {bits}")
 
 
 # --------------------------------------------------------------- setup (P1)
@@ -498,7 +635,9 @@ def app_page(tab: str = "home", ok: str = "", err: str = "") -> str:
         ctx["flash_ok"] = ok
     if err:
         ctx["flash_err"] = err
-    return render_app(ctx, tab=tab, health=healthz())
+    health = healthz()
+    ctx["sandbox_ready"] = bool(health.get("sandbox_ready"))
+    return render_app(ctx, tab=tab, health=health)
 
 
 if __name__ == "__main__":

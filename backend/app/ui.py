@@ -698,12 +698,15 @@ def _home(c: dict) -> str:
         + (f' − floor {money(m["reserve_floor_minor"])}' if ccy == hccy else '')
         + f' = {money(m["free"].get(ccy, 0))}</div>'
         for ccy in sorted(m["free"]))
+    # A bill we cannot price is NOT a shortfall in its own currency — it is a
+    # bill we have not yet decided how to fund. Said plainly, with the reason
+    # the plan gave, instead of a made-up number in the wrong currency.
     unfunded_note = ""
     if m["unfunded"]:
-        bits = ", ".join(f'{u["payable_number"]} ({u["note"]})'
+        bits = "; ".join(f'{u["payable_number"]} — {u["note"]}'
                          for u in m["unfunded"])
         unfunded_note = (f'<div class="x-statnote" style="color:var(--x-bad)">'
-                         f'No conversion planned for {e(bits)}.</div>')
+                         f'Not costed here: {e(bits)}.</div>')
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["bolt"]}</span>'
         '<div class="x-label">Free to spend</div>'
@@ -955,6 +958,74 @@ def _home(c: dict) -> str:
 
 
 # ---- money in
+def _simulate_card(c: dict) -> str:
+    """The one place money comes IN on purpose, and it is sandbox-only.
+
+    Every value comes from code: the accounts are what `GET /global_accounts`
+    returned (cached for a minute), the amount is what was typed, and the
+    reference is passed through UNCUT — a messy reference is the whole point,
+    and "tidying" it in the view would hide the case the matcher has to handle.
+    """
+    accts = c.get("money_in_accounts") or []
+    ready = c.get("sandbox_ready")
+    if accts:
+        opts = "".join(
+            f'<option value="{e(a["id"])}"'
+            + ("" if a.get("usable") else " disabled")
+            + '>'
+            + f'{e(a["currency"] or "unknown")}'
+            + (" · " + e(a["country"]) if a["country"] else "")
+            + (" · " + e(a["status"]) if a["status"] else "")
+            + (" · " + e((a["account_number"] or "")[-4:]) if a["account_number"] else "")
+            + (" — not active yet" if a.get("usable") is False else "")
+            + '</option>'
+            for a in accts)
+        usable = sum(1 for a in accts if a.get("usable"))
+        acct_field = (f'<div class="x-field x-span-4">'
+                      f'<label for="f-global_account_id">Global account</label>'
+                      f'<select class="x-select" id="f-global_account_id" '
+                      f'name="global_account_id">{opts}</select>'
+                      f'<span class="x-hint">From GET /global_accounts'
+                      f'{" — none are ACTIVE yet" if not usable else ""}. The '
+                      f'deposit lands in the account currency.</span></div>')
+    else:
+        acct_field = ('<div class="x-field x-span-4">'
+                      '<label>Global account</label>'
+                      '<select class="x-select" disabled><option>none found'
+                      '</option></select>'
+                      '<span class="x-hint">No global account could be listed, '
+                      'so a deposit cannot be simulated.</span></div>')
+
+    body = (
+        '<div class="x-cardhead"><div><h3>Simulate a customer payment</h3>'
+        '<p class="x-help">Calls POST /api/v1/simulation/deposit/create on the '
+        'Airwallex sandbox. It creates a real sandbox deposit — no real money — '
+        'and it comes back through the same webhook and matcher as any other '
+        'payment.</p></div>'
+        f'<span class="x-pill x-pill--{"info" if ready else "bad"}">'
+        f'{"sandbox" if ready else "sandbox not ready"}</span></div>'
+        + '<form class="x-form" method="post" action="/money-in/simulate">'
+        + acct_field
+        + _field("amount", "Amount", span="x-span-2", placeholder="12000",
+                 required=True)
+        + _field("payer_name", "Payer name", span="x-span-3",
+                 placeholder="Brightline Retail",
+                 hint="What the bank says, not what you wish it said")
+        + _field("reference", "Reference", span="x-span-3",
+                 placeholder="inv 0O41 brightline",
+                 hint="Free text. Typos welcome — that is the point.")
+        + '<div class="x-submit">'
+          '<button class="x-btn x-btn--primary" type="submit"'
+          + ("" if ready else " disabled")
+          + '>Create the deposit</button>'
+          '<button class="x-btn" type="submit" formaction="/money-in/poll" '
+          'formnovalidate>Check Airwallex for new deposits</button>'
+          '<span class="x-hint">The poll button is the fallback for a webhook '
+          'that is late. Both paths use the same intake, so neither can post the '
+          'cash twice.</span></div></form>')
+    return _card(inner=body)
+
+
 def _money_in(c: dict) -> str:
     rows = []
     for r in c["receivables"]:
@@ -1081,7 +1152,7 @@ def _money_in(c: dict) -> str:
         f'<div class="x-stack">{("".join(un)) if un else empty_un}</div>'
         + note))
 
-    return inv + side
+    return _simulate_card(c) + _arrivals_card(c) + inv + side
 
 
 # ---- money out
@@ -1301,11 +1372,83 @@ def _ok(c: dict) -> str:
                 for p in waits)
             + '</ul>'))
 
+    # A payment that arrived but was NOT matched with confidence is also
+    # waiting on a human — and it is not a payment step, so the approvable list
+    # never contained it. Shown here so "Needs your OK" means what it says.
+    wait = c.get("inflows_waiting") or []
+    if wait:
+        note_in = _card(inner=(
+            '<div class="x-cardhead"><div><h3>Money in that needs a look</h3>'
+            '<p class="x-help">The cash is already in the book and on the '
+            'invoice, but the match was not confident enough to settle itself. '
+            'Chase it, re-apply it, or refund it.</p></div>'
+            f'<span class="x-pill x-pill--warn">{len(wait)} to review</span>'
+            '</div>'
+            + "".join(_arrival_row(a, detail=True) for a in wait)))
+        return body + note_in + held + note
     return body + held + note
 
 
 # ---- AI activity
+def _arrival_row(a: dict, *, detail: bool = False) -> str:
+    """One deposit as it arrived, and what the code decided about it.
+
+    The RAW reference is shown exactly as the bank supplied it, spaces and typos
+    included: it is the input the matcher had to work with, and hiding it makes
+    the decision look arbitrary.
+    """
+    conf = a.get("confidence")
+    tone = ("good" if a.get("settled_match")
+            else ("bad" if (conf is not None and conf < 0.75) else "warn"))
+    method = a.get("method") or "n/a"
+    conf_txt = f"{conf:.2f}" if conf is not None else "n/a"
+    ref = a["reference"] if a["has_reference"] else "(no reference given)"
+    applied = (" -> " + ", ".join(x["invoice"] for x in a["applied"])
+               if a["applied"] else "")
+    out = (
+        '<div style="border-bottom:1px solid var(--x-line);padding:10px 0">'
+        '<div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">'
+        f'<b>{e(money(a["amount_minor"], a["currency"]))}</b>'
+        f'<span class="x-hint">{e(a["payer"] or "payer not given")}</span>'
+        f'<span class="x-pill x-pill--{tone}">{e(a["match_status"])}</span>'
+        f'<span class="x-hint">{e(method)} &middot; confidence {e(conf_txt)}'
+        f'{e(applied)}</span></div>'
+        f'<div class="x-mono" style="margin-top:6px">ref: {e(ref)}</div>')
+    if detail and a.get("reason"):
+        out += f'<div class="x-hint" style="margin-top:4px">{e(a["reason"])}</div>'
+    if detail and a.get("deposit_id"):
+        out += (f'<div class="x-hint">Airwallex deposit '
+                f'<span class="x-mono">{e(a["deposit_id"])}</span></div>')
+    return out + "</div>"
+
+
+def _arrivals_card(c: dict, *, span: str = "x-span-12",
+                   limit: int = 6, title: str = "What arrived",
+                   sub: str = "") -> str:
+    arr = (c.get("arrivals") or [])[:limit]
+    body = "".join(_arrival_row(a) for a in arr) if arr else (
+        '<p class="x-empty">Nothing has landed yet. Use the form above, or make '
+        'a real transfer into your Airwallex Global Account.</p>')
+    return _card(span=span, inner=(
+        '<div class="x-cardhead"><div><h3>' + e(title) + '</h3>'
+        '<p class="x-help">' + e(sub or "Each row is a real sandbox deposit, "
+        "with the reference exactly as the bank gave it and the verdict the "
+        "matcher recorded.") + '</p></div></div>' + body))
+
+
 def _ai(c: dict) -> str:
+    """Every matching decision, then every model call.
+
+    The deterministic tiers are shown FIRST because they decide most matches and
+    they are the part that can be trusted. A model is only consulted when the
+    deterministic tiers stop short, so an empty model section is a fact about
+    the run, not a gap in the page.
+    """
+    matches = _arrivals_card(
+        c, limit=12, title="How the matcher decided",
+        sub="Tier, confidence and the sentence the code recorded, read from the "
+            "inflow itself. Deterministic tiers run first; the model is only "
+            "asked when they stop short.")
     items = []
     for t in c["agent_trace"][:24]:
         ins = t["inputs"]
@@ -1360,7 +1503,7 @@ def _ai(c: dict) -> str:
 
     body = "".join(feed) if feed else '<p class="x-empty">No model calls yet.</p>'
 
-    return _card(span="x-span-12", inner=(
+    return matches + _card(span="x-span-12", inner=(
         '<div class="x-cardhead"><div><h3>What the model said, and what the rules did</h3>'
         '<p class="x-help">Straight from <span class="x-mono">agent_trace</span>. '
         'Nothing here is a decision — every row is one the code already made.</p></div>'
@@ -1490,11 +1633,6 @@ def _setup(c: dict) -> str:
     ws = c.get("workspace") or {}
     counts = ws.get("counts") or {}
     out: list[str] = []
-
-    if c.get("flash_ok"):
-        out.append(f'<div class="x-note x-note--ok">{e(c["flash_ok"])}</div>')
-    if c.get("flash_err"):
-        out.append(f'<div class="x-note x-note--err">{e(c["flash_err"])}</div>')
 
     if not any(counts.values()):
         out.append(_card(inner=(
@@ -1696,10 +1834,25 @@ _SUBS = {
 }
 
 
+def _flash(c: dict) -> str:
+    """The one-line result of an action, shown on WHATEVER tab it lands on.
+
+    Deliberately not inside any one screen: a refusal from the Money-in form
+    must be visible on the Money-in tab, and a screen that forgets to render it
+    is a screen that silently swallows an error.
+    """
+    out = ""
+    if c.get("flash_ok"):
+        out += f'<div class="x-note x-note--ok">{e(c["flash_ok"])}</div>'
+    if c.get("flash_err"):
+        out += f'<div class="x-note x-note--err">{e(c["flash_err"])}</div>'
+    return out
+
+
 def render_app(ctx: dict, tab: str = "home", health: dict | None = None) -> str:
     tab = tab if tab in _TABS else "home"
     n_ok = len(ctx["approvable"])
-    screen = _TABS[tab](ctx)
+    screen = _flash(ctx) + _TABS[tab](ctx)
     inner = (
         _sidebar(tab, n_ok)
         + '<div class="x-body">'
