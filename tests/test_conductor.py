@@ -65,6 +65,8 @@ class FakeFX:
 
 
 class FakeClient:
+    """Stands in for AirwallexClient so no test ever needs credentials."""
+
     token = "test"
     calls: list = []
 
@@ -100,6 +102,14 @@ def _wire(db, *, amount="1800.00", currency="USD", limit="2500", cash="20000.00"
 
 
 def _run(db, **kw):
+    """Run the loop with a FAKE client, always.
+
+    Passing `client` is not cosmetic: without it `on_event` consults
+    `settings.sandbox_ready()` and refuses when no credentials are configured —
+    which is exactly what happens in CI. These tests passed locally only because
+    the developer's `.env` held real sandbox keys. Supplying a client is what
+    makes them hermetic, and it is the same seam a real caller uses.
+    """
     factory = kw.pop("factory", None)
 
     def build(**kwargs):
@@ -107,6 +117,7 @@ def _run(db, **kw):
         kwargs["fx"] = FakeFX()
         return Executor(**kwargs)
 
+    kw.setdefault("client", FakeClient())
     return on_event(db, executor_factory=factory or build, **kw)
 
 
