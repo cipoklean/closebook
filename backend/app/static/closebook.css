@@ -267,6 +267,14 @@ a { color: inherit; }
 
 .x-toast { position: fixed; left: 50%; bottom: 32px; transform: translate(-50%, 16px); padding: 12px 18px; border-radius: 14px; background: var(--x-ink); color: #fff; font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 10px; box-shadow: 0 8px 24px rgba(20, 22, 30, 0.18); opacity: 0; pointer-events: none; transition: opacity 0.2s ease, transform 0.2s ease; z-index: 50; }
 .x-toast.is-on { opacity: 1; transform: translate(-50%, 0); }
+/* The refresh OFFER. Sits above the toast and the mobile tab bar, and is
+   keyboard-reachable because it is a real button. It appears only when the
+   book actually changed AND the reader is not mid-task — an unrequested reload
+   is never worth interrupting someone for, and it is what made a test's
+   just-located element stale before it could click it. */
+.x-new { position: fixed; left: 50%; bottom: 92px; transform: translate(-50%, 8px); padding: 10px 16px; border: 0; border-radius: 999px; background: var(--x-accent, #1f6f6b); color: #fff; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; box-shadow: 0 10px 26px rgba(20, 22, 30, 0.22); z-index: 45; }
+.x-new:hover { filter: brightness(1.06); }
+.x-new:focus-visible { outline: 3px solid rgba(31, 111, 107, 0.45); outline-offset: 2px; }
 .x-tabs { display: none; }
 
 /* ---------- landing ---------- */

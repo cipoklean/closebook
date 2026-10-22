@@ -159,15 +159,54 @@ _JS = """
     return false;
   };
 
-  /* --- refresh: reload every 5s, but never mid-typing and never mid-submit -- */
-  var refresh = function () {
-    if (document.visibilityState === "hidden" || busy || readerIsTyping()) {
-      window.setTimeout(refresh, 5000);
-      return;
-    }
-    window.location.reload();
+  /* --- new activity: OFFER a refresh, never TAKE one --------------------
+     This page used to call window.location.reload() every 5 seconds. That
+     rebuilds the whole DOM under whoever is reading it, so:
+       * a visitor gets yanked back mid-scroll or mid-read;
+       * any element a person, or an automated test, is about to click has
+         become STALE between locating it and clicking it.
+     So it no longer reloads on its own. It polls a cheap stamp and, if the
+     book genuinely changed AND nobody is mid-task, shows a pill the reader can
+     act on. An unrequested reload is never worth interrupting someone for. */
+  var pill = $("#x-new");
+  var stamp = null;
+  var pending = false;
+
+  var lastTouch = Date.now();
+  ["pointerdown", "keydown", "wheel", "scroll", "input", "focusin", "touchstart"]
+    .forEach(function (ev) {
+      window.addEventListener(ev, function () { lastTouch = Date.now(); },
+                            { capture: true, passive: true });
+    });
+
+  /* A form or a details panel being open counts as mid-task: refreshing would
+     close it. `busy` covers a submit in flight. */
+  var midTask = function () {
+    if (busy || readerIsTyping()) return true;
+    if (Date.now() - lastTouch < 10000) return true;
+    if (document.querySelector("details[open]")) return true;
+    if (document.querySelector("[aria-modal='true'], dialog[open], .x-modal")) return true;
+    return false;
   };
-  window.setTimeout(refresh, 5000);
+
+  var poll = function () {
+    if (document.visibilityState === "hidden") return;
+    fetch("/state/version", { headers: { "Accept": "application/json" } })
+      .then(function (r) { return r.ok ? r.text() : null; })
+      .then(function (v) {
+        if (v === null || v === "") return;          // a failed poll changes nothing
+        if (stamp === null) { stamp = v; return; }   // first tick is the baseline
+        if (v !== stamp) { stamp = v; pending = true; }
+        if (pending && pill && !midTask()) pill.hidden = false;
+      })
+      .catch(function () { /* the page is unchanged; say nothing */ });
+  };
+  window.setInterval(poll, 20000);
+  poll();
+
+  if (pill) {
+    pill.addEventListener("click", function () { window.location.reload(); });
+  }
 
   /* --- tooltips: title attr -> data-tip so CSS can render it ------------- */
   [].forEach.call(document.querySelectorAll("[title]"), function (el) {
@@ -266,10 +305,38 @@ _JS = """
 """
 
 
+#: The PUBLIC pages get this and only this. No reload, no polling: a landing
+#: page that rebuilds itself under a reader is a page that loses them, and one
+#: that rebuilds under a test is a page that fails its own test.
+_LANDING_JS = """
+(function () {
+  "use strict";
+  [].forEach.call(document.querySelectorAll("[title]"), function (el) {
+    if (el.classList.contains("x-tip")) return;
+    el.setAttribute("data-tip", el.getAttribute("title"));
+    el.removeAttribute("title");
+  });
+  [].forEach.call(document.querySelectorAll("[data-toggle]"), function (s) {
+    s.addEventListener("click", function () {
+      var box = document.getElementById(s.getAttribute("data-toggle"));
+      if (box) box.hidden = !box.hidden;
+    });
+  });
+}());
+"""
+
+
 def _shell(inner: str, *, app: bool, title: str) -> str:
+    """Wrap a page. THE TWO KINDS OF PAGE GET DIFFERENT SCRIPTS.
+
+    `app` is not decoration: it decides whether the interactive script is
+    included at all. The public pages used to receive the same script as the
+    dashboard, which meant the landing page reloaded itself every five seconds.
+    """
     body_cls = ' class="x-app"' if app else ' class="x-landing"'
+    script = _JS if app else _LANDING_JS
     return (_head(title) + f"<body{body_cls}>\n" + inner +
-            '\n<script>' + _JS + '</script>\n</body>\n</html>\n')
+            '\n<script>' + script + '</script>\n</body>\n</html>\n')
 
 
 # ------------------------------------------------------- landing page
@@ -285,10 +352,11 @@ def render_landing() -> str:
       '''<path d="M6.5 3.5h11a1.5 1.5 0 0 1 1.5 1.5v14.5A1.5 1.5 0 0 1 17.5 21h-11A1.5 1.5 0 0 1 5 19.5V5a1.5 1.5 0 0 1 1.5-1.5z"/>'''
       '''<path d="M9 8h6M9 12h6M9 16h3"/></svg></span>Closebook</div>
     <div class="x-l-links">
-      <a href="/#how">How it works</a>
-      <a href="/#safety">Safety</a>
-      <a href="/#who">Who it's for</a>
-      <a href="/app" class="x-btn x-btn--pill x-btn--primary">Launch app</a>
+      <a href="/#how" data-testid="how-it-works">How it works</a>
+      <a href="/#safety" data-testid="safety">Safety</a>
+      <a href="/#who" data-testid="who-its-for">Who it's for</a>
+      <a href="/app" class="x-btn x-btn--pill x-btn--primary"
+         data-testid="launch-app">Launch app</a>
     </div>
   </div>
 </header>''')
@@ -586,7 +654,8 @@ def render_landing() -> str:
   <div class="x-l-cta">
     <h2>See your books close themselves.</h2>
     <div class="x-actions" style="justify-content:center">
-      <a href="/app" class="x-btn x-btn--primary x-btn--pill x-btn--lg">Launch app'''
+      <a href="/app" class="x-btn x-btn--primary x-btn--pill x-btn--lg"
+         data-testid="launch-app-hero">Launch app'''
       + _I["arrow"] + '''</a>
     </div>
     <small>''' + _I["lock"] + '''Sandbox money only — no real payment can leave this demo.</small>
@@ -619,7 +688,8 @@ def _sidebar(tab: str, n_ok: int) -> str:
         badge = (f'<span class="x-badge">{n_ok}</span>'
                  if key == "ok" and n_ok else "")
         cur = ' aria-current="page"' if key == tab else ""
-        links.append(f'<a href="{href}"{cur}>{icon}<span>{e(label)}</span>{badge}</a>')
+        links.append(f'<a href="{href}"{cur} data-testid="tab-{key}">'
+                     f'{icon}<span>{e(label)}</span>{badge}</a>')
     return (
         '<div class="x-side">'
         '<a class="x-word" href="/"><span class="x-logo">'
@@ -629,7 +699,7 @@ def _sidebar(tab: str, n_ok: int) -> str:
         '<nav class="x-nav">' + "".join(links) + '</nav>'
         '<div class="x-how"><b>' + _I["shield"] + 'How it decides</b>'
         'The model reads. The rules decide. Anything unclear waits for a person.</div>'
-        '<a class="x-back" href="/">'
+        '<a class="x-back" href="/" data-testid="back-to-site">'
         '<svg class="x-ico x-ico--s" viewBox="0 0 24 24"><path d="M19 12H6"/><path d="m11 7-5 5 5 5"/></svg>'
         'Back to site</a>'
         '</div>'
@@ -643,7 +713,8 @@ def _bottom_tabs(tab: str, n_ok: int) -> str:
                  if key == "ok" and n_ok else "")
         cur = ' aria-current="page"' if key == tab else ""
         short = label.replace("Needs your OK", "Approve").replace("AI activity", "AI")
-        links.append(f'<a href="{href}"{cur}>{icon}<span>{e(short)}</span>{badge}</a>')
+        links.append(f'<a href="{href}"{cur} data-testid="tab-mobile-{key}">'
+                     f'{icon}<span>{e(short)}</span>{badge}</a>')
     return '<div class="x-tabs">' + "".join(links) + '</div>'
 
 
@@ -653,7 +724,7 @@ def _top(title: str, sub: str, health: dict | None) -> str:
         sandbox = bool(health.get("sandbox_ready"))
         live = (f'<div class="x-live"><span class="x-livepill">'
                 f'<i></i>{"Sandbox connected" if sandbox else "Sandbox not ready"}</span>'
-                f'<small>Refreshes every 5s</small></div>')
+                f'<small>Updates when the books change</small></div>')
     return (f'<div class="x-top"><div><h1>{e(title)}</h1><p>{e(sub)}</p></div>'
             f'{live}</div>')
 
@@ -2170,6 +2241,11 @@ def render_app(ctx: dict, tab: str = "home", health: dict | None = None) -> str:
         + '</div>'
         + _bottom_tabs(tab, n_ok)
         + '<div id="x-toast" class="x-toast" role="status" aria-live="polite"></div>'
+        # The refresh OFFER, not a refresh. Hidden until a poll says the book
+        # actually changed and the reader is not mid-task.
+        + '<button id="x-new" class="x-new" hidden '
+        + 'data-testid="new-activity" type="button">'
+        + 'New activity — tap to refresh</button>'
     )
     return _shell(inner, app=True, title=f"Closebook — {NAV[[n[0] for n in NAV].index(tab)][1]}")
 

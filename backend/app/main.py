@@ -273,6 +273,39 @@ def healthz() -> dict:
     }
 
 
+@app.get("/state/version")
+def state_version() -> dict:
+    """A cheap stamp of everything the dashboard renders. ONE query, no ORM.
+
+    WHY THIS EXISTS. The page used to reload itself every five seconds to stay
+    current, which rebuilt the DOM under whoever was reading it and made any
+    element a test had just located stale by the time it clicked. Polling a
+    stamp instead means the page can know the book changed WITHOUT touching the
+    page, and offer a refresh rather than taking one.
+
+    It is deliberately the CHEAPEST thing that can answer "did anything
+    change": max row id per table the view shows, in a single statement. It
+    cannot return stale-because-cached, because it is not cached; and it does
+    not write, so reading it does not change it — a page view must never move
+    the version it is watching.
+    """
+    from sqlalchemy import text
+
+    tables = ("ledger_entry", "inflow", "match", "approval", "plan_step",
+              "invoice_receivable", "invoice_payable", "ignored_event",
+              "webhook_event")
+    sql = "SELECT " + ", ".join(
+        f"(SELECT COALESCE(MAX(id),0) FROM {t})" for t in tables)
+    try:
+        with _database().session() as s:
+            row = s.execute(text(sql)).one()
+    except Exception:                              # never a raw 500 here either
+        log.exception("could not read the state version")
+        return {"ok": False, "version": "unreadable"}
+    version = "-".join(str(int(v or 0)) for v in row)
+    return {"ok": True, "version": version}
+
+
 @app.get("/state")
 def state() -> dict:
     """Read-only snapshot for the dashboard. DB ONLY, and never a raw 500.
