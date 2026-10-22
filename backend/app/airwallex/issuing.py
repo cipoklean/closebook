@@ -46,6 +46,7 @@ class Issuing:
                     card_number: Optional[str] = None,  # test card, e.g. 4035501000000008
                     currency_allowlist: Optional[list[str]] = None,
                     merchant_categories: Optional[list[str]] = None,
+                    created_by: str = "Closebook",
                     request_id: Optional[str] = None, plan_step=None) -> dict:
         """Issue a virtual card whose controls ENFORCE a purchase policy.
 
@@ -68,24 +69,21 @@ class Issuing:
                            "amount": to_major_str(all_time_limit_minor, currency)})
 
         # Shape confirmed against the Airwallex docs MCP, live probing, and
-        # finally by Airwallex Developer Help.
+        # finally by Airwallex Dev Help — who identified the real constraint.
         #
-        # The 400 `invalid_request: Invalid issuance details` was OURS, not an
-        # account entitlement. Airwallex Dev Help identified the cause: a
-        # DELEGATE cardholder cannot hold a PERSONALIZED card. `is_personalized`
-        # must be false for DELEGATE; personalized cards require an INDIVIDUAL
-        # cardholder. We keep DELEGATE (it is what the spend controls attach to),
-        # so the card is non-personalized.
+        # THE ACCOUNT'S OWNING ENTITY IS HONG KONG. For an HK entity the only
+        # commercial card program is type=CREDIT with
+        # sub_type=GOOD_FUNDS_CREDIT, funded from the Airwallex wallet. DEBIT,
+        # PREPAID, and omitting type/sub_type ALL return the generic
+        # `invalid_request: Invalid issuance details`, which is why that error
+        # named no field for so long: it was never a field problem, it was the
+        # wrong PROGRAM. No funding_source_id is required.
         #
-        # `program` carries ONLY `purpose`. COMMERCIAL is the value a BUSINESS
-        # sandbox accepts; purpose=CONSUMER is rejected with "CONSUMER program
-        # is not allowed for this account". A TOP-level `purpose` is a different
-        # field (what the card is for) and is only meaningful with issue_to,
-        # which is removed below.
-        #
-        # `issue_to` is omitted entirely: it is not required, and it was what
-        # forced the top-level `purpose` field that in turn produced
-        # "Purpose can only be set when card issue_to is set to ORGANISATION".
+        # Earlier attempts that failed for this reason, kept so nobody
+        # re-introduces them: is_personalized=true on a DELEGATE cardholder
+        # (Dev Help's first, incorrect theory — disproved by creating an
+        # INDIVIDUAL cardholder and seeing the identical error), `program`
+        # without `type`, `type: DEBIT`, `type: PREPAID`, and `issue_to`.
         #
         # `primary_contact_details` is documented in the MCP examples but is
         # REJECTED live: "primary_contact_details is no longer supported, please
@@ -94,10 +92,13 @@ class Issuing:
             "request_id": request_id,
             "cardholder_id": cardholder_id,
             "form_factor": "VIRTUAL",
-            "created_by": "Closebook",
+            "created_by": created_by,
+            # A DELEGATE cardholder cannot hold a personalized card.
             "is_personalized": False,
             "program": {
                 "purpose": "COMMERCIAL",
+                "type": "CREDIT",
+                "sub_type": "GOOD_FUNDS_CREDIT",
             },
             "authorization_controls": {
                 "allowed_transaction_count": "MULTIPLE",
