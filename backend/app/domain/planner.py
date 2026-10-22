@@ -392,8 +392,15 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
         # Everything in this block is a WHAT-IF: it computes what the position
         # would say without touching `working`, because a blocked payable must
         # leave the remaining capacity for the next one.
+        #
+        # ONLY when the payable is in a DIFFERENT currency from the budget. A
+        # USD bill paid out of a USD budget needs no conversion, and modelling
+        # one inflated the requirement by the FX drift headroom — a USD 1,800
+        # bill reported as needing USD 1,809.00 — and said the same thing twice,
+        # once with each number. Not holding enough of the budget currency is a
+        # CAPACITY problem, and step 5 below states it correctly.
         fx_plan = None            # (sell_minor, rate)
-        if held < move_minor:
+        if p.currency.upper() != bccy and held < move_minor:
             rate = pos.usd_rate(p.currency)
             if rate is None:
                 plan.steps.append(Step(

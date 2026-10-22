@@ -339,3 +339,39 @@ class TestThePageShowsIt:
         for tab in ("home", "money-out", "ok"):
             html = render_app(ctx, tab=tab)
             assert "waits for INV-BIG to land" in html, tab
+
+
+# ------------------------------------------- a same-currency bill is not an FX
+class TestASameCurrencyBillIsNotAConversion:
+    """A USD bill paid out of a USD budget needs no conversion.
+
+    The first version of this modelled one anyway, which inflated the
+    requirement by the FX drift headroom (a USD 1,800 bill reported as needing
+    USD 1,809.00) and stated the same fact twice, once with each number.
+    """
+
+    def test_a_usd_bill_is_never_given_an_fx_step(self, db):
+        _payable("PO-X", "USD", 180_000)
+        plan = current_plan(db)
+        assert not [s for s in plan.steps
+                    if s.action == ACT_FX and s.payable_number == "PO-X"]
+
+    def test_it_reports_ONE_reason_with_the_real_amount(self, db):
+        _payable("PO-X", "USD", 180_000)
+        _receivable("INV-BIG", "USD", 1_200_000)
+        step = next(s for s in current_plan(db).steps
+                    if s.payable_number == "PO-X")
+        assert step.action == ACT_DEFER
+        assert len(step.blockers) == 1, f"duplicated: {step.blockers}"
+        assert "USD 1,800.00" in step.blockers[0]
+        # NOT the drift-inflated number the conversion path produced
+        assert "1,809" not in step.blockers[0]
+
+    def test_a_foreign_bill_DOES_get_its_conversion_checked(self, db):
+        """The guard must not switch the FX path off for the case that needs it."""
+        _payable("PO-Y", "EUR", 900_000)
+        plan = current_plan(db)
+        step = next(s for s in plan.steps if s.payable_number == "PO-Y")
+        assert step.action == ACT_DEFER
+        # costed in the FUNDING currency, which is USD
+        assert "USD" in step.blockers[-1]

@@ -1424,14 +1424,54 @@ def _cardhead(title: str, sub: str) -> str:
             f'<p>{e(sub)}</p></div></div>')
 
 
-def _pill(status: str, label: str = "") -> str:
+def _live_bill_state(p: dict | None, stored: str) -> tuple[str, str, str]:
+    """The bill's REAL state, and where it came from.
+
+    The payable row goes to PAID only when a payout SETTLES, so `payable.status`
+    is stale by design for anything in flight — a bill can be HELD while its
+    transfer is PROCESSING at the bank. Showing the stored column alone is
+    therefore a lie the operator will notice immediately.
+
+    Precedence, most authoritative first:
+      1. what AIRWALLEX says about the object we sent (live_status);
+      2. our newest plan step (display_status), which is what we last did;
+      3. the planner's intent for it this run (plan_action).
+    """
+    if not p:
+        return (stored or "HELD").upper(), "warn", ""
+    live = (p.get("live_status") or "").upper()
+    disp = (p.get("display_status") or "").upper()
+    action = (p.get("plan_action") or "").upper()
+    note = p.get("step_reason") or ""
+
+    if live:
+        return live, ("bad" if live in ("FAILED", "CANCELLED", "RETURNED")
+                      else "info"), (note or f"Airwallex reports {live}")
+    if disp and disp not in ("HELD", "OPEN"):
+        return disp, ("bad" if disp in ("FAILED", "CANCELLED") else "info"), note
+    if action == "PAY":
+        if p.get("plan_needs_approval"):
+            return "NEEDS YOUR OK", "warn", (p.get("plan_approval_reason") or note)
+        return "READY", "good", (note or "Within your limits — the planner will pay it.")
+    if action in ("DEFER", "ESCALATE", "CHASE"):
+        blockers = p.get("plan_blockers") or []
+        return "HELD", "warn", (blockers[0] if blockers else note)
+    return (stored or "HELD").upper(), "warn", note
+
+
+def _pill(status: str, label: str = "", tone: str = "") -> str:
     """A status pill, using the classes this stylesheet actually defines.
 
     (The first draft of the setup screen wrote `class="pill good"`, which is not
     in the stylesheet at all — the pill would have rendered as plain text and a
     warning state would have been invisible.)
+
+    `tone` overrides the guess when the caller already knows which of
+    Airwallex's states it is looking at.
     """
     key = (status or "").strip().upper()
+    if tone:
+        return f'<span class="x-pill x-pill--{tone}">{e(label or key or "—")}</span>'
     tone = "info"
     if key in ("PAID", "MATCHED", "PAYABLE", "VERIFIED", "OK", "SUCCESS", "SETTLED"):
         tone = "good"
@@ -1587,12 +1627,20 @@ def _setup(c: dict) -> str:
     # 5 ---- bills
     sup_opts = [(str(x["id"]), x["name"]) for x in ws.get("suppliers", [])]
     inv_nums = [x["number"] for x in ws.get("invoices", [])]
+    # The REAL state of each bill: what Airwallex says, else our newest step,
+    # else the planner's verdict. The stored column alone is stale by design —
+    # a payable stays HELD until a payout SETTLES.
+    live_by_number = {p["number"]: p for p in (c.get("payables") or [])
+                      if p.get("number")}
     pay_rows = []
     for x in ws.get("payables", []):
         dep = (f'<span class="x-pill x-pill--warn">after {e(x["depends_on"])}</span>'
                if x["depends_on"] else '<span class="x-hint">none</span>')
+        label, tone, note = _live_bill_state(live_by_number.get(x["number"]),
+                                             x["status"])
+        reason = f'<div class="x-hint">{e(note)}</div>' if note else ""
         pay_rows.append([f'<strong>{e(x["number"])}</strong>', e(x["supplier"]),
-                         e(x["amount"]), _pill(x["status"]), dep,
+                         e(x["amount"]), _pill(label, tone=tone) + reason, dep,
                          e(x["payout_method"] or "—")])
     out.append(_card(inner=(
         _cardhead("Bills to pay", "What you owe. A bill only becomes payable "

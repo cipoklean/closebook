@@ -452,3 +452,75 @@ class TestBeneficiaryFormErrors:
                            "routing_value": "021000021",
                            "bank_account_category": "checking"})
         assert "016" in str(exc.value)
+
+
+# ------------------------------------------------------- the bill's real state
+class TestBillsShowLiveStateNotTheStoredColumn:
+    """A payable row is HELD until a payout SETTLES, so `payable.status` is
+    stale by design for anything in flight. A bill whose transfer is PROCESSING
+    at the bank must not read "HELD" on the Setup screen.
+    """
+
+    def _live(self):
+        from app.ui import _live_bill_state
+        return _live_bill_state
+
+    def test_what_airwallex_says_wins_over_everything(self):
+        f = self._live()
+        label, tone, note = f({
+            "live_status": "PROCESSING", "display_status": "SUBMITTED",
+            "plan_action": "PAY", "step_reason": "sent",
+        }, "HELD")
+        assert label == "PROCESSING"
+        assert tone == "info"
+
+    def test_a_bank_failure_is_red(self):
+        f = self._live()
+        assert f({"live_status": "FAILED"}, "HELD")[1] == "bad"
+        assert f({"live_status": "CANCELLED"}, "HELD")[1] == "bad"
+
+    def test_our_newest_step_is_used_when_the_bank_has_not_answered(self):
+        f = self._live()
+        label, tone, _ = f({"display_status": "SUBMITTED",
+                            "plan_action": "PAY"}, "HELD")
+        assert label == "SUBMITTED"
+
+    def test_a_stored_HELD_is_not_echoed_when_the_planner_has_a_verdict(self):
+        """This is the actual reported bug: HELD shown for a bill the planner
+        wants to pay."""
+        f = self._live()
+        label, tone, _ = f({"display_status": "HELD", "plan_action": "PAY",
+                            "plan_needs_approval": False}, "HELD")
+        assert label == "READY"
+        assert tone == "good"
+
+    def test_over_the_limit_reads_as_needing_the_human(self):
+        f = self._live()
+        label, tone, note = f({"display_status": "HELD", "plan_action": "PAY",
+                               "plan_needs_approval": True,
+                               "plan_approval_reason": "EUR 9,012.85 is over the limit"},
+                              "HELD")
+        assert label == "NEEDS YOUR OK"
+        assert tone == "warn"
+        assert "over the limit" in note
+
+    def test_a_deferred_bill_carries_the_planner_reason(self):
+        f = self._live()
+        label, tone, note = f({"display_status": "HELD", "plan_action": "DEFER",
+                               "plan_blockers": ["waiting on INV-0042"]}, "HELD")
+        assert label == "HELD"
+        assert tone == "warn"
+        assert note == "waiting on INV-0042"
+
+    def test_no_plan_information_falls_back_to_the_stored_column(self):
+        f = self._live()
+        assert f(None, "PAID")[0] == "PAID"
+        assert f({}, "PARTIAL")[0] == "PARTIAL"
+
+    def test_the_stylesheet_class_is_the_real_one(self):
+        """`class="pill good"` is not in the stylesheet; a warning would have
+        rendered as invisible plain text."""
+        from app.ui import _pill
+        assert 'x-pill x-pill--bad' in _pill("X", tone="bad")
+        assert "x-pill x-pill--good" in _pill("PAID")
+        assert "x-pill x-pill--warn" in _pill("HELD")
