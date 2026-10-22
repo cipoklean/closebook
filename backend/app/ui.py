@@ -961,6 +961,42 @@ def _home(c: dict) -> str:
     return "".join(cards) + banner + checklist + side + balance
 
 
+
+def _dev_controls(transfer_id: str, live: str) -> str:
+    """Sandbox-only buttons that move an in-flight transfer to its END state.
+
+    This is the ONLY way to make a transfer finish in the sandbox, and it is
+    deliberately not a shortcut around anything: the button asks Airwallex to
+    transition the transfer, then the app reads the status back OFF Airwallex
+    (never from the form), runs the incident logic on what it finds, and posts
+    the settlement. Repeating it is harmless — settlement is keyed to the
+    Airwallex object id, so a second PAID writes nothing.
+
+    Offered only while the bank says the transfer is still moving. There is
+    nothing to simulate once it is terminal, and a button that cannot work is
+    worse than no button.
+    """
+    # ONE lifecycle definition, shared with the route that handles the press.
+    # Two copies would drift, and the failure mode is a button the API refuses.
+    from .main import _dev_controls_are_offered
+
+    if not _dev_controls_are_offered(live):
+        return ""
+    action = f"/dev/transfers/{html.escape(transfer_id, quote=True)}/transition"
+    buttons = ""
+    for value, label, title in (
+            ("settle", "Settle", "Airwallex reports PAID"),
+            ("fail", "Fail", "beneficiary details rejected"),
+            ("return", "Return", "the beneficiary bank sent it back")):
+        buttons += (
+            f'<form method="post" action="{action}" style="display:inline">'
+            f'<input type="hidden" name="what" value="{value}">'
+            f'<button class="x-btn x-btn--sm" type="submit" title="{e(title)}">'
+            f'{e(label)}</button></form>')
+    return ('<div class="x-meta"><span class="x-label">Sandbox dev control</span>'
+            f'<span class="x-pills">{buttons}</span></div>')
+
+
 # ---- money in
 def _simulate_card(c: dict) -> str:
     """The one place money comes IN on purpose, and it is sandbox-only.
@@ -1226,7 +1262,8 @@ def _money_out(c: dict) -> str:
                    f'{"good" if live in ("PAID", "COMPLETED", "SUCCESS") else ("warn" if live in ("PROCESSING", "PENDING", "SUBMITTED") else "info")}"'
                    f'>{e(live)}</span></div>'
                    f'<div class="x-meta"><span class="x-label">Environment</span>'
-                   f'<span class="x-tag">sandbox</span></div>')
+                   f'<span class="x-tag">sandbox</span></div>'
+                   f'{_dev_controls(str(obj), live)}')
 
         # criticality is an int 1-5 on the model; 1 is most urgent.
         crit = int(p["criticality"] or 3)

@@ -86,6 +86,175 @@ def _transfer_client():
     return _transfers
 
 
+# A transfer's lifecycle, in one place. The dev control, the badge and the
+# buttons all read THIS, so the page cannot offer an action the API will refuse.
+TERMINAL_TRANSFER_STATES = frozenset({
+    "PAID", "COMPLETED", "SUCCESS", "FAILED", "CANCELLED", "CANCELED",
+    "EXPIRED", "RETURNED", "REJECTED",
+})
+IN_FLIGHT_TRANSFER_STATES = frozenset({
+    "PROCESSING", "PENDING", "SUBMITTED", "SENT", "CREATED", "SCHEDULED",
+    "IN_PROGRESS", "APPROVAL_PENDING", "BOOKED", "READY_FOR_DISPATCH",
+    "DISPATCHED", "IN_REVIEW",
+})
+
+
+def _dev_controls_are_offered(status: Optional[str]) -> bool:
+    """Whether settle/fail/return can do anything for this transfer.
+
+    Only while the bank says it is still moving: asking a terminal transfer to
+    transition is an HTTP 500, and an UNKNOWN status must not produce a button
+    that cannot work — a control that fails is worse than no control.
+    """
+    return (status or "").strip().upper() in IN_FLIGHT_TRANSFER_STATES
+
+
+# ------------------------------------------------------- the planning loop
+def _auto_execute() -> bool:
+    """Whether a clear payment may be sent without a human.
+
+    ON by default in sandbox (that is the whole point of the demo), OFF outside
+    it, and switchable off entirely with `CLOSEBOOK_AUTO_EXECUTE=0`. The guard is
+    the same one that gates every other route which creates a real object: a
+    non-sandbox host cannot auto-pay, whatever this returns.
+    """
+    import os
+
+    if os.environ.get("CLOSEBOOK_AUTO_EXECUTE", "").strip().lower() in (
+            "0", "false", "no", "off"):
+        return False
+    return _require_sandbox() is None
+
+
+def _run_loop(source: str) -> str:
+    """Re-plan from live state after an event, and execute whatever is clear.
+
+    Returns ONE plain sentence for the flash message. Never raises: a failure
+    here must not lose the event that triggered it (a deposit that arrived is
+    still a deposit that arrived).
+    """
+    from .domain.conductor import on_event
+
+    try:
+        run = on_event(_database(), source=source,
+                       execute=True, dry_run=not _auto_execute())
+    except Exception as exc:                       # noqa: BLE001
+        log.exception("the planning loop failed after %s", source)
+        return f" Re-planning failed ({type(exc).__name__}); nothing was sent."
+
+    bits = []
+    for v in run.verdicts:
+        if v.outcome == "EXECUTED":
+            bits.append(f"sent {v.action} {v.payable_number or ''} "
+                        f"({(v.object_id or '')[:8]})".strip())
+        elif v.outcome == "ALREADY_DONE":
+            bits.append(f"{v.payable_number} already has a live payment")
+        else:
+            bits.append(f"{v.action} {v.payable_number or ''} held".strip())
+    body = "; ".join(bits) if bits else "nothing to pay"
+    tail = "" if _auto_execute() else " (automatic execution is off)"
+    return f" Re-planned: {body}{tail}."
+
+
+@app.post("/money-out/run")
+async def money_out_run(request: Request):
+    """Re-plan and execute the clear payments, on demand."""
+    return _back(request, tab="money-out", ok=f"Money out.{_run_loop('run')}")
+
+
+@app.post("/dev/transfers/{transfer_id}/transition")
+async def dev_transfer_transition(transfer_id: str, request: Request):
+    """Sandbox dev control: settle / fail / return an in-flight transfer.
+
+    The status change is then read back the SAME way production would see it —
+    a live lookup on Airwallex, never the local row and never the request — and
+    only then does the incident logic and the settlement posting run. A repeat is
+    harmless: settlement is keyed to the Airwallex object id, so a second PAID
+    posts nothing.
+    """
+    guard = _require_sandbox()
+    if guard:
+        return _back(request, tab="money-out", err=guard)
+
+    b = await _read_body(request)
+    what = str(b.get("what") or "").strip().lower()
+    # FAILED needs a failure_type, and the two reasons are different incidents:
+    # a beneficiary the bank rejected is fixable, a bank RETURN is money coming
+    # back and needs a new approval before it is sent again.
+    plan_for = {
+        "settle": ("PAID", None),
+        "fail": ("FAILED", "INVALID_ACCOUNT_NAME_OR_NUMBER"),
+        "return": ("FAILED", "BENEFICIARY_BANK_RETURNED"),
+    }
+    if what not in plan_for:
+        return _back(request, tab="money-out",
+                     err="Pick settle, fail or return.")
+    next_status, failure_type = plan_for[what]
+
+    # A transfer the bank has already finished is READ, never asked to move
+    # again: the sandbox returns a 500 for that, and a 500 on something already
+    # where we wanted it is not a failure.
+    terminal = TERMINAL_TRANSFER_STATES
+
+    already = ""
+    try:
+        from .airwallex.client import AirwallexClient
+        from .airwallex.simulation import Simulation
+        from .airwallex.transfers import Transfers
+
+        client = AirwallexClient()
+        already = (Transfers(client).status_of(transfer_id) or "").upper()
+        if already not in terminal:
+            Simulation(client).transition_transfer(
+                transfer_id, next_status, failure_type=failure_type)
+    except Exception as exc:                       # noqa: BLE001
+        log.exception("transition failed for %s", transfer_id)
+        return _back(request, tab="money-out",
+                     err=f"Airwallex refused the transition: {exc}")
+
+    pre_note = (f"Airwallex already reported {already}, so nothing was asked of "
+                f"it and the existing state was settled instead."
+                if already in terminal else "")
+
+    # Read the truth back off Airwallex rather than repeating what we asked for.
+    live = None
+    settle_note = ""
+    try:
+        from .airwallex.transfers import Transfers as _T
+        from .settle import settle_transfer
+
+        live = _T(client).status_of(transfer_id)
+        if live:
+            with _database().session_scope() as sess:
+                outcomes = settle_transfer(sess, transfer_id, live)
+            posted = [o for o in outcomes if o.posted]
+            if posted:
+                settle_note = f" Ledger: {len(posted)} posting(s) written."
+            elif outcomes:
+                # Say what settlement ACTUALLY decided. "already settled" was
+                # printed for a CANCELLED transfer that never settled at all —
+                # the opposite claim, on the screen that exists to be trusted.
+                settle_note = f" Ledger: nothing written — {outcomes[0].reason}"
+            else:
+                settle_note = (" Ledger: no plan step holds this transfer, so "
+                               "there was nothing to post.")
+    except Exception as exc:                       # noqa: BLE001
+        log.exception("settlement after transition failed")
+        settle_note = f" Settlement could not run: {type(exc).__name__}."
+
+    try:
+        from .settle import settle_all
+        settle_all(_database())
+    except Exception:                              # noqa: BLE001
+        log.exception("sweep settlement failed")
+
+    name = {"settle": "Settle", "fail": "Fail", "return": "Return"}[what]
+    return _back(request, tab="money-out", ok=(
+        f"{name}: Airwallex now reports {live or '(unreadable)'} for "
+        f"{transfer_id[:8]}…. {pre_note}{settle_note}"
+        f"{_run_loop('dev ' + what)}"))
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {
@@ -338,7 +507,8 @@ async def approve_inflow_route(inflow_id: int, request: Request):
         ccy = inflow.currency
     return _back(request, tab="ok", ok=(
         f"Approved. {money_str(amount, ccy)} has been applied to invoice "
-        f"id(s) {applied}; the invoice and the ledger have both moved."))
+        f"id(s) {applied}; the invoice and the ledger have both moved."
+        + _run_loop("approval")))
 
 
 @app.post("/inflows/{inflow_id}/reject")
@@ -467,11 +637,13 @@ async def money_in_simulate(request: Request):
             f"{head}. Read as {result.status} via {result.method} at "
             f"{result.confidence:.2f} — BELOW the automatic threshold, so "
             f"nothing has been applied. The invoice has not moved and the cash "
-            f"is in suspense awaiting your approval. {result.reason}"))
+            f"is in suspense awaiting your approval. {result.reason}"
+            + _run_loop("deposit")))
     applied = f" -> {', '.join(result.applied)}" if result.applied else ""
     return _back(request, tab="money-in", ok=(
         f"{head}. Matched {result.status} via {result.method} at "
-        f"{result.confidence:.2f}{applied}. {result.reason}"))
+        f"{result.confidence:.2f}{applied}. {result.reason}"
+        + _run_loop("deposit")))
 
 
 @app.post("/money-in/poll")

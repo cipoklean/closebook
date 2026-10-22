@@ -26,6 +26,20 @@ from typing import Optional
 from .client import AirwallexClient
 
 
+#: How to reach each end state. PROCESSING only accepts SENT as its next
+#: status, so the failed ends have to pass THROUGH sent to get there — asking
+#: for FAILED or PAID directly is an HTTP 500, not a rejection with a reason.
+_TRANSFER_ROUTES: dict[str, tuple[str, ...]] = {
+    "SENT": ("SENT",),
+    "PAID": ("SENT", "PAID"),
+    "FAILED": ("SENT", "FAILED"),
+    "CANCELLED": ("SENT", "CANCELLED"),
+    # Not every hop is reachable from every state; the caller passes the one it
+    # wants and the route is what the sandbox actually accepts.
+    "PROCESSING": ("PROCESSING",),
+}
+
+
 class Simulation:
     """The one place the build talks to sandbox-only endpoints."""
 
@@ -78,16 +92,35 @@ class Simulation:
     # --- transfer outcomes ---------------------------------------------
     def transition_transfer(self, transfer_id: str, next_status: str,
                             failure_type: Optional[str] = None) -> dict:
-        """Move a transfer through its state machine.
-        next_status in {SENT, PAID, FAILED, CANCELLED}. failure_type is only
-        meaningful after SENT (a bank-return style reason)."""
-        body: dict = {"next_status": next_status}
-        if failure_type:
-            body["failure_type"] = failure_type
-        return self._c.call(
-            "POST", f"/api/v1/simulation/transfers/{transfer_id}/transition",
-            json_body=body, is_simulation=True,
-        )
+        """Move a transfer to its END state, walking the states in between.
+
+        Airwallex accepts only the NEXT valid status: asking for `PAID` on a
+        PROCESSING transfer returns HTTP 500 `operation_failed`, and asking for
+        `FAILED` does the same. The path from PROCESSING is SENT, so every route
+        goes through it. Verified live against the sandbox, both ways.
+
+        `failure_type` is only meaningful on the final FAILED hop; sending it on
+        an intermediate SENT is a validation error.
+        """
+        target = (next_status or "").strip().upper()
+        route = _TRANSFER_ROUTES.get(target)
+        if route is None:
+            raise ValueError(f"cannot simulate next_status={next_status!r}")
+
+        out: dict = {}
+        for i, hop in enumerate(route):
+            body: dict = {"next_status": hop}
+            if failure_type and hop == target:
+                body["failure_type"] = failure_type
+            out = self._c.call(
+                "POST", f"/api/v1/simulation/transfers/{transfer_id}/transition",
+                json_body=body, is_simulation=True,
+            )
+        return out
+
+    def settle_transfer(self, transfer_id: str) -> dict:
+        """Convenience: walk a transfer all the way to PAID."""
+        return self.transition_transfer(transfer_id, "PAID")
 
     # --- issuing outcomes ------------------------------------------------
     def simulate_issuing_authorization(self, card_id: str, *, currency: str,

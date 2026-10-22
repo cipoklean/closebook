@@ -22,6 +22,11 @@ from sqlalchemy.orm import Session
 from ..models import PlanStep, StepStatus, StepType
 from .planner import ACT_FX, ACT_PAY, Step
 
+#: A step in one of these states is DEAD — its Airwallex object will never
+#: settle. Kept here, next to `find_step`, because that is the only thing that
+#: reads it, and a second copy elsewhere would drift.
+RETIRED_STATUSES = frozenset({StepStatus.FAILED, StepStatus.CANCELLED})
+
 _TYPE_FOR_ACTION = {ACT_PAY: StepType.TRANSFER, ACT_FX: StepType.FX}
 
 
@@ -64,12 +69,46 @@ def _matches(row: PlanStep, step: Step) -> bool:
 
 
 def find_step(db: Session, step: Step) -> Optional[PlanStep]:
-    """The existing row for this (payable, action), if there is one."""
+    """The CURRENT attempt at this (payable, action), if there is one.
+
+    A RETIRED row is deliberately not returned. Its transfer will never settle,
+    so treating it as the current attempt made the payable permanently
+    unplannable: the payment fails once and the supplier can never be paid
+    again. Retirement is how a dead attempt stops blocking a new one.
+    """
     rows = (db.query(PlanStep).order_by(PlanStep.id.desc()).limit(500).all())
     for row in rows:
-        if _matches(row, step):
+        if _matches(row, step) and row.status not in RETIRED_STATUSES:
             return row
     return None
+
+
+def has_retired_attempt(db: Session, step: Step) -> bool:
+    """Whether an earlier attempt at this payment already failed.
+
+    A REPLACEMENT IS A NEW OPERATION, NOT A RETRY: the original request_id is
+    spent and the terms were approved for a payment that did not happen. So a
+    payable with a dead attempt behind it is never clear to send on its own —
+    it needs a human to approve the replacement.
+    """
+    rows = (db.query(PlanStep).order_by(PlanStep.id.desc()).limit(500).all())
+    for row in rows:
+        if _matches(row, step) and row.status in RETIRED_STATUSES:
+            return True
+    return False
+
+
+def retire_step(db: Session, row: PlanStep, *, reason: str) -> PlanStep:
+    """Mark an attempt dead so a replacement can be opened.
+
+    The `airwallex_object_id` is KEPT: it is the record of what was actually
+    sent, and clearing it would erase the only link between this book and the
+    transfer the bank has. The status is what decides who is the current attempt.
+    """
+    row.status = StepStatus.CANCELLED
+    row.reason = reason
+    db.flush()
+    return row
 
 
 def is_already_paid(db: Session, step: Step) -> bool:
@@ -128,4 +167,5 @@ def new_run_id() -> str:
     return f"run_{uuid.uuid4().hex[:12]}"
 
 
-__all__ = ["find_step", "is_already_paid", "new_run_id", "persist_plan"]
+__all__ = ["RETIRED_STATUSES", "find_step", "has_retired_attempt",
+           "is_already_paid", "new_run_id", "persist_plan", "retire_step"]

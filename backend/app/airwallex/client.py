@@ -158,21 +158,25 @@ class AirwallexClient:
         else:
             body = None
 
+        last_problem = "no response"
         for attempt in range(4):
             try:
                 resp = self._http.request(
                     method, path, json=body, params=query, headers=headers, timeout=20.0
                 )
             except httpx.TimeoutException:
+                last_problem = "the request timed out"
                 if method.upper() in {"POST"} and not is_simulation:
                     raise AmbiguousSubmit(
                         f"{path} timed out mid-flight — look up by request_id={request_id} before retrying"
                     ) from None
                 continue
-            except httpx.ConnectError:
+            except httpx.ConnectError as exc:
+                last_problem = f"could not connect: {exc}"
                 continue
 
             if resp.status_code == 429:
+                last_problem = "HTTP 429 (rate limited)"
                 retry_after = float(resp.headers.get("retry-after", 1.0))
                 time.sleep(min(retry_after, 2.0))
                 continue
@@ -191,9 +195,14 @@ class AirwallexClient:
             # 5xx on a non-simulation mutation = ambiguous
             if method.upper() == "POST" and not is_simulation:
                 raise AmbiguousSubmit(f"5xx from {path} — look up by request_id={request_id}")
+            # Remember WHY, so exhausting the retries can say what came back.
+            # This used to report every exhaustion as "rate-limited", which sent
+            # a 500-looking bug hunting for a throttle that was never there.
+            last_problem = f"HTTP {resp.status_code}: {resp.text[:200]}"
             time.sleep(0.5 * (attempt + 1))
 
-        raise ApiError(0, None, f"rate-limited/exhausted retries on {path}")
+        raise ApiError(0, None,
+                       f"gave up after 4 attempts on {path} — {last_problem}")
 
     @staticmethod
     def _safe_json(resp: httpx.Response) -> Any:
