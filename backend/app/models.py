@@ -338,3 +338,23 @@ class WorkspaceSettings(Base):
     deposits_from: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IgnoredEvent(Base):
+    """Something this instance deliberately did NOT act on.
+
+    Two Closebook instances share one Airwallex sandbox account, so each one
+    sees the other's deposits and transfer events. Those are ignored — and an
+    ignored thing that appears in suspense or in incidents would be exactly the
+    cross-contamination this table exists to prevent. It is neither: it is the
+    record of a decision, with the reason on it.
+    """
+
+    __tablename__ = "ignored_event"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(24))          # deposit | transfer
+    external_id: Mapped[str] = mapped_column(String(64))
+    instance: Mapped[str] = mapped_column(String(32))
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow)

@@ -50,6 +50,7 @@ class Simulation:
     def deposit(self, *, global_account_id: str, amount_minor: int,
                 currency: str, payer_name: Optional[str] = None,
                 reference: Optional[str] = None,
+                statement_ref: Optional[str] = None,
                 status: Optional[str] = None) -> dict:
         """Simulate a deposit into a global account.
 
@@ -76,6 +77,12 @@ class Simulation:
             body["payer_name"] = payer_name
         if reference is not None:
             body["reference"] = reference
+        # The instance tag rides on BOTH free-text fields, because which one the
+        # sandbox round-trips on `GET /api/v1/deposits` is its business, and a
+        # tag that travels on only one silently stops protecting the day that
+        # changes.
+        if statement_ref is not None:
+            body["statement_ref"] = statement_ref
         if status:
             body["status"] = status
         return self._c.call("POST", "/api/v1/simulation/deposit/create",

@@ -289,7 +289,29 @@ def state() -> dict:
              "criticality": p.criticality}
             for p in pays
         ],
+        # What this instance DELIBERATELY did not act on, and who it belonged
+        # to. Two instances share one sandbox account, so each sees the other's
+        # arrivals; they are neither suspense nor incidents, and this is where
+        # that decision is visible rather than merely greppable in a log.
+        "ignored_events": _ignored_events(),
     }
+
+
+def _ignored_events(limit: int = 20) -> dict:
+    """Foreign deposits and transfers this instance refused, newest first."""
+    from .models import IgnoredEvent
+
+    try:
+        with _database().session() as s:
+            rows = (s.query(IgnoredEvent)
+                    .order_by(IgnoredEvent.id.desc()).limit(limit).all())
+            total = s.query(IgnoredEvent).count()
+            return {"count": total, "recent": [
+                {"kind": r.kind, "external_id": r.external_id,
+                 "instance": r.instance, "detail": r.detail}
+                for r in rows]}
+    except Exception:
+        return {"count": 0, "recent": []}
 
 
 @app.get("/incidents")
@@ -433,12 +455,45 @@ def _process_pending() -> None:
         transfer_id = None
         if ev.name in {"payout.transfer.failed", "payout.transfer.cancelled",
                        "payout.transfer.paid"}:
-            transfer_id = payload.get("transfer_id") or payload.get("transaction_id")
+            # DIG, don't index. A real Airwallex payload nests the whole
+            # transfer under `data`, so `payload.get("transfer_id")` is empty
+            # and this whole ownership check would have been SKIPPED on exactly
+            # the payload shape that actually arrives. Same reader the incident
+            # handler uses, so the two cannot disagree about what a field means.
+            from .domain.incidents import _dig
+
+            transfer_id = _dig(payload, "transfer_id", "transaction_id")
+            # WHOSE TRANSFER IS THIS? One sandbox account serves two instances,
+            # so an event about the tester's payment arrives here too. The
+            # transfer's own `request_id` is the test: a request id is minted
+            # LOCALLY before a payment leaves, so one we have never seen cannot
+            # be ours. Reading the transfer once gives us both the live status
+            # and the request id.
+            # The webhook's `data` object is documented to be the same as the
+            # body of `GET /transfers/{id}`, so a well-formed event tells us the
+            # request id WITHOUT a lookup — which is what keeps our own failed
+            # payment recognisable even when the read API is having a bad day.
+            request_id = str(_dig(payload, "request_id", default="") or "")
             if transfer_id:
                 try:
-                    live_status = _transfer_client().status_of(transfer_id)
+                    obj = _transfer_client().get(transfer_id)
+                    live_status = (obj.get("status") or "").upper() or None
+                    request_id = request_id or str(obj.get("request_id") or "")
                 except Exception:
                     log.warning("lookup failed for %s", transfer_id)
+
+            from .domain.ownership import owns_transfer, record_ignored
+
+            with _database().session() as s:
+                step, why = owns_transfer(s, request_id)
+                if step is None:
+                    log.info("ignoring transfer event %s: %s", ev.event_id, why)
+                    record_ignored(s, kind="transfer",
+                                   external_id=request_id or (transfer_id or ""),
+                                   detail=why)
+                    s.commit()
+                    continue      # NO incident and NO settlement for a payment we did not send
+
         # A deposit arriving by PUSH goes through the same intake the poller
         # uses, so the two paths cannot disagree about what a deposit means or
         # post the cash twice (the intake is keyed to the deposit id).

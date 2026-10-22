@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     # which names a page rather than a person — the one field an auditor actually
     # needs was the one field that could not answer "who decided this?".
     operator_name: str = "david"
+    # WHO WE ARE, for deciding what is ours. Two instances share one Airwallex
+    # sandbox account, so an instance must be able to tell its own deposits and
+    # transfers from another's. Empty means "derive it from the database
+    # filename", so a second instance is isolated even if nobody says who it is.
+    instance_name: str = ""
+    # An UNTAGGED deposit is a real arrival (a customer paying). The primary
+    # instance takes those; an automated tester must not, or it would sweep up
+    # genuine money as well as its own.
+    ingest_unclaimed: bool = True
 
     # App
     closebook_hmac_secret: SecretStr = Field(default=SecretStr(""))

@@ -83,6 +83,26 @@ def find_step(db: Session, step: Step) -> Optional[PlanStep]:
     return None
 
 
+def find_step_by_request_id(db: Session, request_id: str) -> Optional[PlanStep]:
+    """The plan step submitted with this `request_id`, retired or not.
+
+    Deliberately INCLUDES retired rows, unlike `find_step`. `find_step` skips
+    them because a dead attempt must not block a new one; but an event arriving
+    about a retired attempt is still about a payment WE made, and that failed
+    payment is precisely what an incident is for.
+
+    This is also the ownership test for webhooks: request ids are minted locally
+    before a payment is submitted, so an event carrying one we have never seen
+    came from another instance's transfer.
+    """
+    if not request_id:
+        return None
+    return (db.query(PlanStep)
+            .filter(PlanStep.request_id == request_id)
+            .order_by(PlanStep.id.desc())
+            .first())
+
+
 def has_retired_attempt(db: Session, step: Step) -> bool:
     """Whether an earlier attempt at this payment already failed.
 

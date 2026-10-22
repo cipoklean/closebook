@@ -306,12 +306,21 @@ def _deposit_fields(deposit: dict) -> dict:
             amount_minor = int(float(amount) * 100)
         except Exception:
             return {}
+    # WHOSE IS THIS? The instance tag travels on the deposit's own free-text
+    # fields, because a second instance reading `GET /deposits` sees the same
+    # object and has no local row to check it against. The tag is stripped from
+    # the reference we store, so matching and the UI never see it.
+    from .ownership import read_tag
+
+    claimed_by, clean_reference = read_tag(
+        deposit.get("reference"), deposit.get("statement_ref"))
     return {
         "deposit_id": str(deposit.get("id") or ""),
         "currency": ccy,
         "amount_minor": amount_minor,
         "payer_name": deposit.get("payer_name") or "",
-        "reference": deposit.get("reference") or "",
+        "reference": clean_reference,
+        "claimed_by": claimed_by,
         "status": (deposit.get("status") or "").upper(),
     }
 
@@ -326,6 +335,19 @@ def ingest_deposit(db, deposit: dict, *, llm=None) -> Optional[IntakeResult]:
     # whole module exists to avoid.
     if f["status"] and f["status"] not in ("SETTLED", "PENDING"):
         log.info("deposit %s is %s — not posting cash", f["deposit_id"], f["status"])
+        return None
+    # TWO INSTANCES SHARE ONE SANDBOX ACCOUNT, so `GET /deposits` hands each of
+    # them the other's arrivals. Both the poller and the deposit webhook reach
+    # the books through here, so this is the one place the question has to be
+    # asked — and the answer is recorded, not just logged.
+    from .ownership import owns_deposit, record_ignored
+
+    mine, why = owns_deposit(f["claimed_by"])
+    if not mine:
+        log.info("ignoring deposit %s: %s", f["deposit_id"], why)
+        with db.session_scope() as s:
+            record_ignored(s, kind="deposit", external_id=f["deposit_id"],
+                           detail=why)
         return None
     with db.session_scope() as s:
         return record_and_match(
@@ -494,12 +516,20 @@ def simulate_deposit(client, *, global_account_id: str, amount_minor: int,
             f"Refused: {base} is not a sandbox host. Simulated deposits only "
             f"ever run against the Airwallex sandbox.")
 
+    # TAG IT AS OURS, on the way out. This is the only moment we know for
+    # certain the deposit is ours, and the marking has to happen here because
+    # the other instance will see this deposit in ITS `GET /deposits` and has no
+    # other way to tell whose it is.
+    from .ownership import tag_reference
+
+    tagged = tag_reference(reference)
     return Simulation(client).deposit(
         global_account_id=global_account_id,
         amount_minor=int(amount_minor),
         currency=currency.upper(),
         payer_name=payer_name or None,
-        reference=reference or None,
+        reference=tagged,
+        statement_ref=tagged,
     )
 
 

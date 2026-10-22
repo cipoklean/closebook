@@ -208,6 +208,15 @@ def handle_event(event_name: str, payload: dict, *,
     # on — an object that is not a transfer at all.
     transfer_id = _as_str(_dig(payload, "transfer_id", "transaction_id"))
     if transfer_id is None:
+        # A `data`-nested payload's TOP-LEVEL `id` is the EVENT id, not the
+        # transfer. Ask inside `data` FIRST. Falling back to the top level too
+        # early looks up — and acts on — an object that is not a transfer, which
+        # is the same class of bug as believing a `failed` webhook without
+        # checking.
+        inner = payload.get("data")
+        if isinstance(inner, dict) and isinstance(inner.get("id"), str):
+            transfer_id = _as_str(inner.get("id"))
+    if transfer_id is None:
         transfer_id = _as_str(_dig(payload, "id", "event_id"))
     failure_type = _as_str(_dig(payload, "failure_type"))
     failure_reason = _as_str(_dig(payload, "failure_reason", "reason"))

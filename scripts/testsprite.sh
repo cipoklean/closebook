@@ -87,6 +87,14 @@ mkdir -p "${ROOT}/data" "${ROOT}/logs"
 
 export CLOSEBOOK_DATABASE_URL="sqlite:///${DB}"
 export OPERATOR_NAME="${OPERATOR_NAME:-testsprite}"
+# WHO WE ARE, and what we refuse. Both instances share ONE Airwallex sandbox
+# account, so each sees the other's deposits in `GET /deposits` and receives
+# the other's transfer events. CLOSEBOOK_INSTANCE is stamped onto everything
+# this instance creates, so the operator's instance can recognise it and ignore
+# it; CLOSEBOOK_INGEST_UNCLAIMED=0 additionally stops this instance sweeping up
+# the OPERATOR's deposits, or any genuine arrival, as if it were a test.
+export CLOSEBOOK_INSTANCE="${CLOSEBOOK_INSTANCE:-testsprite}"
+export CLOSEBOOK_INGEST_UNCLAIMED=0
 # ONE PIN CONCEPT. The gate reads DEMO_APPROVER_PIN and knows nothing about
 # which instance it is in; the VALUE is what differs. Keeping the name in .env
 # as TESTSPRITE_PIN and pointing the gate at it here means the code never grows
@@ -99,6 +107,8 @@ fi
 echo "TestSprite instance"
 echo "  database : ${DB}"
 echo "  operator : ${OPERATOR_NAME}"
+echo "  instance : ${CLOSEBOOK_INSTANCE}  (deposits it creates are tagged, and it"
+echo "            ignores everything that is not its own)"
 echo "  port     : ${PORT}"
 echo "  PIN      : set (${#PIN} characters, from TESTSPRITE_PIN) — not printed"
 if [ -n "${BASE_URL}" ]; then echo "  base url : ${BASE_URL}"; fi
