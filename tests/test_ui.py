@@ -20,7 +20,7 @@ import re
 import pytest
 from fastapi.testclient import TestClient
 
-from app.db import reset_default_db, session_scope
+from app.db import get_default_db, reset_default_db, session_scope
 from app.dashboard import build_context, incidents_block, steps_block
 from app.domain.plan_store import new_run_id, persist_plan
 from app.domain.planner import ACT_PAY, Step
@@ -38,12 +38,20 @@ def _isolated_db():
     `app.main._db` is a separate instance built at import time, so a step written
     through the app's DB is still there for the next test — and a rendering test
     would then pass or fail on rows it did not create.
+
+    Also disables the live Airwallex status lookup: it makes a real network call
+    per referenced transfer, so leaving it on would make this suite slow, key-
+    dependent, and dependent on Airwallex being up.
     """
     reset_default_db()
     import app.main as m
+    import app.dashboard as dash
     from app.db import DB
     m._db = DB()
+    previous = dash.LIVE_STATUS_ENABLED
+    dash.LIVE_STATUS_ENABLED = False
     yield
+    dash.LIVE_STATUS_ENABLED = previous
 
 
 @pytest.fixture
@@ -208,7 +216,7 @@ class TestAppShell:
         """
         ctx = _ctx()
         html = render_app(ctx, tab="home")
-        expected = f"{ctx['budget']['committed_minor'] / 100:,.2f}"
+        expected = f"{ctx['budget']['expected_inflows_minor'] / 100:,.2f}"
         assert expected in html
         # a number that is in neither the context nor a real record
         assert "99,999.99" not in html
@@ -221,10 +229,78 @@ class TestLabelMapping:
         assert "Cash you have" in html
         assert "no cash yet" in html   # empty DB says so, invents nothing
 
-    def test_cash_set_aside_is_committed_with_the_floor(self):
+    def test_cash_set_aside_is_not_the_label_any_more(self, db):
+        """The old tile called EXPECTED INFLOWS "Cash set aside" — money coming
+        in, described as cash we hold and as an obligation. Both wrong."""
         html = render_app(_ctx(), tab="home")
-        assert "Cash set aside" in html
-        assert "Reserve floor" in html
+        assert "Cash set aside" not in html
+        assert "Promised to suppliers" in html
+
+    def test_promised_to_suppliers_comes_from_open_payables(self, db):
+        _payable(db, number="PO-7200", currency="USD", amount=500_000)
+        ctx = build_context([])
+        assert ctx["money"]["promised"].get("USD", 0) >= 500_000
+        html = render_app(ctx, tab="home")
+        assert "Promised to suppliers" in html
+        assert "5,000.00" in html
+
+    def test_free_to_spend_subtracts_promised_and_the_floor(self, db):
+        """free = cash - promised - reserve floor, per currency."""
+        _payable(db, number="PO-7201", currency="USD", amount=500_000)
+        ctx = build_context([])
+        m = ctx["money"]
+        cash_usd = int(ctx["cash"].get("USD", 0))
+        assert m["free"]["USD"] == cash_usd - 500_000 - m["reserve_floor_minor"]
+
+    def test_the_floor_is_charged_only_to_the_budget_currency(self, db):
+        _payable(db, number="PO-7202", currency="USD", amount=100_000)
+        ctx = build_context([])
+        m = ctx["money"]
+        # GBP is not the budget currency, so no reserve is taken from it.
+        assert m["reserve_applies_to"] == "USD"
+        assert m["free"].get("GBP", 0) == int(ctx["cash"].get("GBP", 0))
+
+    def test_a_negative_free_to_spend_is_reported_as_a_shortfall(self, db):
+        # Owe far more than we hold.
+        _payable(db, number="PO-7203", currency="USD", amount=99_000_000)
+        ctx = build_context([])
+        assert ctx["money"]["shortfall"], "a negative free figure must be flagged"
+        html = render_app(ctx, tab="home")
+        assert "Short by" in html
+        # and the headline figure must not read as money we can spend
+        assert "Free to spend" in html
+
+    def test_a_shortfall_names_the_currency(self, db):
+        _payable(db, number="PO-7204", currency="EUR", amount=50_000)
+        ctx = build_context([])
+        html = render_app(ctx, tab="home")
+        assert "EUR" in html
+        assert "Short by" in html or not ctx["money"]["shortfall"]
+
+    def test_tile_labels_carry_no_question_marks(self, db):
+        _payable(db, number="PO-7205", currency="USD", amount=1000)
+        html = render_app(build_context([]), tab="home")
+        for label in ("Cash you have", "Promised to suppliers",
+                      "Free to spend", "Automatic limit"):
+            assert f'>{label}<' in html, label
+        assert '>?</span>' not in html
+
+    def test_free_to_spend_is_computed_not_hardcoded(self, db):
+        """Two different positions must produce two different figures."""
+        _payable(db, number="PO-7207", currency="USD", amount=100_000)
+        ctx_a = build_context([])
+        _payable(db, number="PO-7206", currency="USD", amount=250_000)
+        ctx_b = build_context([])
+        assert ctx_a["money"]["free"]["USD"] != ctx_b["money"]["free"]["USD"]
+        # one more promise of 2,500.00 reduces free-to-spend by exactly that
+        assert (ctx_a["money"]["free"]["USD"]
+                - ctx_b["money"]["free"]["USD"]) == 250_000
+
+    def test_an_empty_book_shows_no_currency_rows(self, db):
+        """No cash and no payables means nothing to list — not a wall of 0.00."""
+        ctx = build_context([])
+        assert ctx["money"]["free"] == {}
+        assert ctx["money"]["promised"] == {}
 
     def test_money_we_couldnt_match_is_suspense(self):
         assert "Money we couldn" in render_app(_ctx(), tab="home")
@@ -717,6 +793,349 @@ class TestSandboxWording:
     def test_the_app_never_says_live_money(self):
         from app.ui import render_landing
         assert "live money" not in render_landing().lower()
+
+
+class TestHeldPaymentsAreExplained:
+    """A held payment must show the rule and its numbers, and the header must
+    agree with the tab. "Nothing needs your OK" above a held payment is the
+    contradiction this replaced."""
+
+    def _held(self, db, *, depends_on=None, amount=700_000, ccy="USD"):
+        """A payable whose dependency is unpaid, so the planner DEFERs it."""
+        from app.db import session_scope
+        from app.models import (InvoicePayable, InvoiceReceivable, PayStatus,
+                                PayoutMethod, RecStatus, Supplier, Customer)
+
+        with session_scope() as s:
+            dep_id = None
+            if depends_on:
+                cust = Customer(name="Harrow & Co")
+                s.add(cust)
+                s.flush()
+                rec = InvoiceReceivable(
+                    number=depends_on, customer_id=cust.id, currency="GBP",
+                    amount_minor=800_000, amount_paid_minor=480_000,
+                    status=RecStatus.PARTIAL)
+                s.add(rec)
+                s.flush()
+                dep_id = rec.id          # WITHOUT this the payable is not held
+            sup = Supplier(name="Shenzhen Weave Co",
+                           payout_method=PayoutMethod.LOCAL)
+            s.add(sup)
+            s.flush()
+            s.add(InvoicePayable(
+                number="PO-7100", supplier_id=sup.id, currency=ccy,
+                amount_minor=amount, status=PayStatus.HELD, criticality=3,
+                depends_on_receivable_id=dep_id))
+
+    def test_a_held_payable_shows_the_planners_own_reason(self, db):
+        self._held(db, depends_on="INV-0042")
+        ctx = build_context([])
+        po = next(p for p in ctx["payables"] if p["number"] == "PO-7100")
+        assert po["plan_action"] == "DEFER"
+        assert po["plan_policy_reason"] == "dependency_not_met"
+        # the reason names the invoice AND the outstanding amount
+        assert "INV-0042" in po["plan_reason"]
+        assert "3,200" in po["plan_reason"].replace("3200", "3,200")
+
+    def test_the_hold_reason_reaches_the_page(self, db):
+        self._held(db, depends_on="INV-0042")
+        html = render_app(build_context([]), tab="home")
+        assert "INV-0042" in html
+        assert "part-payment does not release the supplier" in html
+
+    def test_the_header_agrees_that_a_payment_is_held(self, db):
+        self._held(db, depends_on="INV-0042")
+        ctx = build_context([])
+        assert ctx["waiting"], "the payable must be reported as waiting"
+        html = render_app(ctx, tab="home")
+        # it must NOT claim nothing is happening
+        assert "on hold" in html
+        assert "Nothing needs you right now" not in html
+
+    def test_the_ok_tab_shows_held_payments_too(self, db):
+        """Header and tab must agree: if the header mentions a hold, the tab
+        the header links to must show it."""
+        self._held(db, depends_on="INV-0042")
+        ctx = build_context([])
+        html = render_app(ctx, tab="ok")
+        assert "Held — and not waiting on you" in html
+        assert "INV-0042" in html
+
+    def test_a_payable_over_the_limit_without_an_object_id_awaits_approval(self, db):
+        """Over the auto-pay limit and not yet sent => needs a human."""
+        from app.db import session_scope
+        from app.models import InvoicePayable, PayStatus, PayoutMethod, Supplier
+
+        with session_scope() as s:
+            sup = Supplier(name="Big Co", payout_method=PayoutMethod.LOCAL)
+            s.add(sup)
+            s.flush()
+            s.add(InvoicePayable(number="PO-7101", supplier_id=sup.id,
+                                 currency="USD", amount_minor=900_000,
+                                 status=PayStatus.HELD, criticality=3))
+        ctx = build_context([])
+        po = next(p for p in ctx["payables"] if p["number"] == "PO-7101")
+        assert po["plan_needs_approval"] is True
+        assert any(p["number"] == "PO-7101" for p in ctx["awaiting_approval"])
+        html = render_app(ctx, tab="home")
+        assert "waiting for your OK" in html
+
+    def test_an_already_sent_payable_is_not_asked_for_approval_again(self, db):
+        """A submitted step already has its approval. Re-asking invites a second
+        payment for the same bill."""
+        from app.db import session_scope
+        from app.models import InvoicePayable, PayStatus, PayoutMethod, Supplier
+
+        with session_scope() as s:
+            sup = Supplier(name="Big Co", payout_method=PayoutMethod.LOCAL)
+            s.add(sup)
+            s.flush()
+            s.add(InvoicePayable(number="PO-7102", supplier_id=sup.id,
+                                 currency="USD", amount_minor=900_000,
+                                 status=PayStatus.HELD, criticality=3))
+        _write_step(db, payable="PO-7102", amount=900_000, currency="USD",
+                    reason="sent", object_id="obj-7102",
+                    status=StepStatus.SUBMITTED)
+        ctx = build_context([])
+        assert not any(p["number"] == "PO-7102"
+                       for p in ctx["awaiting_approval"])
+
+
+class TestStaleFailuresDoNotMaskSuccess:
+    """Three pre-fix CANCELLED rows for PO-7003 outranked the newer SUBMITTED
+    transfer that actually went out, so the page claimed a payment failed when
+    it was in flight."""
+
+    def _legacy_step(self, db, *, payable, status, reason, obj=None):
+        """Insert a PlanStep row DIRECTLY.
+
+        `persist_plan` converges on one row per (payable, action), so a payable
+        can only hold several rows if they predate that convergence — which is
+        exactly the real PO-7003 situation. Reproducing it means writing the rows
+        by hand, not through the writer that now prevents it.
+        """
+        import json as _json
+        from app.db import session_scope
+        from app.models import PlanStep, StepType
+
+        with session_scope() as s:
+            s.add(PlanStep(
+                run_id=None, type=StepType.TRANSFER,
+                payload_json=_json.dumps({"payable_number": payable,
+                                          "action": "PAY"}),
+                reason=reason, status=status, airwallex_object_id=obj))
+
+    def test_a_newer_success_supersedes_an_older_failure(self, db):
+        from app.models import StepStatus
+
+        self._legacy_step(db, payable="PO-7103", status=StepStatus.CANCELLED,
+                          reason="api error: [validation_failed] old")
+        self._legacy_step(db, payable="PO-7103", status=StepStatus.SUBMITTED,
+                          reason="sent ok", obj="obj-7103")
+
+        ctx = build_context([])
+        # THE BUG: the page reported PO-7003 as failed while it was in flight.
+        assert not any(p["payable_number"] == "PO-7103"
+                       for p in ctx["problems"]), "a superseded failure is not current"
+        # The failed attempt is still real history, and stays visible as such —
+        # it is the evidence for what went wrong, not a claim about now.
+        hist = [p for p in ctx["past_attempts"]
+                if p["payable_number"] == "PO-7103"]
+        assert len(hist) == 1
+        assert hist[0]["status"] == "CANCELLED"
+
+    def test_a_success_itself_is_never_listed_as_a_past_attempt(self, db):
+        """A payment that went through must not appear under a failures heading:
+        that reads as a failure that happened to recover, which is false."""
+        from app.models import StepStatus
+
+        self._legacy_step(db, payable="PO-7106", status=StepStatus.SUBMITTED,
+                          reason="within the automatic limit", obj="obj-7106")
+        ctx = build_context([])
+        assert not any(p["payable_number"] == "PO-7106"
+                       for p in ctx["problems"] + ctx["past_attempts"])
+
+    def test_the_superseded_failure_keeps_its_exact_reason_as_history(self, db):
+        from app.models import StepStatus
+
+        self._legacy_step(
+            db, payable="PO-7104", status=StepStatus.CANCELLED,
+            reason=("api error: [validation_failed] bad. | "
+                    "field=source_currency code=001 | bad."))
+        self._legacy_step(db, payable="PO-7104", status=StepStatus.SUBMITTED,
+                          reason="sent ok", obj="obj-7104")
+
+        ctx = build_context([])
+        hist = [p for p in ctx["past_attempts"]
+                if p["payable_number"] == "PO-7104"]
+        assert hist, "history must not be silently dropped"
+        assert hist[0]["api_error"]["field"] == "source_currency"
+        assert hist[0]["api_error"]["code"] == "001"
+
+    def test_the_current_state_is_the_newest_row_not_the_worst_one(self, db):
+        """Guards the original bug from the other side: an older FAILURE must not
+        outrank a newer success, and a newer failure must still be reported."""
+        from app.models import StepStatus
+
+        self._legacy_step(db, payable="PO-7105", status=StepStatus.SUBMITTED,
+                          reason="sent ok", obj="obj-7105")
+        self._legacy_step(db, payable="PO-7105", status=StepStatus.FAILED,
+                          reason="api error: [validation_failed] newest")
+
+        ctx = build_context([])
+        assert any(p["payable_number"] == "PO-7105"
+                   for p in ctx["problems"]), "the NEWEST row is a failure"
+
+
+class TestDisplayedStateIsTheNewestRow:
+    """`payable_state` read `existing is None or action == "TRANSFER"`, which is
+    true for EVERY transfer row — so each older transfer overwrote the newer one
+    and the OLDEST won. PO-7003 displayed CANCELLED (its first failed attempt)
+    while its newest step was SUBMITTED and in flight."""
+
+    def _step(self, db, *, payable, status, obj, reason="r", action="PAY",
+              amount=180_000):
+        import json as _json
+        from app.db import session_scope
+        from app.models import PlanStep, StepType
+
+        with session_scope() as s:
+            s.add(PlanStep(
+                run_id=None, type=StepType.TRANSFER,
+                payload_json=_json.dumps({"payable_number": payable,
+                                          "action": action,
+                                          "amount_minor": amount,
+                                          "currency": "USD"}),
+                reason=reason, status=status, airwallex_object_id=obj))
+
+    def test_the_oldest_transfer_does_not_overwrite_the_newest(self, db):
+        from app.models import StepStatus
+
+        _payable(db, number="PO-7300", currency="USD", amount=180_000)
+        self._step(db, payable="PO-7300", status=StepStatus.CANCELLED,
+                   obj="old-7300")
+        self._step(db, payable="PO-7300", status=StepStatus.SUBMITTED,
+                   obj="new-7300")
+        ctx = build_context([])
+        po = next(p for p in ctx["payables"] if p["number"] == "PO-7300")
+        assert po["display_status"] == "SUBMITTED", "the newest row is the state"
+        assert po["airwallex_object_id"] == "new-7300"
+
+    def test_a_transfer_still_outranks_an_fx_step_for_the_same_payable(self, db):
+        """The original intent stands: the payment describes a payable, not the
+        conversion that funds it."""
+        import json as _json
+        from app.db import session_scope
+        from app.models import PlanStep, StepStatus, StepType
+
+        _payable(db, number="PO-7301", currency="USD", amount=100_000)
+
+        with session_scope() as s:
+            # FX is NEWER, but the transfer is what the payable IS
+            s.add(PlanStep(run_id=None, type=StepType.TRANSFER,
+                           payload_json=_json.dumps({"payable_number": "PO-7301",
+                                                     "action": "PAY",
+                                                     "amount_minor": 100}),
+                           reason="pay", status=StepStatus.SUBMITTED,
+                           airwallex_object_id="tr-7301"))
+            s.add(PlanStep(run_id=None, type=StepType.FX,
+                           payload_json=_json.dumps({"payable_number": "PO-7301",
+                                                     "action": "FX",
+                                                     "amount_minor": 0}),
+                           reason="fx", status=StepStatus.SUBMITTED,
+                           airwallex_object_id="fx-7301"))
+        ctx = build_context([])
+        po = next(p for p in ctx["payables"] if p["number"] == "PO-7301")
+        assert po["airwallex_object_id"] == "tr-7301"
+        assert po["display_status"] == "SUBMITTED"
+
+
+class TestLiveStatusOnlyAsksAboutTransfers:
+    def test_an_fx_conversion_is_not_looked_up_as_a_transfer(self, db):
+        """An FX row's object id is a CONVERSION. Asking /transfers about it
+        404s, and the failure reads as 'we could not find out' when the truth is
+        it was never a transfer."""
+        import json as _json
+        from app.db import session_scope
+        from app.models import PlanStep, StepStatus, StepType
+        import app.dashboard as dash
+
+        with session_scope() as s:
+            s.add(PlanStep(run_id=None, type=StepType.FX,
+                           payload_json=_json.dumps({"payable_number": "PO-7302",
+                                                     "action": "FX"}),
+                           reason="fx", status=StepStatus.SUBMITTED,
+                           airwallex_object_id="conversion-abc"))
+
+        prev = dash.LIVE_STATUS_ENABLED
+        dash.LIVE_STATUS_ENABLED = True
+        try:
+            # A real client would be constructed; with no credentials the call
+            # fails, so assert on WHAT WAS ASKED, not on the answer.
+            asked = []
+            import app.airwallex.transfers as T
+
+            class FakeTransfers:
+                def __init__(self, *a, **k):
+                    pass
+
+                def status_of(self, tid):
+                    asked.append(tid)
+                    return "PROCESSING"
+
+            import app.airwallex.client as C
+            orig_c, orig_t = C.AirwallexClient, T.Transfers
+            C.AirwallexClient = lambda *a, **k: object()
+            T.Transfers = FakeTransfers
+            try:
+                out = dash.live_transfer_statuses(
+                    get_default_db().session())
+            finally:
+                C.AirwallexClient, T.Transfers = orig_c, orig_t
+        finally:
+            dash.LIVE_STATUS_ENABLED = prev
+
+        assert asked == [], "a conversion id must never be asked about as a transfer"
+        assert out == {} or "conversion-abc" not in out
+
+
+class TestApiErrorIsExact:
+    """Item 3: pull the real code and field out of the stored failure."""
+
+    def test_the_field_and_code_are_parsed(self):
+        from app.dashboard import parse_api_error
+        r = ("api error: [validation_failed] The request failed our schema "
+             "validation. | field=source_currency code=001 | The request failed.")
+        d = parse_api_error(r)
+        assert d["field"] == "source_currency"
+        assert d["code"] == "001"
+        assert d["error"] == "validation_failed"
+
+    def test_the_plain_reason_names_the_field(self):
+        from app.dashboard import _plain_reason
+        r = "api error: [validation_failed] bad. | field=reason code=001 | bad."
+        out = _plain_reason(r)
+        assert "`reason`" in out
+        assert "code 001" in out
+        # and it never invents a field when none is recorded
+        assert "required field" in _plain_reason(
+            "api error: [validation_failed] The request failed our schema "
+            "validation. Refer to the errors object.")
+
+    def test_a_reason_with_no_structure_returns_no_detail(self):
+        from app.dashboard import parse_api_error
+        assert parse_api_error("something went wrong") == {}
+        assert parse_api_error("") == {}
+
+    def test_the_raw_error_stays_available_in_full(self, db):
+        _cancelled_step(db, reason=("api error: [validation_failed] The request "
+                                    "failed our schema validation. | "
+                                    "field=source_currency code=001 | tail."))
+        ctx = build_context([])
+        row = (ctx["problems"] or ctx["past_attempts"])[0]
+        assert "schema validation" in row["reason"]
+        assert row["reason"].endswith("tail.")    # unabridged
 
 
 # ------------------------------------------------------------- incidents

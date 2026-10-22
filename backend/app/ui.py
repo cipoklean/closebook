@@ -588,45 +588,88 @@ def _home(c: dict) -> str:
     cash_str = " · ".join(f"{k} {money(v)}" for k, v in cash.items()) or "no cash yet"
 
     cards = []
+    m = c["money"]
+    bud_ccy = b["currency"]
+
+    # 1. Cash actually held, per currency.
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["wallet"]}</span>'
         '<div class="x-label">Cash you have</div>'
         f'<div class="x-fig">{e(cash_str)}</div>'
-        f'<div class="x-statnote">Balanced: {"yes" if c["ledger_balanced"] else "no"}</div>'
+        f'<div class="x-statnote">Ledger balance, per currency. Balanced: '
+        f'{"yes" if c["ledger_balanced"] else "no"}.</div>'
+        # Expected inflows are NOT cash: label them as money still to arrive, on
+        # their own line, instead of folding them into a balance we do not hold.
+        f'<div class="x-statnote">Plus {e(bud_ccy)} '
+        f'{money(b["expected_inflows_minor"])} invoiced and expected, not yet '
+        f'landed.</div>'
     )))
+
+    # 2. What we owe. This is the number "Cash set aside" was standing in for —
+    # it was never that: the old figure was EXPECTED INFLOWS (money coming in),
+    # so it neither matched the cash held nor described an obligation.
+    promised_str = " · ".join(f"{k} {money(v)}" for k, v in m["promised"].items())
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["shield"]}</span>'
-        '<div class="x-label">Cash set aside'
-        '<span class="x-tip" tabindex="0" role="note" data-tip="Money already promised to '
-        'suppliers. Paying it again is how a treasury gets into trouble.">?</span></div>'
-        f'<div class="x-fig">USD {money(b["committed_minor"])}</div>'
-        f'<div class="x-statnote">Reserve floor: USD {money(b["reserve_floor_minor"])}</div>'
+        '<div class="x-label">Promised to suppliers</div>'
+        f'<div class="x-fig">{e(promised_str) if promised_str else "Nothing owed"}</div>'
+        '<div class="x-statnote">Open payables, per currency. A part-payment '
+        'does not release one.</div>'
     )))
+
+    # 3. Free to spend = cash - promised - the reserve floor (on the budget's
+    # currency only). A negative figure is a genuine shortfall and is shown as
+    # one, rather than as a "free" number larger than the cash we hold.
+    free_rows = "".join(
+        f'<div>{e(ccy)} {money(v)}</div>' for ccy, v in m["free"].items()) \
+        or "<div>Nothing to spend yet</div>"
+    short = m["shortfall"]
+    if short:
+        short_str = " · ".join(f"{k} {money(v)}" for k, v in short.items())
+        free_note = (f'<div class="x-statnote" style="color:var(--x-bad)">'
+                     f'Short by {e(short_str)}. Cash on hand does not cover what '
+                     f'is promised plus the {e(m["reserve_applies_to"])} '
+                     f'{money(m["reserve_floor_minor"])} reserve floor.</div>')
+    else:
+        free_note = (f'<div class="x-statnote">Cash minus what is promised, '
+                     f'minus the {e(m["reserve_applies_to"])} '
+                     f'{money(m["reserve_floor_minor"])} reserve floor.</div>')
+    cards.append(_card(span="x-span-3", inner=(
+        f'<span class="x-stat-ico">{_I["bolt"]}</span>'
+        '<div class="x-label">Free to spend</div>'
+        f'<div class="x-fig">{free_rows}</div>'
+        + free_note
+    )))
+
     n_unmatched = len(c["unmatched"])
     susp_str = " · ".join(f"{k} {money(v)}" for k, v in susp.items())
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["in"]}</span>'
-        '<div class="x-label">Money we couldn\'t match'
-        '<span class="x-tip" tabindex="0" role="note" data-tip="Deposits we could not '
-        'safely link to an invoice. Nothing is applied to the books until a person '
-        'confirms it.">?</span></div>'
+        '<div class="x-label">Money we couldn\'t match</div>'
         f'<div class="x-fig">{e(susp_str) if susp_str else "Nothing waiting"}</div>'
         f'<div class="x-statnote">{n_unmatched} payment'
         f'{"s" if n_unmatched != 1 else ""} held</div>'
     )))
     cards.append(_card(span="x-span-3", inner=(
-        f'<span class="x-stat-ico">{_I["bolt"]}</span>'
-        '<div class="x-label">Automatic limit'
-        '<span class="x-tip" tabindex="0" role="note" data-tip="Anything at or under this '
-        'pays without asking. Over it, a person approves.">?</span></div>'
-        f'<div class="x-fig">USD {money(b["auto_pay_limit_minor"])}</div>'
-        '<div class="x-statnote">Per payment</div>'
+        f'<span class="x-stat-ico">{_I["scale"]}</span>'
+        '<div class="x-label">Automatic limit</div>'
+        f'<div class="x-fig">{e(bud_ccy)} {money(b["auto_pay_limit_minor"])}</div>'
+        f'<div class="x-statnote">Per payment. Anything over it needs a person. '
+        f'Reserve floor {e(bud_ccy)} {money(m["reserve_floor_minor"])}.</div>'
     )))
 
-    # banner — must agree with the Problems list, never contradict it.
-    n_ok = len(c["approvable"])
+    # banner — must agree with the Problems list, the held payments AND the
+    # payables awaiting approval, never contradict any of them. "Nothing needs
+    # you" above a held payment is the contradiction this replaced.
+    #
+    # Counted as distinct OBLIGATIONS: an approvable step and its payable are the
+    # same commitment, so summing them would double-count one decision.
+    _ok_obligations = {s.get("payable_number") for s in c["approvable"]}
+    _ok_obligations |= {p["number"] for p in c.get("awaiting_approval") or []}
+    _ok_obligations.discard(None)
+    n_ok = len(_ok_obligations)
     n_prob = len(c["problems"])
-    n_past = len(c.get("past_attempts") or [])
+    n_wait = len(c.get("waiting") or [])
     if n_ok:
         banner_head = (f'{n_ok} payment{"s" if n_ok != 1 else ""} '
                        f'waiting for your OK')
@@ -643,6 +686,18 @@ def _home(c: dict) -> str:
         banner_icon = _I["warn"]
         banner_href = '/app?tab=money-out'
         banner_cta = 'See what failed'
+    elif n_wait:
+        # Held, but NOT a human decision: quote the planner's own reason so the
+        # header says what the payment is actually waiting for.
+        first = c["waiting"][0]
+        banner_head = (f'Nothing needs your OK — {n_wait} payment'
+                       f'{"s" if n_wait != 1 else ""} on hold')
+        banner_sub = (f'{first["number"]}: {first.get("plan_reason") or "held"}'
+                      if first.get("plan_reason") else
+                      'Held by policy, not waiting on a human.')
+        banner_icon = _I["clock"]
+        banner_href = '/app?tab=ok'
+        banner_cta = 'See why'
     else:
         banner_head = 'Nothing needs you right now'
         banner_sub = ('Every payment is inside your limits and explained. '
@@ -741,8 +796,26 @@ def _home(c: dict) -> str:
             f'<ul class="x-todo">{prob_items}</ul>'
             f'<p class="x-help">These cannot be approved. They need a new plan.</p>'
             + (f'<details class="x-hist"><summary>Past attempts '
-               f'({n_past})</summary><ul class="x-todo">{past_items}</ul></details>'
+               f'({len(c.get("past_attempts") or [])})</summary>'
+               f'<ul class="x-todo">{past_items}</ul></details>'
                if past_items else '')))
+
+    # Held payments, with the planner's own rule and numbers. A header that says
+    # nothing needs the reader, directly above a held payment, is the mismatch
+    # this section exists to close.
+    wait_inner = ""
+    for w in c.get("waiting") or []:
+        wait_inner = _card(span="x-span-4", inner=(
+            '<div class="x-cardhead"><div><h3>On hold</h3>'
+            '<p class="x-help">Held by policy — not waiting on a person.</p>'
+            '</div></div><ul class="x-todo">' + "".join(
+                f'<li><span class="x-todo-ico is-warn">{_I["clock"]}</span>'
+                f'<div><b>{e(p["number"])} · {e(p["supplier"] or "supplier")}</b>'
+                f'<p>{e(p.get("plan_reason") or "held")}</p></div>'
+                f'<span class="x-pill x-pill--warn">'
+                f'{e(p.get("plan_policy_reason") or "held")}</span></li>'
+                for p in c["waiting"])
+            + '</ul>'))
 
     inc = c["incidents"]
     inc_inner = ""
@@ -760,12 +833,9 @@ def _home(c: dict) -> str:
             'confirms a failure.</p></div></div>'
             f'<ul class="x-todo">{rows}</ul>'))
 
-    if not prob_inner and not inc_inner:
-        side = inc_inner
-    else:
-        side = (prob_inner or inc_inner)
-        if prob_inner and inc_inner:
-            side = prob_inner + inc_inner
+    # Compose the right-hand column from whatever exists, held payments included
+    # so the header's claim is visible on the page beneath it.
+    side = "".join(x for x in (prob_inner, wait_inner, inc_inner) if x)
 
     balance = _card(span="x-span-12", inner=(
         f'<div class="x-balance">'
@@ -1094,7 +1164,27 @@ def _ok(c: dict) -> str:
         'move money — the executor re-checks the amount, the supplier and the rate '
         'against the hash you approved, every single time.</span></div>'))
 
-    return body + note
+    # Anything held, with the planner's exact rule. The header says nothing needs
+    # the reader; this is the evidence for that claim, on the same screen.
+    held = ""
+    waits = c.get("waiting") or []
+    if waits:
+        held = _card(inner=(
+            '<div class="x-cardhead"><div><h3>Held — and not waiting on you</h3>'
+            '<p class="x-help">No approval can release these. They are waiting on '
+            'something outside your control, and Closebook will re-plan '
+            'automatically when it happens.</p></div>'
+            f'<span class="x-pill x-pill--warn">{len(waits)} held</span></div>'
+            '<ul class="x-todo">' + "".join(
+                f'<li><span class="x-todo-ico is-warn">{_I["clock"]}</span>'
+                f'<div><b>{e(p["number"])} · {e(p["supplier"] or "supplier")}</b>'
+                f'<p>{e(p.get("plan_reason") or "held")}</p></div>'
+                f'<span class="x-pill x-pill--warn">'
+                f'{e(p.get("plan_policy_reason") or "held")}</span></li>'
+                for p in waits)
+            + '</ul>'))
+
+    return body + held + note
 
 
 # ---- AI activity

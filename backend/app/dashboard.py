@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from .domain.agent_tools import ALLOWED_TOOLS
 from .models import (
     AgentTrace, Approval, ApprovalStatus, Customer, Inflow, InvoicePayable,
-    InvoiceReceivable, MatchStatus, PlanStep, StepStatus, Supplier,
+    InvoiceReceivable, MatchStatus, PayStatus, PlanStep, StepStatus, StepType,
+    Supplier,
 )
 
 log = logging.getLogger("closebook.dashboard")
@@ -31,12 +33,64 @@ def _loads(text) -> dict:
 
 # ---------------------------------------------------------------- budget
 def budget_block() -> dict:
+    """The committed-cash budget, named for what it actually IS.
+
+    `expected_inflows_minor` is money invoiced and expected to LAND — it is not
+    cash on hand and it is not money set aside. Every dollar of it is USD. The
+    old UI called it "Cash set aside", which read as cash we hold (we hold a
+    fraction of it) and as an obligation (it is the opposite — money coming in).
+    The names here match the file's own docstring in settings/committed_cash.json.
+    """
     from .domain.policy import load_budget
     b = load_budget()
     return {
-        "committed_minor": b.committed.available_minor(),
+        "currency": b.committed.currency,
+        "expected_inflows_minor": b.committed.expected_inflows_minor,
+        "earmarked_minor": b.committed.earmarked_minor,
+        "available_minor": b.committed.available_minor(),
         "reserve_floor_minor": int(b.reserve_floor_usd * 100),
         "auto_pay_limit_minor": int(b.auto_pay_limit_usd * 100),
+    }
+
+
+def money_block(s, cash: dict, budget: dict) -> dict:
+    """Cash, what is promised, and what is genuinely free to spend.
+
+    `free = cash - promised - reserve floor`, computed PER CURRENCY. The floor is
+    a single-currency policy (the budget's), so it is charged only against that
+    currency rather than smeared across every balance — otherwise a GBP balance
+    would silently absorb a USD reserve.
+
+    A negative result is a real shortfall and is reported as one. Showing a
+    "free" figure larger than the cash actually held, with no explanation, was
+    the original defect.
+    """
+    promised: dict[str, int] = {}
+    for p in s.query(InvoicePayable).all():
+        if p.status == PayStatus.PAID:
+            continue
+        promised[p.currency] = promised.get(p.currency, 0) + p.amount_minor
+
+    floor = budget["reserve_floor_minor"]
+    budget_ccy = budget["currency"]
+
+    free: dict[str, int] = {}
+    shortfall: dict[str, int] = {}
+    for ccy in sorted(set(cash) | set(promised)):
+        held = int(cash.get(ccy, 0))
+        owed = int(promised.get(ccy, 0))
+        reserved = floor if ccy == budget_ccy else 0
+        net = held - owed - reserved
+        free[ccy] = net
+        if net < 0:
+            shortfall[ccy] = -net
+
+    return {
+        "promised": promised,
+        "free": free,
+        "shortfall": shortfall,
+        "reserve_applies_to": budget_ccy,
+        "reserve_floor_minor": floor,
     }
 
 
@@ -61,6 +115,34 @@ def _is_approvable(step: PlanStep, payload: dict) -> bool:
     return True
 
 
+# `field=source_currency code=001` — the shape `executor._error_detail` writes
+# into plan_step.reason, and the only place the real Airwallex error survives:
+# there is no transfer-response table, so the stored reason IS the record.
+_ERR_DETAIL_RE = re.compile(
+    r"field=(?P<field>[A-Za-z0-9_.\[\]]+)\s+code=(?P<code>[A-Za-z0-9_.-]+)")
+
+
+def parse_api_error(reason: str) -> dict:
+    """Pull the Airwallex code, field and message out of a stored failure.
+
+    Returns {} when the string carries no structured detail, so the caller can
+    fall back to prose rather than inventing a field name.
+    """
+    r = (reason or "").strip()
+    out: dict = {}
+    m = _ERR_DETAIL_RE.search(r)
+    if m:
+        out["field"] = m.group("field")
+        out["code"] = m.group("code")
+    elif match := re.search(r"code=(?P<code>[A-Za-z0-9_.-]+)", r):
+        out["code"] = match.group("code")
+    # `[validation_failed]` / `[invalid_request]` — the top-level error code.
+    tag = re.search(r"\[(?P<tag>[a-z_]+)\]", r)
+    if tag:
+        out["error"] = tag.group("tag")
+    return out
+
+
 def _plain_reason(reason: str) -> str:
     """A one-line plain-English summary of a failure reason.
 
@@ -71,7 +153,15 @@ def _plain_reason(reason: str) -> str:
     """
     r = (reason or "").strip()
     low = r.lower()
+    detail = parse_api_error(r)
+    field = detail.get("field")
+
     if "validation_failed" in low or "schema validation" in low:
+        if field:
+            # Name the field. This is the difference between "something was
+            # invalid" and a fix.
+            return (f"The bank rejected the request: the `{field}` field was "
+                    f"missing or invalid (code {detail.get('code', '001')}).")
         return "The bank rejected the request: a required field was missing or invalid."
     if "source_currency" in low:
         return "The bank rejected the request: the currency to debit was missing."
@@ -79,7 +169,7 @@ def _plain_reason(reason: str) -> str:
         return "Not permitted: this account is not allowed to do that."
     if "insufficient" in low:
         return "Not enough money in that currency."
-    if "invalid beneficiary" in low or "beneficiary" in low and "invalid" in low:
+    if "beneficiary" in low and "invalid" in low:
         return "The beneficiary details were rejected by the bank."
     if "compliance" in low or "hold" in low:
         return "The payment is on a compliance hold."
@@ -145,10 +235,22 @@ def steps_block(s) -> dict:
 
         if payable:
             existing = payable_state.get(payable)
-            # Prefer the money-moving step over an FX step when both exist.
-            if existing is None or action == "TRANSFER":
+            # Rows arrive NEWEST FIRST, so the first entry for a payable is its
+            # current state. The one exception is a preference for the money-
+            # moving step: when a payable has both an FX step and a transfer, the
+            # transfer is the one that describes the payment.
+            #
+            # This previously read `existing is None or action == "TRANSFER"`,
+            # which is true for EVERY transfer row — so each older transfer
+            # overwrote the newer one and the OLDEST transfer won. That is why
+            # PO-7003 displayed CANCELLED (its first, failed attempt) while its
+            # newest step was SUBMITTED and in flight.
+            if existing is None or (
+                    action == "TRANSFER" and existing.get("action") != "TRANSFER"):
                 payable_state[payable] = {
                     "status": st.status.value,
+                    "action": action,
+                    "step_id": st.id,
                     "reason": reason,
                     "airwallex_object_id": st.airwallex_object_id,
                 }
@@ -174,12 +276,22 @@ def steps_block(s) -> dict:
                 "hash_prefix": (row.bound_hash[:12] if row else None),
             })
         else:
+            api_error = parse_api_error(reason)
+            if api_error.get("field"):
+                # The whole point of parsing: an operator reading the log learns
+                # WHICH field the bank rejected, not merely that something was.
+                log.warning("plan_step %s (%s) rejected by the bank: field=%s "
+                            "code=%s error=%s", st.id,
+                            payable or "no payable",
+                            api_error.get("field"), api_error.get("code"),
+                            api_error.get("error"))
             problems.append({
                 "step_id": st.id,
                 "payable_number": payable,
                 "status": st.status.value,
                 "reason": reason,
                 "plain_reason": _plain_reason(reason),
+                "api_error": api_error,
                 "currency": pl.get("currency"),
                 "amount_minor": pl.get("amount_minor"),
                 # A step that already reached the bank is history, not a problem
@@ -188,36 +300,48 @@ def steps_block(s) -> dict:
                 "current": _is_current(st, latest_run),
             })
 
-    # One entry per payable, but a FAILURE outranks a success: a payable whose
-    # newest step succeeded is fine, while one that failed is a problem even if
-    # a later row for it exists. Rows arrive newest-first, so the default pick
-    # would otherwise be the newest and a failure could be silently dropped.
-    _rank = {"FAILED": 0, "CANCELLED": 1}
+    # ONE payable, ONE current state — decided by RECENCY, not severity.
+    #
+    # An earlier version let a FAILED/CANCELLED row outrank a success "even if a
+    # later row exists". That kept a stale failure visible, but it also meant a
+    # payable whose LATEST attempt succeeded was still reported as failed: three
+    # pre-fix CANCELLED rows for PO-7003 outranked the newer SUBMITTED transfer
+    # that actually went out, so the dashboard claimed a payment had failed when
+    # it was in flight. Rows arrive newest-first (id DESC), so the FIRST entry
+    # for a payable is its current state and everything after it is history.
     by_payable: dict[str, dict] = {}
+    superseded: list[dict] = []
     for p in problems:
         key = p["payable_number"] or "unknown"
-        cur = by_payable.get(key)
-        if cur is None:
-            by_payable[key] = p
-            continue
-        if _rank.get(p["status"], 9) < _rank.get(cur["status"], 9):
+        if key in by_payable:
+            superseded.append(p)
+        else:
             by_payable[key] = p
 
     current_problems: list[dict] = []
     past_attempts: list[dict] = []
     for p in by_payable.values():
-        # A SUCCESS is not a past attempt at all. A settled step whose reason is
-        # ordinary plan prose ("within the auto-pay limit") is a payment that
-        # went through — listing it under "Past attempts" reads as a failure
-        # that happened to recover, which is a lie.
-        if p["settled"] and p["status"] in ("SUBMITTED", "APPROVED", "PAID"):
-            continue
         if p["status"] in ("CANCELLED", "FAILED"):
             # Still-current failures are actionable; superseded ones are history.
             (current_problems if p["current"] else past_attempts).append(p)
-        elif p["settled"]:
+        elif p["settled"] and p["status"] in ("SUBMITTED", "APPROVED", "PAID"):
+            # A success is the current state, so it is not a problem AND not a
+            # "past attempt" — listing a payment that went through under a
+            # failures heading is a false claim about money that moved.
+            continue
+        else:
             past_attempts.append(p)
-        # PROPOSED and other non-terminal, non-money states are neither.
+
+    # Superseded failures keep their own exact reason as history. They are not
+    # dropped: the reason is the evidence of what went wrong, and it is what
+    # makes "this was fixed" checkable rather than asserted.
+    seen_hist = {p["payable_number"] for p in past_attempts}
+    for p in superseded:
+        if p["status"] not in ("CANCELLED", "FAILED"):
+            continue
+        if p["payable_number"] in seen_hist:
+            continue
+        past_attempts.append(p)
 
     # A payable already shown as a current problem is not repeated in history.
     current_keys = {p["payable_number"] for p in current_problems}
@@ -341,6 +465,13 @@ def unmatched_block(s) -> list[dict]:
     return out
 
 
+# Live status lookups make a NETWORK call per referenced transfer. That is right
+# for the app and wrong for the suite: a test that reaches Airwallex is slow,
+# fails without credentials, and asserts on someone else's uptime. Tests set
+# this False; `make dev` leaves it True.
+LIVE_STATUS_ENABLED = True
+
+
 def live_transfer_statuses(s) -> dict[str, str]:
     """Ask Airwallex what each referenced transfer actually is RIGHT NOW.
 
@@ -350,8 +481,15 @@ def live_transfer_statuses(s) -> dict[str, str]:
     The bank is the only authority, so ask it — and fall back to the stored
     status, clearly labelled, if the call fails.
     """
+    if not LIVE_STATUS_ENABLED:
+        return {}
     rows = (s.query(PlanStep)
             .filter(PlanStep.airwallex_object_id.isnot(None))
+            # ONLY transfers. An FX row's object id is a CONVERSION, and asking
+            # /transfers about a conversion id 404s — the failed lookup then read
+            # as "we could not find out", when the truth is it was never a
+            # transfer to look up.
+            .filter(PlanStep.type == StepType.TRANSFER)
             .order_by(PlanStep.id.desc()).all())
     ids = {r.airwallex_object_id: r for r in rows}
     if not ids:
@@ -402,10 +540,25 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
         steps = steps_block(s)
         live_status = live_transfer_statuses(s)
 
+        # The REAL plan, from the REAL planner. A held payment must show the
+        # rule and its numbers, and the only honest source for that is the step
+        # the planner produced — not a phrase the view composes.
+        try:
+            from .db import get_default_db
+            from .domain.treasury import current_plan
+            plan = current_plan(get_default_db())
+            plan_steps = {st.payable_number: st for st in plan.steps
+                          if st.payable_number}
+        except Exception:
+            log.exception("could not build the treasury plan")
+            plan = None
+            plan_steps = {}
+
         payables = []
         for p in s.query(InvoicePayable).order_by(InvoicePayable.number).all():
             sup = suppliers.get(p.supplier_id)
             state = steps["payable_state"].get(p.number, {})
+            step = plan_steps.get(p.number)
             payables.append({
                 "number": p.number,
                 "supplier": sup.name if sup else None,
@@ -424,17 +577,41 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
                 # only one of them is a claim about money.
                 "live_status": live_status.get(
                     state.get("airwallex_object_id") or ""),
+                # The planner's own verdict on this payable: action, the exact
+                # reason with its numbers, and whether it needs a human.
+                "plan_action": step.action if step else None,
+                "plan_reason": step.reason if step else None,
+                "plan_policy_reason": step.policy_reason if step else None,
+                "plan_needs_approval": bool(step.needs_approval) if step else False,
+                "plan_approval_reason": step.approval_reason if step else None,
             })
 
         rep = reconcile(s)
 
+        # What is waiting, and WHY — from the planner, so the header, the tab and
+        # the payable cards all quote the same rule.
+        waiting = [p for p in payables
+                   if p["plan_action"] in ("DEFER", "ESCALATE")]
+
+        # A payable the planner says needs approval AND which has not already
+        # been sent. Once a step carries an Airwallex object id the approval was
+        # given and the money is moving; asking again would invite a SECOND
+        # payment for the same bill, which is the duplicate this system exists
+        # to prevent.
+        awaiting_approval = [p for p in payables
+                             if p["plan_needs_approval"]
+                             and not p["airwallex_object_id"]]
+
         return {
             "budget": budget,
+            "money": money_block(s, rep.cash_by_currency, budget),
             "cash": rep.cash_by_currency,
             "suspense": rep.suspense_by_currency,
             "ledger_balanced": rep.balanced,
             "receivables": receivables,
             "payables": payables,
+            "waiting": waiting,
+            "awaiting_approval": awaiting_approval,
             "live_transfer_statuses": live_status,
             "approvable": steps["approvable"],
             "problems": steps["problems"],

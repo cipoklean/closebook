@@ -24,15 +24,11 @@ from ..domain.planner import (
     build_plan,
 )
 from ..domain.policy import CommittedCash, load_budget
+# The DB->planner assembly lives in ONE place, shared with the dashboard, so a
+# hold reason shown in the UI cannot drift from the one this demo prints.
+from ..domain.treasury import DEMO_RATES, cash_position as _cash_position_impl
 from ..models import InvoicePayable, InvoiceReceivable, PayStatus, RecStatus
 from ..seed import scenario
-
-# CCY per 1 USD. The sandbox rate moves; these are demo inputs, not live quotes.
-DEMO_RATES = {
-    "EUR": Decimal("0.8756"),
-    "GBP": Decimal("1.27"),
-    "CNY": Decimal("7.1"),
-}
 
 
 def _print_bullets(lines: list[str]) -> None:
@@ -41,69 +37,20 @@ def _print_bullets(lines: list[str]) -> None:
 
 
 def _payables_from_db(db: DB) -> list[Payable]:
-    """Read the seeded payables and resolve each dependency against the ledger.
-
-    A dependency is MET only when its receivable is fully PAID. A part-payment
-    leaves it unmet — that is beat 3's rule, and it is the single most
-    important line in the whole planner.
-    """
-    s = db.session()
-    out: list[Payable] = []
-    for p in s.query(InvoicePayable).all():
-        dep = p.depends_on_receivable_id
-        dep_num = None
-        dep_met = True
-        dep_open = 0
-        dep_ccy = "USD"
-        if dep:
-            r = s.query(InvoiceReceivable).filter_by(id=dep).first()
-            if r is not None:
-                dep_num = r.number
-                dep_open = max(0, r.amount_minor - r.amount_paid_minor)
-                dep_ccy = r.currency
-                dep_met = (r.status == RecStatus.PAID)
-        out.append(Payable(
-            number=p.number,
-            supplier=p.supplier.name if p.supplier else "",
-            currency=p.currency,
-            amount_minor=p.amount_minor,
-            criticality=p.criticality,
-            due_date=p.due_date,
-            # payout_method lives on the SUPPLIER, not on the payable
-            payout_method=p.supplier.payout_method.value if p.supplier else "LOCAL",
-            depends_on_receivable=dep_num,
-            dependency_met=dep_met,
-            dependency_open_minor=dep_open,
-            dependency_currency=dep_ccy,
-        ))
-    return out
+    """Deprecated shim: the real assembly is domain/treasury.payables_from_db."""
+    from ..domain.treasury import payables_from_db
+    return payables_from_db(db.session())
 
 
 def _cash_position(db: DB, budget) -> CashPosition:
-    """Balances are CAPACITY (what the sandbox holds); `committed` is POLICY
-    (the virtual budget the floor and limits are measured against)."""
-    s = db.session()
-    balances = {}
-    for ccy, amt in scenario.SEED_DEPOSITS:
-        balances[ccy] = int(amt * 100)
-    return CashPosition(
-        balances=balances,
-        committed=CommittedCash(budget.committed.currency,
-                                budget.committed.expected_inflows_minor,
-                                budget.committed.earmarked_minor),
-        rates=DEMO_RATES,
-    )
+    """Deprecated shim: the real assembly is domain/treasury.cash_position."""
+    return _cash_position_impl(db, budget)
 
 
 def _chase_shortfalls(db: DB) -> dict[str, int]:
-    s = db.session()
-    out = {}
-    for r in s.query(InvoiceReceivable).all():
-        short = max(0, r.amount_minor - r.amount_paid_minor)
-        if short > 0 and r.amount_paid_minor > 0:
-            # money arrived but the invoice is not closed -> chase the rest
-            out[r.number] = short
-    return out
+    """Deprecated shim: the real assembly is domain/treasury.chase_shortfalls."""
+    from ..domain.treasury import chase_shortfalls
+    return chase_shortfalls(db.session())
 
 
 def _show_plan(db: DB) -> None:

@@ -72,10 +72,17 @@ class TestCardPayloadShape:
         assert "issue_to" not in client.body
         assert "purpose" not in client.body       # only inside `program`
 
-    def test_program_carries_purpose_and_nothing_else(self):
+    def test_program_is_the_hk_commercial_credit_program(self):
+        """The account's owning entity is Hong Kong, where the ONLY commercial
+        program is CREDIT / GOOD_FUNDS_CREDIT. DEBIT, PREPAID and omitting
+        type/sub_type all return 'Invalid issuance details'."""
         issuing, client = _issuing()
         issuing.create_card(object(), request_id="r1", **_card())
-        assert client.body["program"] == {"purpose": "COMMERCIAL"}
+        assert client.body["program"] == {
+            "purpose": "COMMERCIAL",
+            "type": "CREDIT",
+            "sub_type": "GOOD_FUNDS_CREDIT",
+        }
 
     def test_cardholder_is_referenced_by_id(self):
         issuing, client = _issuing()
