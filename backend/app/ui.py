@@ -540,6 +540,27 @@ _JS = """
       var prev = btn ? btn.textContent : "";
       if (btn) { btn.disabled = true; btn.textContent = "Working…"; }
 
+      /* A WATCHDOG, because the abort path is not enough on its own. The
+         request can hang before it is ever sent, the response can arrive after
+         the abort, an exception inside a success handler can skip the reset --
+         and each of those leaves the button reading "Working…" with no way
+         back, which is worse than an error because it looks like progress. This
+         fires whatever else happened. */
+      var done = false;
+      var finish = function (message, tone) {
+        if (done) return;
+        done = true;
+        if (watchdog) window.clearTimeout(watchdog);
+        if (timer) window.clearTimeout(timer);
+        busy = false;
+        if (btn) { btn.disabled = false; btn.textContent = prev; }
+        if (message) say(message, tone || "bad");
+      };
+      var watchdog = window.setTimeout(function () {
+        finish("That is taking too long, so it was stopped. Check the page "
+               + "before trying again.", "bad");
+      }, 30000);
+
       var ctl = ("AbortController" in window) ? new AbortController() : null;
       var timer = ctl ? window.setTimeout(function () { ctl.abort(); }, 25000) : null;
 
@@ -554,35 +575,33 @@ _JS = """
       }).then(function (r) {
         return r.json().catch(function () { return {}; });
       }).then(function (res) {
-        if (timer) window.clearTimeout(timer);
         // `ok` IS A BOOLEAN and `message` is the sentence. Deciding on the
         // sentence is what produced "The server did not say what happened" on
         // an approval that had SUCCEEDED — a successful action reported as
         // unknown is worse than a failure reported as one, because it invites
         // the operator to do it again.
+        //
+        // EVERY PATH ENDS IN `finish`, so the button comes back whatever
+        // happened: a parsed answer, an unparseable one, or a throw inside a
+        // success handler. The watchdog behind it covers the rest.
         if (!res || typeof res.ok !== "boolean") {
-          say("The server did not say what happened. Reload to see the books.",
-              "bad");
+          finish("The server did not say what happened. Reload to see the books.");
           return;
         }
         if (res.ok) {
-          say(res.message, "good");
+          finish(res.message, "good");
           settled(f, res.message);
         } else {
-          say(res.err || res.message || "That did not work.", "bad");
+          finish(res.err || res.message || "That did not work.", "bad");
           if (res.detail) showDetail(f, res.detail);
         }
       }).catch(function (err) {
-        if (timer) window.clearTimeout(timer);
         var aborted = err && err.name === "AbortError";
         /* Deliberately does NOT reuse the old mockup phrasing, which a test
            guards against: this is real copy and must read as its own thing. */
-        say(aborted
-            ? "That took too long, so it was stopped. Check the page before trying again."
-            : "Could not reach the server. The books are unchanged.", "bad");
-      }).then(function () {
-        if (btn) { btn.disabled = false; btn.textContent = prev; }
-        busy = false;
+        finish(aborted
+               ? "That took too long, so it was stopped. Check the page before trying again."
+               : "Could not reach the server. The books are unchanged.");
       });
     });
   });
@@ -622,6 +641,27 @@ _JS = """
       .catch(function () { if (tries < 20) window.setTimeout(ask, 1000); });
   }
   ask();
+}());
+
+/* --- jump to a payment's row inside the fenced sandbox panel ----------------
+   A plain anchor cannot open a collapsed <details>, so the link would land on
+   a closed box and look broken. Open it first, then bring the row into view. */
+(function () {
+  [].forEach.call(document.querySelectorAll("[data-open-sandbox]"), function (a) {
+    a.addEventListener("click", function (ev) {
+      var panel = document.getElementById("sandbox-controls");
+      if (!panel) return;
+      ev.preventDefault();
+      panel.open = true;
+      var row = document.getElementById("sandbox-row-" + a.getAttribute("data-open-sandbox"));
+      if (row && row.scrollIntoView) {
+        row.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+      if (history.replaceState) {
+        history.replaceState(null, "", a.getAttribute("href"));
+      }
+    });
+  });
 }());
 """
 
@@ -1372,6 +1412,47 @@ def _home(c: dict) -> str:
 
 
 
+def _dev_controls_are_offered_for(live: str) -> bool:
+    """The same question `_dev_controls` asks, asked once.
+
+    Shared so the jump link and the row it points at cannot disagree: a link
+    rendered for a payment the panel omits is a link to nothing.
+    """
+    try:
+        from .main import _dev_controls_are_offered
+        return bool(_dev_controls_are_offered(live))
+    except Exception:                              # noqa: BLE001
+        return False
+
+
+def _pay_label(p: dict) -> str:
+    """Which payment a sandbox row is about: "PO-7001 · Atlanta Packaging · USD 1,800".
+
+    The number, who is being paid and how much, in that order -- the same three
+    facts the payment card leads with, so a row in the panel and the card it
+    came from read as the same thing.
+    """
+    bits = [str(p.get("number") or p.get("payable_number") or "payment"),
+            str(p.get("supplier") or "supplier"),
+            money_str(int(p.get("amount_minor") or 0), p.get("currency") or "USD")]
+    return " · ".join(bits)
+
+
+def _sandbox_link(transfer_id: str) -> str:
+    """A jump from a payment card to its row in the fenced panel.
+
+    A plain anchor cannot open a collapsed <details>, so this carries a hook the
+    page's script uses to open the panel and scroll to the row -- otherwise the
+    link lands on a closed box and appears to do nothing.
+    """
+    if not transfer_id:
+        return ""
+    ref = e(str(transfer_id))
+    return (f'<a class="x-devjump" href="#sandbox-row-{ref}" '
+            f'data-open-sandbox="{ref}" data-testid="sandbox-jump-{ref}">'
+            f'Sandbox controls ↓</a>')
+
+
 def _sandbox_panel(simulate: str = "", devs: str = "") -> str:
     """THE ONE FENCED PANEL holding every sandbox-only control on a screen.
 
@@ -1387,7 +1468,8 @@ def _sandbox_panel(simulate: str = "", devs: str = "") -> str:
     body = (simulate or "") + (devs or "")
     if not body.strip():
         return ""
-    return ('<details class="x-sandbox" data-testid="sandbox-controls">'
+    return ('<details class="x-sandbox" id="sandbox-controls" '
+            'data-testid="sandbox-controls">'
             '<summary><span class="x-sandbox-tag">sandbox only</span>'
             '<b>Sandbox controls</b>'
             '<span class="x-hint">Not part of the product. These move sandbox '
@@ -1396,7 +1478,7 @@ def _sandbox_panel(simulate: str = "", devs: str = "") -> str:
             f'<div class="x-sandbox-body">{body}</div></details>')
 
 
-def _dev_controls(transfer_id: str, live: str) -> str:
+def _dev_controls(transfer_id: str, live: str, label: str = "") -> str:
     """Sandbox-only buttons that move an in-flight transfer to its END state.
 
     This is the ONLY way to make a transfer finish in the sandbox, and it is
@@ -1416,18 +1498,28 @@ def _dev_controls(transfer_id: str, live: str) -> str:
 
     if not _dev_controls_are_offered(live):
         return ""
-    action = f"/dev/transfers/{html.escape(transfer_id, quote=True)}/transition"
+    ref = html.escape(transfer_id, quote=True)
+    action = f"/dev/transfers/{ref}/transition"
     buttons = ""
-    for value, label, title in (
+    for value, text, title in (
             ("settle", "Settle", "Airwallex reports PAID"),
             ("fail", "Fail", "beneficiary details rejected"),
             ("return", "Return", "the beneficiary bank sent it back")):
         buttons += (
             f'<form method="post" action="{action}" style="display:inline">'
             f'<input type="hidden" name="what" value="{value}">'
-            f'<button class="x-btn x-btn--sm" type="submit" title="{e(title)}">'
-            f'{e(label)}</button></form>')
-    return ('<div class="x-meta"><span class="x-label">Sandbox dev control</span>'
+            # PER-TRANSFER TESTIDS. Several of these panels can be on one page,
+            # and "the Settle button" is ambiguous the moment there is more than
+            # one payment -- a test that has to guess which one it pressed is
+            # not testing the transfer it thinks it is.
+            f'<button class="x-btn x-btn--sm" type="submit" title="{e(title)}" '
+            f'data-testid="sandbox-{value}-{ref}">{e(text)}</button></form>')
+    # WHICH PAYMENT IS THIS ROW ABOUT? The panel collected every control on the
+    # page, so without this a Settle button was a button with no subject.
+    who = (f'<span class="x-devlabel" data-testid="sandbox-who-{ref}">'
+           f'{e(label)}</span>' if label else "")
+    return (f'<div class="x-meta x-devrow" id="sandbox-row-{ref}" '
+            f'data-transfer="{ref}">{who}'
             f'<span class="x-pills">{buttons}</span></div>')
 
 
@@ -1804,7 +1896,11 @@ _STEP_LABELS = ["Planned", "Checked", "Approved", "Sent", "Confirmed"]
 #: CANCELLED for both; the step it reached is what tells the operator how far it
 #: got, and a red X there is the difference between "it never left" and "the
 #: money went and came back".
-_STOPPED_STATUSES = {"FAILED", "CANCELLED", "RETURNED", "REJECTED"}
+#: EXACTLY the three terminal states that mean "this did not complete".
+#: REJECTED is deliberately NOT here: it is a human declining an approval, so
+#: the payment never started and the tracker should still read as not-yet-sent
+#: rather than as a failed transfer.
+_STOPPED_STATUSES = {"FAILED", "CANCELLED", "RETURNED"}
 
 
 def _tracker_legend(stopped: bool = False) -> str:
@@ -1821,7 +1917,11 @@ def _tracker_legend(stopped: bool = False) -> str:
 def _step_index(status: str) -> int:
     return {
         "PROPOSED": 0, "APPROVED": 2, "SUBMITTED": 3,
-        "PAID": 4, "FAILED": 3, "CANCELLED": 2,
+        "PAID": 4,
+        # The step each one STOPPED at. A failed or returned transfer got out of
+        # the door (Sent); a cancelled one never left (Approved). Without these
+        # the X landed on "Checked", which says the opposite.
+        "FAILED": 3, "RETURNED": 3, "CANCELLED": 2,
     }.get(status, 1)
 
 
@@ -1837,7 +1937,13 @@ def _money_out(c: dict) -> str:
         # A FAILED OR RETURNED PAYMENT KEEPS ITS RED X. It used to render as a
         # tick up to the step it reached, which reads as progress and hides that
         # the money stopped there.
-        stopped = st in _STOPPED_STATUSES or bool(p.get("previous_attempt_failed"))
+        # ONLY A PAYMENT THAT ACTUALLY STOPPED GETS THE X. This also asked
+        # whether an EARLIER attempt had failed, which painted a red cross on a
+        # perfectly healthy PROCESSING transfer -- PO-7001 read "checked,
+        # approved, sent, ✕ stopped here" while Airwallex was still moving the
+        # money. A replaced payment's history is a fact about the past, not
+        # about where this transfer is.
+        stopped = st in _STOPPED_STATUSES
         steps = []
         for i, label in enumerate(_STEP_LABELS):
             if stopped and i == idx:
@@ -1851,6 +1957,14 @@ def _money_out(c: dict) -> str:
                          f'<span>{e(label)}</span></li>')
         done = st == "PAID"
         live = p.get("live_status")
+        # Read HERE rather than further down: the badge needs it to tell
+        # "approved, not yet sent" from "approved and already at the bank".
+        obj = p.get("airwallex_object_id")
+        # 6. WHAT CAME BACK, AND WHY. A returned transfer arrives from the bank
+        # as CANCELLED, which on its own reads as "someone stopped this". The
+        # reason the bank gave is the whole point of the row.
+        back_why = (p.get("failure_reason") or p.get("return_reason")
+                    or p.get("failure_type") or "")
         # The badge reports the BANK. A submitted transfer is not a paid one,
         # and in this project every transfer is sandbox money.
         if live in ("PAID", "COMPLETED", "SUCCESS"):
@@ -1859,6 +1973,16 @@ def _money_out(c: dict) -> str:
             badge = f'<span class="x-pill x-pill--info">{e(live)}</span>'
         elif st in ("CANCELLED", "FAILED"):
             badge = f'<span class="x-pill x-pill--bad">{e(st)}</span>'
+            if back_why:
+                badge += (f'<span class="x-why" data-testid="return-reason">'
+                          f'{e(_shown(back_why))}</span>')
+        elif st == "APPROVED" and not obj:
+            # 5(b) APPROVED IS NOT A STATE THE BANK KNOWS. Between the approval
+            # and the transfer having a reference there is a real wait, and the
+            # card used to sit on "APPROVED" with an empty reference line --
+            # which reads as a stuck payment rather than one in flight.
+            badge = ('<span class="x-pill x-pill--info" '
+                     'data-testid="sending-to-bank">Sending to the bank…</span>')
         elif st in ("PROPOSED", "HELD"):
             badge = '<span class="x-pill x-pill--warn">Held</span>'
         else:
@@ -1888,7 +2012,6 @@ def _money_out(c: dict) -> str:
 
         # Say what the BANK says. "SUBMITTED" is what we did; it is not a claim
         # that money moved, and never render it as "paid".
-        obj = p.get("airwallex_object_id")
         ref = ""
         if obj:
             live = p.get("live_status") or "UNKNOWN"
@@ -1909,7 +2032,12 @@ def _money_out(c: dict) -> str:
                    f'</details>')
             # Registered for the one Sandbox controls panel at the foot of the
             # page, rather than rendered here among the operator's own buttons.
-            dev_targets.append((str(obj), live))
+            # The label travels with it so the row can name its payment.
+            dev_targets.append((str(obj), live, _pay_label(p)))
+            # A jump to this payment's row in the panel. Only when the panel will
+            # actually have a row for it, or the link goes nowhere.
+            if _dev_controls_are_offered_for(live):
+                ref += _sandbox_link(str(obj))
 
         # criticality is an int 1-5 on the model; 1 is most urgent.
         crit = int(p["criticality"] or 3)
@@ -1974,7 +2102,7 @@ def _money_out(c: dict) -> str:
             'for my OK</button></form>'
             f'{past_block}'))
 
-    devs = "".join(_dev_controls(tid, live) for tid, live in dev_targets)
+    devs = "".join(_dev_controls(tid, live, lab) for tid, live, lab in dev_targets)
     return head + prob + _sandbox_panel(devs=devs)
 
 
@@ -2123,7 +2251,8 @@ def _arrival_row(a: dict, *, detail: bool = False) -> str:
         '<div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">'
         f'<b>{e(money(a["amount_minor"], a["currency"]))}</b>'
         f'<span class="x-hint">{e(a["payer"] or "payer not given")}</span>'
-        f'<span class="x-pill x-pill--{tone}">{e(a["match_status"])}</span>'
+        f'<span class="x-pill x-pill--{tone}" data-testid="deposit-state">'
+        f'{e(_deposit_state(a))}</span>'
         f'<span class="x-hint">{e(method)} &middot; confidence {e(conf_txt)}'
         f'{e(applied)}</span></div>'
         f'<div class="x-mono" style="margin-top:6px">ref: {e(ref)}</div>')
@@ -2139,6 +2268,29 @@ def _arrival_row(a: dict, *, detail: bool = False) -> str:
         out += (f'<div class="x-hint">Airwallex deposit '
                 f'<span class="x-mono">{e(a["deposit_id"])}</span></div>')
     return out + "</div>"
+
+
+_RESOLUTION_WORDS = {
+    "REFUND_OWED": "Refund owed",
+    "RELEASED_INCOME": "Released as income",
+    "APPROVED": "Matched",
+}
+
+
+def _deposit_state(a: dict) -> str:
+    """What this payment IS now, not what the matcher first called it.
+
+    THE BADGE WAS READING THE STALE FIELD. It showed `match_status`, which is
+    the matcher's verdict from when the money arrived and never changes -- so a
+    payment resolved as a refund owed still read PROPOSED, and a resolved
+    payment looked like one still waiting. The resolution is a later, stronger
+    statement about the same row and it wins.
+    """
+    resolved = (a.get("review_state") or "").upper()
+    word = _RESOLUTION_WORDS.get(resolved)
+    if word:
+        return word
+    return str(a.get("match_status") or "")
 
 
 def _timeline_row(a: dict, *, needs_human: bool) -> str:
@@ -2159,7 +2311,8 @@ def _timeline_row(a: dict, *, needs_human: bool) -> str:
         + (" open" if needs_human else "") + '>'
         f'<summary><b>{e(money(a["amount_minor"], a["currency"]))}</b>'
         f'<span class="x-hint">{e(a["payer"] or "payer not given")}</span>'
-        f'<span class="x-pill x-pill--{tone}">{e(a["match_status"])}</span>'
+        f'<span class="x-pill x-pill--{tone}" data-testid="deposit-state">'
+        f'{e(_deposit_state(a))}</span>'
         + ('<span class="x-pill x-pill--warn" data-testid="needs-you">'
            'needs you</span>' if needs_human else '')
         + '</summary>'
@@ -2342,12 +2495,24 @@ def _ai(c: dict) -> str:
                     "struck": bool(_claimed is not None and _final is not None
                                    and float(_claimed) > float(_final)),
                 }
+            # THE CODE COLUMN COMES FROM THE STORED DECISION. What the code did
+            # with this claim -- used it, capped it, or ignored it because a
+            # deterministic tier won -- is a fact about the payment, not about
+            # the model's trace. Deriving it from the claim alone reported the
+            # MODEL's number as the final one whenever RULE had won.
+            _decided = (t.get("decision") or {}).get("code") or {}
             code_col = {
-                "verdict": ("held for you"
-                            if _final is not None and _final < 0.90 else "applied"),
-                "rule": (f"capped at the {_LLM_CAP:.2f} auto band"
-                         if model_col.get("struck") else "re-checked in code"),
-                "confidence": _final,
+                "verdict": (_decided.get("verdict")
+                            or ("held for you"
+                                if _final is not None and _final < 0.90
+                                else "applied")),
+                "rule": (_decided.get("rule")
+                         or (f"capped at the {_LLM_CAP:.2f} auto band"
+                             if model_col.get("struck") else "re-checked in code")),
+                "confidence": (_decided.get("confidence")
+                               if _decided.get("confidence") is not None
+                               else _final),
+                "note": _decided.get("note") or "",
             }
             item.update(what=_shown(what), ai=reply, rules=_shown(_rules),
                         rules_raw=_raw_of(_rules), conf=conf_label,

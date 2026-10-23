@@ -775,15 +775,56 @@ def _no_match_why(session, inflow, left: int) -> str:
 
 
 def trace_block(s) -> list[dict]:
+    """Model calls and code decisions, each paired with the DECISION it produced.
+
+    THE CODE COLUMN IS NOT DERIVABLE FROM THE MODEL'S TRACE. A `propose_match`
+    row records what the model CLAIMED; whether that claim was used, capped or
+    thrown away is a fact about the stored decision on the payment. Reading the
+    code column off the model's own trace reported the model's number as the
+    final one whenever a deterministic tier had won -- a receipt that says "the
+    code decided 0.80" when the code actually decided 0.85 at tier RULE.
+    """
     rows = s.query(AgentTrace).order_by(AgentTrace.id.desc()).limit(40).all()
-    return [{
-        "tool": t.tool,
-        "verdict": t.verdict,
-        "inputs": _loads(t.inputs_json),
-        "outputs": _loads(t.outputs_json),
-        "detail": t.detail,
-        "run_id": t.run_id,
-    } for t in rows]
+    out = []
+    for t in rows:
+        ins = _loads(t.inputs_json)
+        outs = _loads(t.outputs_json)
+        item = {
+            "tool": t.tool,
+            "verdict": t.verdict,
+            "inputs": ins,
+            "outputs": outs,
+            "detail": t.detail,
+            "run_id": t.run_id,
+        }
+        inflow_id = (ins or {}).get("inflow_id")
+        if inflow_id:
+            from .models import Inflow
+            from .domain.ledger import suspense_for
+
+            inf = s.get(Inflow, int(inflow_id))
+            if inf is not None:
+                prop = _loads(inf.proposed_json) or {}
+                conf = (prop.get("confidence")
+                        if prop.get("confidence") is not None
+                        else _confidence_of(inf, s))
+                try:
+                    left = suspense_for(s, inf)
+                except Exception:                  # noqa: BLE001
+                    left = 0
+                item["decision"] = receipt_data(s, inf, prop, conf, left)
+        out.append(item)
+    return out
+
+
+def _confidence_of(inflow, s):
+    """The confidence the book recorded on the inflow, if the proposal is gone."""
+    from .models import Match
+
+    m = (s.query(Match)
+         .filter(Match.inflow_id == inflow.id)
+         .order_by(Match.id.desc()).first())
+    return float(m.confidence) if m is not None and m.confidence is not None else None
 
 
 # ------------------------------------------------------- unmatched money
@@ -840,6 +881,27 @@ _LIVE_CACHE: dict[str, tuple[str, float]] = {}
 #: How long a cached status is good for. The page shows when it last checked,
 #: so a slightly old true answer beats a fresh three-second wait.
 _LIVE_MAX_AGE = 60.0
+
+
+def _return_reasons(incidents: list | None) -> dict:
+    """transfer id -> what the BANK said went wrong, from the incident store.
+
+    A returned transfer arrives as CANCELLED, and CANCELLED alone reads as
+    "somebody stopped this". The reason is the whole point: a bad IBAN and a
+    beneficiary bank returning the money need different responses. The live
+    incident records are where the webhook's own failure fields survive.
+    """
+    out: dict = {}
+    for d in incidents or []:
+        tid = str(d.get("transfer_id") or "")
+        if not tid:
+            continue
+        why = (d.get("failure_reason") or d.get("failure_type")
+               or (d.get("summary") if d.get("severity") in ("ERROR", "BAD")
+                   else None))
+        if why:
+            out.setdefault(tid, why)
+    return out
 
 
 def live_transfer_statuses(s) -> dict[str, str]:
@@ -1092,6 +1154,7 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
         suppliers = {sup.id: sup for sup in s.query(Supplier).all()}
         steps = steps_block(s)
         live_status = live_transfer_statuses(s)
+        return_reasons = _return_reasons(incidents)
 
         # The REAL plan, from the REAL planner. A held payment must show the
         # rule and its numbers, and the only honest source for that is the step
@@ -1150,6 +1213,11 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
                 # only one of them is a claim about money.
                 "live_status": live_status.get(
                     state.get("airwallex_object_id") or ""),
+                # THE BANK'S OWN WORDS about a transfer that came back, so
+                # CANCELLED is never shown without its reason.
+                "failure_reason": return_reasons.get(
+                    str(state.get("airwallex_object_id") or ""), ""),
+                "step_stored_reason": state.get("reason"),
                 # The planner's own verdict on this payable: action, the exact
                 # reason with its numbers, and whether it needs a human.
                 "plan_action": step.action if step else None,

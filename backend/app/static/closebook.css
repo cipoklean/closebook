@@ -701,3 +701,19 @@ a { color: inherit; }
   .x-wf-end { font-size: 12px; }
   .x-wf-simple { font-size: 13px; }
 }
+
+/* A LONG VALUE MUST NOT WIDEN THE PAGE. The AI activity footer carries a model
+   id like `nvidia/nemotron-3.5-lightning-30b-a3b`, which is 267px of
+   unbreakable text in a pill that does not wrap -- 324px of horizontal overflow
+   at 390px, and it only appears when a model has actually answered, so an empty
+   workspace renders nothing and never sees it. */
+.x-aifoot { flex-wrap: wrap; }
+.x-pill {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 700px) {
+  .x-aifoot { gap: 6px; }
+  .x-aifoot .x-pill { flex: 0 1 auto; }
+}

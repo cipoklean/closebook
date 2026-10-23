@@ -201,11 +201,14 @@ class TestTheSandboxIsFenced:
             client.get("/app?tab=money-in").text
 
     def test_it_is_collapsed_by_default(self, client, book):
+        """From the OPENING tag: the panel gained an `id` beside its testid, so
+        a fixed look-back window no longer reaches `<details`."""
         html = client.get("/app?tab=money-in").text
-        i = html.find('data-testid="sandbox-controls"')
-        assert "<details" in html[max(0, i - 40):i + 40]
-        assert "<details" in html[max(0, i - 40):i] 
-        assert " open>" not in html[i - 40:i + 40]
+        tag = html[:html.find('data-testid="sandbox-controls"')].rfind("<details")
+        assert tag > 0
+        opening = html[tag:html.find(">", tag) + 1]
+        assert opening.startswith("<details")
+        assert " open" not in opening
 
     def test_it_is_labelled_sandbox_only(self, client, book):
         html = client.get("/app?tab=money-in").text

@@ -117,6 +117,25 @@ def clear_steps(plan: Plan) -> list[Step]:
     return out
 
 
+def approval_waiting_steps(plan: Plan) -> list[Step]:
+    """Steps that are payable but waiting on a HUMAN, and so need a row.
+
+    WHY THIS EXISTS. `clear_steps` is deliberately strict -- anything needing
+    approval is left out -- and only the clear steps were being persisted. So an
+    over-limit payment produced a step, the plan said "PAY, needs your approval",
+    and **no row was ever written**: there was nothing on Needs your OK to
+    approve, and the bill was permanently unpayable. A payment a human is
+    supposed to authorise must exist somewhere they can authorise it.
+
+    A step with BLOCKERS is deliberately NOT here. A dependency or a floor
+    breach is not a human decision, so writing an approval card for it would
+    offer a button that cannot honestly do anything; those stay in Held with
+    their reasons.
+    """
+    return [s for s in plan.steps
+            if s.action in MONEY_ACTIONS and s.needs_approval and not s.blockers]
+
+
 def held_steps(plan: Plan) -> list[tuple[Step, str]]:
     """Every payable whose money is NOT moving, with the reason why.
 
@@ -132,11 +151,17 @@ def held_steps(plan: Plan) -> list[tuple[Step, str]]:
     out: list[tuple[Step, str]] = []
     for s in plan.steps:
         if s.action in MONEY_ACTIONS:
+            reasons = []
+            if s.blockers:
+                # BOTH, not the first. A payment over the limit AND short of
+                # cash needs two different things done to it, and naming only
+                # one sends the operator to fix half the problem.
+                reasons.extend(s.blockers)
             if s.needs_approval:
-                out.append((s, s.approval_reason or s.reason
-                            or "needs your approval"))
-            elif s.blockers:
-                out.append((s, "; ".join(s.blockers)))
+                reasons.append(s.approval_reason or s.reason
+                               or "needs your approval")
+            if reasons:
+                out.append((s, "; ".join(reasons)))
             continue
         if s.action in (ACT_DEFER, ACT_ESCALATE) and s.payable_number:
             out.append((s, s.reason or "not being paid this run"))
@@ -284,7 +309,11 @@ def on_event(db: DB, *, source: str, dry_run: bool = True,
     # Persist BEFORE sending: the request_id on that row is the idempotency
     # spine, and a payment with nowhere to record its identity must not be sent.
     with session_scope() as s:
-        rows, skipped = persist_plan(s, run_id, clear)
+        # BOTH LISTS. The clear steps are sent; the approval-waiting ones are
+        # WRITTEN so a human has something to approve. Persisting only `clear`
+        # left an over-limit bill unapprovable forever.
+        waiting = approval_waiting_steps(plan)
+        rows, skipped = persist_plan(s, run_id, clear + waiting)
         row_ids = {_key(step): row.id for step, row in zip(clear, rows)}
         skipped_keys = {_key(step) for step in skipped}
 
@@ -370,4 +399,5 @@ def _run_one(db: DB, client: Any, step: Step, row_id: Optional[int],
                    object_id=result.airwallex_object_id)
 
 
-__all__ = ["Verdict", "Run", "clear_steps", "held_steps", "on_event"]
+__all__ = ["Verdict", "Run", "approval_waiting_steps", "clear_steps",
+           "held_steps", "on_event"]
