@@ -162,24 +162,41 @@ def _receipt(model: dict, code: dict) -> str:
 
 
 def _waterfall_bar(ccy: str, w: dict) -> str:
-    """ONE horizontal bar from cash down to free to spend.
+    """ONE bar per currency, from cash down to free to spend.
 
-    It replaces the Details paragraph, which stated the same arithmetic as a
-    line of prose and made the reader do the subtraction themselves. The working
-    now IS the picture.
+    THE CURRENCY IS ON THE BAR. It used to exist only as `data-wf-ccy`, so with
+    two bars side by side the reader had to guess which was which -- and a
+    report of the GBP and USD bars got them the wrong way round, which is what
+    a label that only machines can read buys you. The heading names it and the
+    closing figure repeats it in the tile's own format ("USD -8,646.00 free to
+    spend"), so the bar and the tile above it read as the same number.
 
-    WIDTHS. Every segment is a share of the CASH, which is the full bar, so the
-    segments and the leftover always add up to the whole. A term that would take
-    the total past zero is painted red at the point it happens rather than only
-    colouring the ending, because the shortfall is caused THERE.
+    ZERO SEGMENTS ARE DROPPED. A subtraction of nothing is not a step, and a
+    bar padded with 0.00 blocks buries the one term that matters. When nothing
+    but cash is left the bar becomes a SENTENCE -- "GBP 4,800.00, nothing set
+    aside, all free to spend" -- because there is no proportion to draw.
 
-    Per currency, the way the tile is: a bar per currency, because a USD surplus
-    cannot pay a GBP bill, and one merged bar would say that it could.
+    Widths are a share of the CASH, so the segments and the remainder always
+    add up to the whole, and a term that takes the total past zero is painted
+    red where it happens rather than only at the end.
     """
-    steps = w["steps"]
+    free = w["free_minor"]
+    closing = f'{money_str(free, ccy)} free to spend'
+    head = (f'<div class="x-wf-ccy" data-testid="wf-currency">{e(ccy)}</div>')
     start = w["start_minor"] or 1
+
+    # keep the start (cash) and any subtraction that actually takes something
+    live = [st for st in w["steps"] if st["kind"] == "start" or st["minor"]]
+    takes = [st for st in live if st["kind"] != "start"]
+
+    if not takes:
+        return (f'<div class="x-wf" data-wf-ccy="{e(ccy)}">{head}'
+                f'<p class="x-wf-simple" data-testid="wf-simple">'
+                f'{e(money_str(w["start_minor"], ccy))}, nothing set aside, '
+                f'all free to spend</p></div>')
+
     segs = []
-    for st in steps:
+    for st in live:
         share = max(1, round(abs(st["delta_minor"]) * 100 / start)) if start else 0
         cls = ("x-wf-seg x-wf-seg--start" if st["kind"] == "start"
                else "x-wf-seg x-wf-seg--take")
@@ -191,15 +208,19 @@ def _waterfall_bar(ccy: str, w: dict) -> str:
             f'data-wf="{st["key"]}" title="{e(st["label"])}">'
             f'<b>{sign} {e(money(st["minor"]))}</b>'
             f'<small>{e(st["label"])}</small></span>')
-    free = w["free_minor"]
     free_cls = "x-wf-seg x-wf-seg--free" + (" is-overdrawn" if free < 0 else "")
     segs.append(
         f'<span class="{free_cls}" style="--w:1" data-wf="free">'
         f'<b>{e(money(free))}</b><small>free to spend</small></span>')
-    return (f'<div class="x-wf" data-wf-ccy="{e(ccy)}">'
-            f'<div class="x-wf-bar" role="img" aria-label="'
-            f'cash {e(money(w["start_minor"]))} down to free to spend '
-            f'{e(money(free))}">{"" .join(segs)}</div></div>')
+
+    label = (f'{ccy}: cash {money_str(w["start_minor"], ccy)}, then '
+             + ", ".join(f'less {st["label"]} {money_str(st["minor"], ccy)}'
+                         for st in takes)
+             + f", ending at {closing}")
+    return (f'<div class="x-wf" data-wf-ccy="{e(ccy)}">{head}'
+            f'<div class="x-wf-bar" role="img" aria-label="{e(label)}">'
+            f'{"".join(segs)}</div>'
+            f'<div class="x-wf-end">{e(closing)}</div></div>')
 
 
 def _waterfall(m: dict, cash: dict) -> str:
@@ -558,6 +579,42 @@ _JS = """
       });
     });
   });
+}());
+
+/* THE ACCOUNT PICKER FILLS ITSELF IN. The page renders without waiting for
+   Airwallex: if the global accounts are not cached yet the picker says
+   "Loading accounts..." and this asks for them, once a second, for a short
+   while. The server does the fresh read on THAT request, so the wait is on a
+   control the user can see is waiting rather than on the whole page. */
+(function () {
+  var sel = document.querySelector("select[data-loading='1']");
+  if (!sel) return;
+  var tries = 0;
+  function ask() {
+    tries += 1;
+    fetch("/money-in/accounts", { headers: { "Accept": "application/json" } })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (res && res.ready && res.html) {
+          sel.innerHTML = res.html;
+          sel.removeAttribute("data-loading");
+          sel.disabled = false;
+          var hint = document.querySelector("[data-testid='accounts-loading']");
+          if (hint) { hint.parentNode.removeChild(hint); }
+          return;
+        }
+        if (tries < 20) { window.setTimeout(ask, 1000); }
+        else {
+          var dead = document.querySelector("[data-testid='accounts-loading']");
+          if (dead) {
+            dead.textContent =
+              "Could not reach Airwallex for the account list. Reload to try again.";
+          }
+        }
+      })
+      .catch(function () { if (tries < 20) window.setTimeout(ask, 1000); });
+  }
+  ask();
 }());
 """
 
@@ -1488,19 +1545,7 @@ def _simulate_card(c: dict) -> str:
     accts = c.get("money_in_accounts") or []
     ready = c.get("sandbox_ready")
     if accts:
-        opts = "".join(
-            f'<option value="{e(a["id"])}"'
-            + ("" if a.get("usable") else " disabled")
-            + (f' title="{e(" · ".join(x for x in (a.get("country"), a.get("status")) if x))}"'
-               if (a.get("country") or a.get("status")) else "")
-            + '>'
-            # "USD account …5888", not "USD · US · ACTIVE · 5888". The
-            # operator is picking an ACCOUNT, and the country and status are
-            # not what tells two of them apart -- the last four digits are.
-            # Both stay available as a hover title, so nothing is lost.
-            + _acct_label(a)
-            + '</option>'
-            for a in accts)
+        opts = account_options_html(accts)
         usable = sum(1 for a in accts if a.get("usable"))
         acct_field = (f'<div class="x-field x-span-4">'
                       f'<label for="f-global_account_id">Global account</label>'
@@ -1509,13 +1554,18 @@ def _simulate_card(c: dict) -> str:
                       f'<span class="x-hint">From GET /global_accounts'
                       f'{" — none are ACTIVE yet" if not usable else ""}. The '
                       f'deposit lands in the account currency.</span></div>')
-    else:
+    elif not ready:
         acct_field = ('<div class="x-field x-span-4">'
                       '<label>Global account</label>'
                       '<select class="x-select" disabled><option>none found'
                       '</option></select>'
                       '<span class="x-hint">No global account could be listed, '
                       'so a deposit cannot be simulated.</span></div>')
+    else:
+        # Sandbox is configured and the list is simply not here YET. Say that,
+        # rather than "none found" -- which is a claim about the account setup
+        # and would be wrong.
+        acct_field = accounts_loading_field()
 
     body = (
         '<div class="x-cardhead"><div><h3>Simulate a customer payment</h3>'
@@ -1560,6 +1610,48 @@ def _acct_label(a: dict) -> str:
     if a.get("usable") is False:
         label += " — not active yet"
     return label
+
+
+def account_options_html(accts: list) -> str:
+    """The <option> list for the deposit picker. ONE builder.
+
+    Shared by the page and by the tiny JSON endpoint the page falls back to, so
+    the options that arrive late are byte-identical to the ones that would have
+    been there on a warm cache.
+    """
+    out = []
+    for a in accts or []:
+        title = " · ".join(x for x in (a.get("country"), a.get("status")) if x)
+        out.append(
+            f'<option value="{e(a["id"])}"'
+            + ("" if a.get("usable") else " disabled")
+            + (f' title="{e(title)}"' if title else "")
+            + '>'
+            # "USD account …5888", not "USD · US · ACTIVE · 5888". The operator
+            # is picking an ACCOUNT and the last four digits are what tells two
+            # of them apart; country and status stay as a hover title.
+            + _acct_label(a)
+            + '</option>')
+    return "".join(out)
+
+
+def accounts_loading_field() -> str:
+    """The picker, before the account list has arrived.
+
+    THE PAGE MUST NOT WAIT FOR AIRWALLEX. It did: the refresh ran before the
+    render, which put ~2.8s on the first Money in view after a restart. The
+    cache is now warmed at startup and this is what renders if it is still not
+    there -- the same control, saying what it is doing, filled in by the page
+    once the background refresh lands.
+    """
+    return ('<div class="x-field x-span-4">'
+            '<label for="f-global_account_id">Global account</label>'
+            '<select class="x-select" id="f-global_account_id" '
+            'name="global_account_id" data-loading="1" disabled>'
+            '<option>Loading accounts…</option></select>'
+            '<span class="x-hint" data-testid="accounts-loading">'
+            'Fetching the global accounts from Airwallex. The form will fill '
+            'in by itself.</span></div>')
 
 
 def _money_in(c: dict) -> str:

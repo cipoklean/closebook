@@ -686,3 +686,18 @@ a { color: inherit; }
   .x-sandbox > summary { font-size: 12px; }
   .x-tl > summary { padding: 10px 11px; }
 }
+
+/* The waterfall's own currency label and closing figure. The currency used to
+   exist only in a data attribute, which meant two bars side by side could not
+   be told apart on screen -- and a report of them got the currencies swapped. */
+.x-wf-ccy {
+  font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--x-muted);
+}
+.x-wf-end { margin-top: 6px; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.x-wf-simple { margin: 4px 0 0; font-size: 14px; overflow-wrap: anywhere; }
+
+@media (max-width: 700px) {
+  .x-wf-end { font-size: 12px; }
+  .x-wf-simple { font-size: 13px; }
+}

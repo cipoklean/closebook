@@ -21,6 +21,7 @@ import os
 import time
 from typing import Optional
 
+from contextlib import asynccontextmanager
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -37,7 +38,70 @@ logging.basicConfig(level="INFO", force=True)
 _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 os.makedirs(_STATIC_DIR, exist_ok=True)
 
-app = FastAPI(title="Closebook", version="0.1.0")
+def _warm_the_account_cache() -> None:
+    """Fetch the global accounts once, in the background, at boot.
+
+    The first Money in view after a restart used to spend ~2.8s inside the
+    render because the picker needs this list and the render went and got it.
+    Warming it here means the list is usually already cached by the time anyone
+    looks, and when it is not the page says so and fills itself in rather than
+    stalling.
+
+    In a THREAD, deliberately: startup must not wait for the sandbox either, or
+    a slow Airwallex becomes a slow boot and then a slow first page anyway.
+    """
+    import threading
+
+    def _warm() -> None:
+        try:
+            from .domain.intake import accounts_stale, refresh_accounts
+
+            if accounts_stale():
+                refresh_accounts(_database())
+        except Exception:
+            log.warning("could not warm the account cache at startup")
+
+    threading.Thread(target=_warm, name="warm-accounts", daemon=True).start()
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Warm the caches, then serve. LIFESPAN rather than the deprecated
+    `@app.on_event`, which is what this started as -- it worked, but it put a
+    DeprecationWarning in the test output, and noise in CI output is how a real
+    warning gets ignored."""
+    _warm_the_account_cache()
+    yield
+
+
+app = FastAPI(title="Closebook", version="0.1.0", lifespan=_lifespan)
+
+
+@app.get("/money-in/accounts")
+def money_in_accounts() -> dict:
+    """The global accounts, as JSON. READ-ONLY, and it moves no money.
+
+    The deposit form needs this list and must not block on it. When the cache
+    was cold the page rendered without a picker; this is what it calls to fill
+    it in, and it is the SAME builder the page uses, so the options are
+    identical to the ones a warm cache would have produced.
+    """
+    from .domain.intake import accounts_cached, accounts_stale, refresh_accounts
+    from .ui import account_options_html
+
+    try:
+        db = _database()
+        if not accounts_cached(db) and accounts_stale():
+            # One attempt, on a read the user can see is waiting for it.
+            refresh_accounts(db)
+        items = accounts_cached(db)
+        return {"ok": True, "ready": bool(items),
+                "html": account_options_html(items),
+                "count": len(items)}
+    except Exception as exc:
+        log.warning("could not list accounts for the form: %s", exc)
+        return {"ok": False, "ready": False, "html": "", "count": 0,
+                "error": "Could not reach Airwallex for the account list."}
 # Serve the stylesheet. `html=False` is deliberately omitted so the page is
 # usable with JS off; the only script is a small enhancement layer.
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
@@ -1302,12 +1366,6 @@ def app_page(background: BackgroundTasks, tab: str = "home",
     """
     from .dashboard import build_context
     from .ui import render_app
-    # The deposit form needs the account list to render at all, so it is
-    # refreshed BEFORE the context is built.
-    if tab == "money-in":
-        from .domain.intake import accounts_stale, refresh_accounts
-        if accounts_stale():
-            refresh_accounts(_database())
 
     try:
         ctx = build_context(INCIDENTS)
@@ -1352,14 +1410,12 @@ def app_page(background: BackgroundTasks, tab: str = "home",
         # The global-account list is fetched the same way and for the same
         # reason: it is what made a COLD first render wait on a token fetch.
         from .domain.intake import accounts_stale, refresh_accounts
-        # HOME RENDERS IMMEDIATELY; THE DEPOSIT FORM WAITS. The accounts list is
-        # fetched in the background so a slow sandbox can never hold up a page.
-        # For the deposform that is not good enough: it leaves the picker EMPTY
-        # on the first view after a restart, which reads as "you have no
-        # accounts". A form is a deliberate action, so it may wait for the list
-        # it needs -- but the refresh must happen BEFORE the context is built,
-        # or the render gets the empty list anyway.
-        if accounts_stale() and tab != "money-in":
+        # NOBODY WAITS FOR AIRWALLEX. The accounts list is warmed at STARTUP and
+        # refreshed after the response; if it is still not here the form renders
+        # "Loading accounts…" and fills itself in. Waiting for it inside the
+        # render put ~2.8s on the first Money in view after a restart, which is
+        # a slow page in exchange for a picker that was going to arrive anyway.
+        if accounts_stale():
             background.add_task(refresh_accounts, _database())
     except Exception:
         log.warning("could not schedule the live-status refresh")
