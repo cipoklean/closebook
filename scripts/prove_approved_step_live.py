@@ -122,7 +122,9 @@ print("  deposit  :", str(dep.get("message", dep))[:170])
 step(3, "the over-limit bill is in Needs your OK")
 time.sleep(2)
 ok_html = page("/app?tab=ok")
-cards = re.findall(r'data-testid="approvable-([0-9]+)"', ok_html)
+# The step id is in the FORM ACTION. There is no `approvable-<id>` testid;
+# guessing one made this read "no cards" on a page that plainly had one.
+cards = sorted(set(re.findall(r'action="/approvals/([0-9]+)/approve"', ok_html)))
 print("  approval cards:", cards)
 print("  the bill is named on the page:", BILL in ok_html)
 print("  it says why:", "auto-pay limit" in ok_html)
@@ -152,5 +154,36 @@ print("  BILL named on money-out:", BILL in mo)
 print("  stopped marks on the page:", mo.count('data-testid="tracker-stopped"'))
 print("  shows a process state:",
       ("Sending to the bank" in mo) or ("PROCESSING" in mo))
+
+step(7, "settle it through the sandbox control, and the page must agree")
+TID = row[2] if row else None
+if TID:
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "..", "backend"))
+    from app.airwallex.client import AirwallexClient
+    from app.airwallex.transfers import Transfers
+    cl = AirwallexClient()
+    print("  Airwallex says:", Transfers(cl).status_of(TID))
+    print("  settle ->", str(post(f"/dev/transfers/{TID}/transition",
+                                    {"what": "settle"}).get("message"))[:170])
+    st = None
+    for _ in range(20):
+        st = Transfers(cl).status_of(TID)
+        if st in ("PAID", "CANCELLED", "FAILED"):
+            break
+        time.sleep(2)
+    print("  Airwallex says now:", st)
+    print("  plan_step:", plan_row(f"PAY:{BILL}"))
+    html7 = page("/app?tab=money-out")
+    # ASSERT THE PILL, NOT A SUBSTRING. `"Paid" in page` was TRUE here while the
+    # card read PROCESSING, off unrelated text elsewhere on the page.
+    # The pill lives inside the "On the bank" fold. Match THAT, not any pill:
+    # `x-pill` alone also matches the rail ("LOCAL") and the tracker legend.
+    bank = re.search(
+        r'class="x-label">On the bank</span>\s*<span class="x-pill[^"]*">([^<]+)<',
+        html7)
+    print("  the 'On the bank' pill now reads:",
+          bank.group(1) if bank else "(not found)")
 
 print("\nsuffix:", SUF, "| bill:", BILL, "| object id:", row[2] if row else None)
