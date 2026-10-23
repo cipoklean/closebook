@@ -219,10 +219,31 @@ class TestTheSandboxIsFenced:
         assert "dashed" in css[i:i + 220]
 
     def test_the_simulator_lives_inside_it(self, client, book):
+        """Inside the fence BY CONSTRUCTION, not merely somewhere on the page.
+
+        Asserted on the component: a fresh database has no global accounts, so
+        the simulator legitimately renders its "none yet" state and there is no
+        picker to find. A page-level search for the picker therefore tested
+        whichever book happened to be loaded, which is how this passed locally
+        and failed on CI.
+        """
+        from app.ui import _sandbox_panel
+
+        fenced = _sandbox_panel(simulate='<input id="f-global_account_id">')
+        assert 'data-testid="sandbox-controls"' in fenced
+        assert "f-global_account_id" in fenced
+        # and nothing of the simulator leaks outside the panel
+        assert fenced.count("f-global_account_id") == 1
+
+    def test_the_simulate_card_is_inside_the_panel_on_the_page(self, client, book):
         html = client.get("/app?tab=money-in").text
         panel = html[html.find('data-testid="sandbox-controls"'):]
-        assert "f-global_account_id" in panel[:4000], \
+        assert panel, "the panel must be on this screen"
+        assert "Global account" in panel or "Check Airwallex for new deposits" in panel, \
             "the deposit simulator must be inside the panel, not beside it"
+        # and NOT rendered above it
+        assert "Check Airwallex for new deposits" not in html[:html.find(
+            'data-testid="sandbox-controls"')]
 
     def test_normal_screens_show_none_of_it(self, client, book):
         """Home is what a judge looks at first; the demo machinery is not on it."""
