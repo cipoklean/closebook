@@ -375,7 +375,7 @@ def resolve_refund(db_session, inflow, *, reason: str, by: str = "dashboard") ->
     post(db_session, txn_id=f"inflow:{inflow.id}:refund",
          legs=[("unapplied_cash", amount, 0, inflow.currency),
                (REFUNDS_OWED, 0, amount, inflow.currency)],
-         ref=f"refund owed — {text} (by {by})")
+         ref=f"refund owed, {text} (by {by})")
     inflow.review_state = "REFUND_OWED"
     inflow.resolution_reason = text
     inflow.resolved_by = by
@@ -407,7 +407,7 @@ def resolve_income(db_session, inflow, *, note: str, by: str = "dashboard") -> i
     post(db_session, txn_id=f"inflow:{inflow.id}:income",
          legs=[("unapplied_cash", amount, 0, inflow.currency),
                (OTHER_INCOME, 0, amount, inflow.currency)],
-         ref=f"released as unallocated income — {text} (by {by})")
+         ref=f"released as unallocated income, {text} (by {by})")
     inflow.review_state = "RELEASED_INCOME"
     inflow.resolution_reason = text
     inflow.resolution_note = text

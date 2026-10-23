@@ -232,7 +232,7 @@ def _sendability_gap(session, step: Step) -> Optional[str]:
             return gap
     if has_retired_attempt(session, step):
         return (f"an earlier payment for {step.payable_number} was returned or "
-                f"failed, so this is a replacement — it needs your approval and "
+                f"failed, so this is a replacement: it needs your approval and "
                 f"a new payment reference before it can be sent")
     return None
 
@@ -304,7 +304,7 @@ def on_event(db: DB, *, source: str, dry_run: bool = True,
             run.verdicts.append(Verdict(
                 payable_number=step.payable_number or "", action=step.action,
                 outcome="HELD",
-                detail=("dry run — the plan is clear to pay this, but this call "
+                detail=("dry run: the plan is clear to pay this, but this call "
                         "was not asked to move money")))
         return run
 
@@ -316,7 +316,7 @@ def on_event(db: DB, *, source: str, dry_run: bool = True,
                 run.verdicts.append(Verdict(
                     payable_number=step.payable_number or "", action=step.action,
                     outcome="REFUSED",
-                    detail="no sandbox credentials — nothing was sent"))
+                    detail="no sandbox credentials: nothing was sent"))
             return run
         client = AirwallexClient()
 
@@ -342,7 +342,7 @@ def on_event(db: DB, *, source: str, dry_run: bool = True,
             run.verdicts.append(Verdict(
                 payable_number=step.payable_number or "", action=step.action,
                 outcome="HELD",
-                detail=("the plan ran out of time this pass — nothing was sent "
+                detail=("the plan ran out of time this pass: nothing was sent "
                         "and the next event will pick it up")))
             continue
         if _key(step) in skipped_keys:
@@ -375,7 +375,7 @@ def _run_one(db: DB, client: Any, step: Step, row_id: Optional[int],
             payable_number=step.payable_number or "", action=step.action,
             outcome="REFUSED",
             detail="no persisted plan step, so there is nowhere to record a "
-                   "request_id — refusing rather than sending unprotected")
+                   "request_id: refusing rather than sending unprotected")
 
     budget, position = _budget_and_position(db)
     rates = position.rates

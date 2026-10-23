@@ -323,7 +323,7 @@ async def dev_transfer_transition(transfer_id: str, request: Request):
                 # Say what settlement ACTUALLY decided. "already settled" was
                 # printed for a CANCELLED transfer that never settled at all —
                 # the opposite claim, on the screen that exists to be trusted.
-                settle_note = f" Ledger: nothing written — {outcomes[0].reason}"
+                settle_note = f" Ledger: nothing written, {outcomes[0].reason}"
             else:
                 settle_note = (" Ledger: no plan step holds this transfer, so "
                                "there was nothing to post.")
@@ -467,7 +467,7 @@ def state() -> dict:
 
     elapsed = time.monotonic() - started
     if elapsed > STATE_SLOW_SECONDS:
-        log.warning("GET /state took %.2fs (budget %.2fs) — it must stay a "
+        log.warning("GET /state took %.2fs (budget %.2fs): it must stay a "
                     "fast, database-only read", elapsed, STATE_SLOW_SECONDS)
     return body
 
@@ -649,7 +649,7 @@ async def reject(step_id: int, request: Request) -> dict:
     return _action_body(
         "ok",
         "Rejected. Nothing was sent, and the payment will not be re-planned on "
-        "its own — it needs a fresh decision.", "")
+        "its own: it needs a fresh decision.", "")
 
 
 @app.post(_settings.webhook_path)
@@ -814,7 +814,7 @@ def _check_pin(pin: str) -> Optional[str]:
     field = get_settings().demo_approver_pin
     configured = (field.get_secret_value() if field is not None else "")
     if not configured:
-        return ("DEMO_APPROVER_PIN is not configured — the approval endpoint is "
+        return ("DEMO_APPROVER_PIN is not configured: the approval endpoint is "
                 "closed rather than open.")
     if pin != configured:
         return "That PIN is not right."
@@ -850,7 +850,7 @@ async def reask_inflow_route(inflow_id: int, request: Request):
     if reading_is_a_proposal(result):
         return _back(request, tab="ok", ok=(
             f"Asked again. Read as {result.status} via {result.method} at "
-            f"{conf:.2f} — asking again never applies anything, so this is a "
+            f"{conf:.2f}: asking again never applies anything, so this is a "
             f"proposal waiting for your decision. {result.reason}"))
     if result.method == "LLM" and conf == 0:
         return _back(request, tab="ok", ok=(
@@ -943,7 +943,7 @@ async def resolve_inflow_route(inflow_id: int, request: Request):
                     f"both moved.")
         elif kind == "reject":
             head = (f"Left in suspense. {money_str(amount, ccy)} is still in the "
-                    f"book and still not spendable — decide where it belongs "
+                    f"book and still not spendable: decide where it belongs "
                     f"when you know.")
         elif kind == "refund":
             head = (f"Refund owed: {money_str(amount, ccy)} is now a recorded "
@@ -984,7 +984,7 @@ async def reject_inflow_route(inflow_id: int, request: Request):
     configured = (_pin_field.get_secret_value() if _pin_field is not None else "")
     if not configured:
         return _back(request, tab="ok",
-                     err="DEMO_APPROVER_PIN is not configured — the rejection "
+                     err="DEMO_APPROVER_PIN is not configured: the rejection "
                          "endpoint is closed rather than open.")
     if pin != configured:
         return _back(request, tab="ok", err="That PIN is not right.")
@@ -1095,7 +1095,7 @@ async def money_in_simulate(request: Request):
     if result.disposition == "PROPOSED":
         return _back(request, tab="money-in", ok=(
             f"{head}. Read as {result.status} via {result.method} at "
-            f"{result.confidence:.2f} — BELOW the automatic threshold, so "
+            f"{result.confidence:.2f}. BELOW the automatic threshold, so "
             f"nothing has been applied. The invoice has not moved and the cash "
             f"is in suspense awaiting your approval. {result.reason}"
             + _run_loop("deposit")))
@@ -1264,7 +1264,7 @@ async def setup_suppliers(request: Request):
                            status=outcome.status, error=outcome.error)
 
     if outcome.ok:
-        return _back(request, ok=f"{supplier_name} is payable — Airwallex "
+        return _back(request, ok=f"{supplier_name} is payable. Airwallex "
                                  f"beneficiary {outcome.beneficiary_id} "
                                  f"({outcome.status}).")
     return _back(request, err=f"{supplier_name} was saved but its beneficiary "
@@ -1296,7 +1296,7 @@ async def setup_supplier_beneficiary(supplier_id: int, request: Request):
                            beneficiary_id=outcome.beneficiary_id,
                            status=outcome.status, error=outcome.error)
     if outcome.ok:
-        return _back(request, ok=f"{name} is payable — beneficiary "
+        return _back(request, ok=f"{name} is payable: beneficiary "
                                  f"{outcome.beneficiary_id} ({outcome.status}).")
     return _back(request, err=f"{name}: {outcome.error}")
 
@@ -1394,7 +1394,7 @@ def app_page(background: BackgroundTasks, tab: str = "home",
         return ("<html><body style='font-family:system-ui;padding:2rem;max-width:44rem'>"
                 "<h1>Closebook</h1>"
                 "<p><b>The app could not read its state.</b> Nothing was changed "
-                "by this request — the books are exactly as they were.</p>"
+                "by this request: the books are exactly as they were.</p>"
                 f"<p style='font-family:ui-monospace,monospace;background:#F4F2EC;"
                 f"padding:.75rem;border-radius:8px;overflow-wrap:anywhere'>"
                 f"{_html.escape(reason)}</p>"

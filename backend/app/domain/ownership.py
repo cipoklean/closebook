@@ -147,7 +147,7 @@ def owns_deposit(claimed_by: str | None, *, me: str | None = None) -> tuple[bool
             return True, f"tagged for {me}"
         return False, f"tagged for '{claimed_by}', not '{me}'"
     if ingest_unclaimed():
-        return True, "no tag — treated as a real arrival"
+        return True, "no tag: treated as a real arrival"
     return False, "no tag and this instance does not take unclaimed deposits"
 
 
@@ -167,7 +167,7 @@ def owns_transfer(session, request_id: str | None, *, me: str | None = None):
         return None, "the event carries no request_id, so it cannot be ours"
     step = find_step_by_request_id(session, request_id)
     if step is None:
-        return None, (f"request_id {request_id} is not in {me}'s book — the "
+        return None, (f"request_id {request_id} is not in {me}'s book: the "
                       f"payment was issued by another instance")
     return step, f"request_id {request_id} is in {me}'s book"
 

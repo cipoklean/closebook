@@ -152,7 +152,7 @@ def main() -> int:
     print()
 
     if not settings.sandbox_ready():
-        print("NOTE: .env has no AWX_CLIENT_ID/AWX_API_KEY — seeded local ledger only.")
+        print("NOTE: .env has no AWX_CLIENT_ID/AWX_API_KEY: seeded local ledger only.")
         print("      Fill .env, then re-run `make seed` to fund the sandbox accounts.")
         return 0
 

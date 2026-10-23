@@ -102,7 +102,7 @@ def approve_step(db, step_id: int, *, pin: str, approved_by: str,
                  configured_pin: str) -> dict:
     """Issue an HMAC-bound approval for a plan step."""
     if not check_pin(pin, configured_pin):
-        raise ApprovalRefused("wrong PIN — approval not recorded")
+        raise ApprovalRefused("wrong PIN: approval not recorded")
 
     s = db.session()
     step = s.query(PlanStep).filter_by(id=step_id).first()
@@ -110,7 +110,7 @@ def approve_step(db, step_id: int, *, pin: str, approved_by: str,
         raise ApprovalRefused(f"no plan step {step_id}")
     if step.airwallex_object_id:
         raise ApprovalRefused(
-            "this step already has a live Airwallex object — approving it now "
+            "this step already has a live Airwallex object: approving it now "
             "would authorise nothing and could confuse the audit trail")
 
     existing = s.query(Approval).filter_by(plan_step_id=step_id).first()
@@ -120,7 +120,7 @@ def approve_step(db, step_id: int, *, pin: str, approved_by: str,
         # A human said no. Re-approving silently would override a deliberate
         # decision, so the step must be re-planned under a new identity instead.
         raise ApprovalRefused(
-            "this step was rejected by a human — re-plan it rather than "
+            "this step was rejected by a human: re-plan it rather than "
             "re-approving the same terms")
 
     terms = terms_from_step(step)
@@ -158,7 +158,7 @@ def reject_step(db, step_id: int, *, pin: str, rejected_by: str,
                 configured_pin: str, reason: str = "") -> dict:
     """Record a human rejection. Terminal for this step."""
     if not check_pin(pin, configured_pin):
-        raise ApprovalRefused("wrong PIN — rejection not recorded")
+        raise ApprovalRefused("wrong PIN: rejection not recorded")
 
     s = db.session()
     step = s.query(PlanStep).filter_by(id=step_id).first()

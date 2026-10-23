@@ -238,7 +238,7 @@ class Plan:
                     amt += f" ({s.payable_number} {s.supplier})"
             else:
                 amt = s.payable_number or ""
-            lines.append(f"{i+1}. [{tag}] {s.action:<9} {amt} — {s.reason}")
+            lines.append(f"{i+1}. [{tag}] {s.action:<9} {amt}, {s.reason}")
         return "\n".join(lines)
 
 
@@ -306,9 +306,9 @@ def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: i
         if names:
             who = " and ".join(names)
             if enough_cash:
-                return (f"waits for {who} to land — paying it now would leave cash "
+                return (f"waits for {who} to land: paying it now would leave cash "
                         f"{left_txt}, below the {floor_txt} floor"), "waits_for_inflow"
-            return (f"waits for {who} to land — the account holds "
+            return (f"waits for {who} to land: the account holds "
                     f"{money_str(max(currency_held, 0), currency)} and this needs "
                     f"{money_str(needed_minor, currency)}"), "waits_for_inflow"
 
@@ -473,7 +473,7 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
                              f" still outstanding")
             blockers.append(
                 f"waiting on {p.depends_on_receivable or 'its receivable'}"
-                f"{short_txt} — a part-payment does not release the supplier")
+                f"{short_txt}: a part-payment does not release the supplier")
             codes.append("dependency_not_met")
 
         # --- 2. priceable? -------------------------------------------------
@@ -666,7 +666,7 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
                         has_valid_approval=p.has_valid_approval,
             approval_reason=why,
             reason=(f"{p.number} to {p.supplier}: {money_str(move_minor, p.currency)}"
-                    f"{fee_txt} by {p.payout_method} — {why}"),
+                    f"{fee_txt} by {p.payout_method}, {why}"),
             policy_reason="within_policy" if not needs_approval else "needs_approval",
             chained_to=fx_index,
             funding_currency=fund_ccy,

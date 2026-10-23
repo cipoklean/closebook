@@ -102,7 +102,7 @@ def _show_holds(db: DB) -> None:
             pays.append(f"{p.number} {p.supplier.name if p.supplier else ''} "
                         f"{p.currency} {p.amount_minor/100:.2f} auto-pays ({tag})")
         else:
-            holds.append(f"{p.number} HELD ({tag}) — "
+            holds.append(f"{p.number} HELD ({tag}), "
                          + ("receivable not fully paid"
                             if p.depends_on_receivable_id
                             else f"exceeds limit / {payout.lower()} rail"))
@@ -116,7 +116,7 @@ def main() -> int:
     from ..config import get_settings
     settings = get_settings()
     db = DB()
-    print("=== Closebook demo — Kano Craft Imports Ltd ===")
+    print("=== Closebook demo: Kano Craft Imports Ltd ===")
     for beat in scenario.BEATS:
         print(f"\n--- beat: {beat.name} ---")
         print(f"  inject: {beat.inject}")
@@ -128,7 +128,7 @@ def main() -> int:
                            "guardrail", "failure_recovery", "ambiguous_inflow"):
             live = settings.sandbox_ready()
             print(f"  expect: {beat.expect}")
-            print("  " + ("[live sandbox path ready — executor will issue the calls]"
+            print("  " + ("[live sandbox path ready: executor will issue the calls]"
                           if live else
                           "[offline: local decision + expected sandbox call logged; "
                           "fill .env for live execution]"))

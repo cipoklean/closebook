@@ -168,7 +168,7 @@ class AirwallexClient:
                 last_problem = "the request timed out"
                 if method.upper() in {"POST"} and not is_simulation:
                     raise AmbiguousSubmit(
-                        f"{path} timed out mid-flight — look up by request_id={request_id} before retrying"
+                        f"{path} timed out mid-flight: look up by request_id={request_id} before retrying"
                     ) from None
                 continue
             except httpx.ConnectError as exc:
@@ -194,7 +194,7 @@ class AirwallexClient:
 
             # 5xx on a non-simulation mutation = ambiguous
             if method.upper() == "POST" and not is_simulation:
-                raise AmbiguousSubmit(f"5xx from {path} — look up by request_id={request_id}")
+                raise AmbiguousSubmit(f"5xx from {path}: look up by request_id={request_id}")
             # Remember WHY, so exhausting the retries can say what came back.
             # This used to report every exhaustion as "rate-limited", which sent
             # a 500-looking bug hunting for a throttle that was never there.
@@ -202,7 +202,7 @@ class AirwallexClient:
             time.sleep(0.5 * (attempt + 1))
 
         raise ApiError(0, None,
-                       f"gave up after 4 attempts on {path} — {last_problem}")
+                       f"gave up after 4 attempts on {path}, {last_problem}")
 
     @staticmethod
     def _safe_json(resp: httpx.Response) -> Any:

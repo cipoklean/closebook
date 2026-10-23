@@ -775,7 +775,7 @@ def _proposal_fit(session, inflow) -> dict:
                 return {"ok": False, "invoices": [inv.number], "why": (
                     f"{inv.number} has been paid in full since this proposal was "
                     f"made, so it cannot take this money. It is already somebody "
-                    f"else's payment — record this one as a refund owed, or ask "
+                    f"else's payment: record this one as a refund owed, or ask "
                     f"the model again.")}
             return {"ok": False, "invoices": [inv.number], "why": (
                 f"{inv.number} has only {money_str(max(0, left), inv.currency)} "
@@ -1085,7 +1085,7 @@ def receipt_data(s, i, prop: dict, final_conf, applied) -> dict:
 
         model["unavailable"] = MODEL_UNAVAILABLE
     elif att.get("never_asked") or (i.match_method and i.match_method != "LLM"):
-        model["reason"] = ("Not needed — a deterministic rule settled this "
+        model["reason"] = ("Not needed: a deterministic rule settled this "
                            "before the model was consulted.")
     elif i.match_method == "LLM":
         # The model ran and we have no stored claim for it. Say that, rather

@@ -152,7 +152,7 @@ def _receipt(model: dict, code: dict) -> str:
     if c.get("note"):
         rows.append(("", e(c["note"])))
     right = "".join(f'<div class="x-receipt-row"><span>{k}</span><b>{v}</b></div>'
-                    for k, v in rows) or '<div class="x-receipt-row"><span>—</span></div>'
+                    for k, v in rows) or '<div class="x-receipt-row"><span>, </span></div>'
 
     return (f'<div class="x-receipt" data-testid="receipt">'
             f'<div class="x-receipt-col x-receipt-col--model">'
@@ -327,13 +327,13 @@ def _head(title: str) -> str:
         '<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f'<title>{e(title)}</title>\n'
-        '<meta name="description" content="Closebook — real-time books for a '
+        '<meta name="description" content="Closebook: real-time books for a '
         'cross-border business. Money in is matched, money out is checked, and '
         'anything unclear waits for a human.">\n'
         '<link rel="preconnect" href="https://fonts.googleapis.com">\n'
         '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n'
         '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">\n'
-        # System fonts first, Google as an upgrade — a blocked or slow CDN must
+        # System fonts first, Google as an upgrade: a blocked or slow CDN must
         # never leave the page unstyled.
         f'<link rel="stylesheet" href="/static/closebook.css?v={v}">\n'
         '</head>\n'
@@ -479,7 +479,7 @@ _JS = """
     var note = document.createElement("div");
     note.className = "x-note x-note--done";
     note.setAttribute("data-testid", "done-note");
-    note.textContent = "Done — this no longer needs you.";
+    note.textContent = "Done: this no longer needs you.";
     if (host && host.hasAttribute("data-card")) {
       host.innerHTML = "";
       host.appendChild(note);
@@ -577,7 +577,7 @@ _JS = """
       }).then(function (res) {
         // `ok` IS A BOOLEAN and `message` is the sentence. Deciding on the
         // sentence is what produced "The server did not say what happened" on
-        // an approval that had SUCCEEDED — a successful action reported as
+        // an approval that had SUCCEEDED: a successful action reported as
         // unknown is worse than a failure reported as one, because it invites
         // the operator to do it again.
         //
@@ -782,7 +782,7 @@ def render_landing(stats: dict | None = None) -> str:
   <div class="x-l-grid x-l-grid--3">''')
     for n, title, body in (
         ("01", "It reads the reference",
-         "A deposit arrives with whatever the payer typed — a name, a fragment "
+         "A deposit arrives with whatever the payer typed: a name, a fragment "
          "of an invoice number, a typo. The matcher tries the exact reading "
          "first, then a rule, then the model. Every proposal the model makes is "
          "re-checked in code before it can change anything."),
@@ -794,7 +794,7 @@ def render_landing(stats: dict | None = None) -> str:
         ("03", "It asks a person when unsure",
          "Anything below the confidence band is proposed, never applied. "
          "Overpayments, part-payments and unclear references go to a human with "
-         "the evidence attached — and nothing a person has not approved can "
+         "the evidence attached: and nothing a person has not approved can "
          "move."),
     ):
         a(f'''    <div class="x-l-card">
@@ -822,7 +822,7 @@ def render_landing(stats: dict | None = None) -> str:
          "sending it again."),
         ("Approvals bind the terms",
          "An approval covers the amount, the currency, the supplier and the "
-         "rate — all hashed. Change any one of them and the approval is void."),
+         "rate: all hashed. Change any one of them and the approval is void."),
         ("Nothing moves itself",
          "A model can propose. Only one module in the codebase is permitted to "
          "move money, and it re-checks every rule on the way out."),
@@ -838,7 +838,7 @@ def render_landing(stats: dict | None = None) -> str:
       <p>When a bank says a transfer failed, Closebook does not act on the
       message. It goes and looks at the transfer first. A failure notice for a
       payment that is still in flight means <em>watch it</em>, not
-      <em>send it again</em> — and a replacement is treated as a new payment
+      <em>send it again</em>: and a replacement is treated as a new payment
       with a new approval, because that is what it is.</p>
     </div>
   </div>
@@ -847,7 +847,7 @@ def render_landing(stats: dict | None = None) -> str:
     # ---- the one live proof ---------------------------------------------
     if pr["empty"]:
         proof_body = ('<p class="x-l-proofnote">This workspace is empty, so there '
-                      'is nothing to show yet. Launch the app and build it — the '
+                      'is nothing to show yet. Launch the app and build it: the '
                       'figures here come from the same tables the app renders, '
                       'not from a fixture.</p>')
     else:
@@ -864,7 +864,7 @@ def render_landing(stats: dict | None = None) -> str:
         <small>ledger balanced</small></div>
     </div>
     <p class="x-l-proofnote">Counted from this instance&rsquo;s own book just now
-    — {pr["ledger_rows"]} ledger posting{"s" if pr["ledger_rows"] != 1 else ""}
+, {pr["ledger_rows"]} ledger posting{"s" if pr["ledger_rows"] != 1 else ""}
     behind it. Nothing here is a sample.</p>'''
     a(f'''<section class="x-l-sec x-l-sec--white"><div class="x-l-wrap">
   <div class="x-l-head">
@@ -890,7 +890,7 @@ def render_landing(stats: dict | None = None) -> str:
   </div>
 </footer>''')
 
-    return _shell("".join(L), app=False, title="Closebook — real-time books")
+    return _shell("".join(L), app=False, title="Closebook: real-time books")
 
 
 # ---------------------------------------------------------- app pages
@@ -1062,7 +1062,7 @@ def _home(c: dict) -> str:
     inflight_str = tt["in_flight"]
     n_inflight = len([ln for ln in m["lines"] if ln["where"] == "in_flight"])
     inflight_note = (
-        f'{n_inflight} sent to the bank and not settled yet — a sandbox '
+        f'{n_inflight} sent to the bank and not settled yet: a sandbox '
         'transfer is not a completed payment. Counted once, here, not again as '
         'promised.')
     cards.append(_card(span="x-span-3", inner=(
@@ -1088,7 +1088,7 @@ def _home(c: dict) -> str:
         headline = f"Short by {bits}"
         who = m["breaching"][0] if m["breaching"] else None
         if who:
-            headline += (f" — paying {who['payable_number']} "
+            headline += (f": paying {who['payable_number']} "
                          f"({money_str(who['amount_minor'], who['currency'])}) "
                          f"would take cash below the {floor_txt} reserve floor")
         else:
@@ -1120,7 +1120,7 @@ def _home(c: dict) -> str:
     # the plan gave, instead of a made-up number in the wrong currency.
     unfunded_note = ""
     if m["unfunded"]:
-        bits = "; ".join(f'{u["payable_number"]} — {u["note"]}'
+        bits = "; ".join(f'{u["payable_number"]}, {u["note"]}'
                          for u in m["unfunded"])
         unfunded_note = (f'<div class="x-statnote" style="color:var(--x-bad)">'
                          f'Not costed here: {e(bits)}.</div>')
@@ -1142,7 +1142,7 @@ def _home(c: dict) -> str:
     susp_str = tt["unmatched"]
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["in"]}</span>'
-        '<div class="x-label">Unmatched money — not spendable</div>'
+        '<div class="x-label">Unmatched money: not spendable</div>'
         f'<div class="x-fig" data-figure="unmatched">{e(susp_str) if susp_str else "Nothing waiting"}</div>'
         f'<div class="x-statnote">It is in the bank and it is not in the figure '
         f'above. {n_unmatched} payment'
@@ -1230,7 +1230,7 @@ def _home(c: dict) -> str:
         banner_head = (f'Nothing needs your OK, but {n_prob} payment'
                        f'{"s" if n_prob != 1 else ""} failed')
         banner_sub = ('Nothing is retried on its own, and a replacement needs '
-                      'your approval — re-plan and the ones that can go will '
+                      'your approval: re-plan and the ones that can go will '
                       'appear in Needs your OK.')
         banner_icon = _I["warn"]
         banner_href = '/app?tab=money-out'
@@ -1239,7 +1239,7 @@ def _home(c: dict) -> str:
         # Held, but NOT a human decision: quote the planner's own reason so the
         # header says what the payment is actually waiting for.
         first = c["waiting"][0]
-        banner_head = (f'Nothing needs your OK — {n_wait} payment'
+        banner_head = (f'Nothing needs your OK, {n_wait} payment'
                        f'{"s" if n_wait != 1 else ""} on hold')
         banner_sub = (f'{first["number"]}: {first.get("plan_reason") or "held"}'
                       if first.get("plan_reason") else
@@ -1286,7 +1286,7 @@ def _home(c: dict) -> str:
             live = p.get("live_status")
             if st == "PAID":
                 head = f'{p["number"]} ({p["supplier"] or "supplier"}) is paid'
-                body = (f'{p["currency"]} {money(p["amount_minor"])} — settled '
+                body = (f'{p["currency"]} {money(p["amount_minor"])}: settled '
                         f'in sandbox.')
                 pill = '<span class="x-pill x-pill--good">Paid</span>'
             else:
@@ -1294,7 +1294,7 @@ def _home(c: dict) -> str:
                         f'is moving')
                 body = (f'{p["currency"]} {money(p["amount_minor"])} sandbox '
                         f'transfer sent'
-                        + (f' — the bank says {live}.' if live else '.'))
+                        + (f': the bank says {live}.' if live else '.'))
                 pill = (f'<span class="x-pill x-pill--info">{e(live or st)}'
                         f'</span>')
             todo.append(f'<li><span class="x-todo-ico {cls}">{icon}</span>'
@@ -1367,7 +1367,7 @@ def _home(c: dict) -> str:
     for w in c.get("waiting") or []:
         wait_inner = _card(span="x-span-4", inner=(
             '<div class="x-cardhead"><div><h3>On hold</h3>'
-            '<p class="x-help">Held by policy — not waiting on a person.</p>'
+            '<p class="x-help">Held by policy: not waiting on a person.</p>'
             '</div></div><ul class="x-todo">' + "".join(
                 f'<li><span class="x-todo-ico is-warn">{_I["clock"]}</span>'
                 f'<div id="held-{e(p["number"])}">'
@@ -1558,9 +1558,9 @@ def _resolve_form(a: dict) -> str:
         options += (f'<option value="match">Match it to '
                     f'{e(" and ".join(invs))}</option>')
     options += (
-        '<option value="refund">Refund owed — record the liability</option>'
+        '<option value="refund">Refund owed: record the liability</option>'
         '<option value="income">Release as unallocated income</option>'
-        '<option value="reject">Not this invoice — leave it unmatched</option>')
+        '<option value="reject">Not this invoice: leave it unmatched</option>')
 
     blocked = ""
     if not (invs and fit.get("ok")) and a.get("no_match_why"):
@@ -1628,7 +1628,7 @@ def _resolution_audit(a: dict) -> str:
     when = (a.get("resolved_at") or "")[:19].replace("T", " ")
     why = a.get("resolution_reason") or "no reason recorded"
     return ('<div class="x-note" style="margin-top:16px">' + _I["info"]
-            + f'<span><b>{e(head)}</b> — {e(why)}. Decided by '
+            + f'<span><b>{e(head)}</b>, {e(why)}. Decided by '
             + f'<b>{e(who)}</b>{(" on " + e(when)) if when else ""}.</span></div>')
 
 
@@ -1651,7 +1651,7 @@ def _simulate_card(c: dict) -> str:
                       f'<select class="x-select" id="f-global_account_id" '
                       f'name="global_account_id">{opts}</select>'
                       f'<span class="x-hint">From GET /global_accounts'
-                      f'{" — none are ACTIVE yet" if not usable else ""}. The '
+                      f'{", none are ACTIVE yet" if not usable else ""}. The '
                       f'deposit lands in the account currency.</span></div>')
     elif not ready:
         acct_field = ('<div class="x-field x-span-4">'
@@ -1669,7 +1669,7 @@ def _simulate_card(c: dict) -> str:
     body = (
         '<div class="x-cardhead"><div><h3>Simulate a customer payment</h3>'
         '<p class="x-help">Calls POST /api/v1/simulation/deposit/create on the '
-        'Airwallex sandbox. It creates a real sandbox deposit — no real money — '
+        'Airwallex sandbox. It creates a real sandbox deposit: no real money, '
         'and it comes back through the same webhook and matcher as any other '
         'payment.</p></div>'
         f'<span class="x-pill x-pill--{"info" if ready else "bad"}">'
@@ -1683,7 +1683,7 @@ def _simulate_card(c: dict) -> str:
                  hint="What the bank says, not what you wish it said")
         + _field("reference", "Reference", span="x-span-3",
                  placeholder="inv 0O41 brightline",
-                 hint="Free text. Typos welcome — that is the point.")
+                 hint="Free text. Typos welcome: that is the point.")
         + '<div class="x-submit">'
           '<button class="x-btn x-btn--primary" type="submit"'
           + ("" if ready else " disabled")
@@ -1707,7 +1707,7 @@ def _acct_label(a: dict) -> str:
     last4 = num[-4:] if sum(c.isdigit() for c in num) >= 4 else ""
     label = f"{ccy} account" + (f" …{e(last4)}" if last4 else "")
     if a.get("usable") is False:
-        label += " — not active yet"
+        label += ", not active yet"
     return label
 
 
@@ -1840,7 +1840,7 @@ def _money_in(c: dict) -> str:
             # Say that. Inventing a reason here would be the exact failure this
             # whole change exists to stop.
             reasons.append(
-                "No decision was recorded for this payment — re-run the demo "
+                "No decision was recorded for this payment: re-run the demo "
                 "beats to see why it was held.")
         if not u.get("reference_raw"):
             reasons.append("It arrived with no reference at all.")
@@ -1870,13 +1870,13 @@ def _money_in(c: dict) -> str:
     # the screen that would have answered them.
     note = ('<div class="x-note" style="margin-top:16px">'
             f'{_I["info"]}<span>Applying a held payment to an invoice needs a '
-            'person — it is on <b>Needs your OK</b>, where you can match it, '
+            'person: it is on <b>Needs your OK</b>, where you can match it, '
             'record a refund owed, or release it as income.</span></div>')
     empty_un = ('<p class="x-empty">Nothing is held. Every deposit that landed '
                 'was matched with certainty.</p>')
     side = _card(span="x-span-4", inner=(
         '<div class="x-cardhead"><div><h3>Money we couldn\'t match</h3>'
-        '<p class="x-help">Unmatched — not applied to any invoice, and no '
+        '<p class="x-help">Unmatched: not applied to any invoice, and no '
         'supplier paid from it.</p></div>'
         f'<span class="x-pill x-pill--warn">{n_unmatched} held</span></div>'
         f'<div class="x-stack">{("".join(un)) if un else empty_un}</div>'
@@ -2128,7 +2128,7 @@ def _ok(c: dict) -> str:
         approved_note = ""
         if a["already_approved"]:
             approved_note = ('<div class="x-note" style="margin-top:16px">'
-                             f'{_I["check"]}<span>Already approved — waiting for the '
+                             f'{_I["check"]}<span>Already approved: waiting for the '
                              f'executor to send it. Approving again would create a '
                              f'second payment.</span></div>')
             form = ('<div class="x-actions"><span class="x-btn" aria-disabled="true">'
@@ -2173,7 +2173,7 @@ def _ok(c: dict) -> str:
     note = _card(inner=(
         '<div class="x-note">' + _I["lock"] +
         '<span>Approving needs your PIN and records a decision. It does not itself '
-        'move money — the executor re-checks the amount, the supplier and the rate '
+        'move money: the executor re-checks the amount, the supplier and the rate '
         'against the hash you approved, every single time.</span></div>'))
 
     # Anything held, with the planner's exact rule. The header says nothing needs
@@ -2182,7 +2182,7 @@ def _ok(c: dict) -> str:
     waits = c.get("waiting") or []
     if waits:
         held = _card(inner=(
-            '<div class="x-cardhead" id="held"><div><h3>Held — and not '
+            '<div class="x-cardhead" id="held"><div><h3>Held, and not '
             'waiting on you</h3>'
             '<p class="x-help">No approval can release these. They are waiting on '
             'something outside your control, and Closebook will re-plan '
@@ -2426,7 +2426,7 @@ def _ai(c: dict) -> str:
                 # ONE display formatter for money across the whole app —
                 # `money_str` renders "USD 4,400.00" everywhere else, so the
                 # AI feed must not be the one screen that says "4,400.00 USD".
-                what = (f'{e(ins.get("payer") or "a payer")} — '
+                what = (f'{e(ins.get("payer") or "a payer")}, '
                         f'{money_str(amt, ins.get("currency") or "USD")}').strip()
             claim = float((prop or {}).get("confidence") or 0)
 
@@ -2435,7 +2435,7 @@ def _ai(c: dict) -> str:
                     f'{a.get("invoice_number")} '
                     f'{money(int(float(a.get("amount") or 0) * 100))}'
                     for a in prop["allocations"])
-                reply = (f'I think this is <b>{e(says)}</b> — about '
+                reply = (f'I think this is <b>{e(says)}</b>: about '
                          f'{claim:.2f} confident.')
                 # WHAT THE MODEL CLAIMED IS NOT WHAT THE SYSTEM USED. The claim
                 # is capped below the AUTO band before it can matter, so showing
@@ -2575,7 +2575,7 @@ def _ai(c: dict) -> str:
     return matches + _card(span="x-span-12", inner=(
         '<div class="x-cardhead"><div><h3>What the model said, and what the rules did</h3>'
         '<p class="x-help">Straight from <span class="x-mono">agent_trace</span>. '
-        'Nothing here is a decision — every row is one the code already made.</p></div>'
+        'Nothing here is a decision: every row is one the code already made.</p></div>'
         '<span class="x-pill x-pill--accent" data-testid="ai-count">'
         + str(len(items)) + (" call" if len(items) == 1 else " calls")
         + '</span></div>'
@@ -2583,7 +2583,7 @@ def _ai(c: dict) -> str:
     )) + _card(inner=(
         '<div class="x-note">' + _I["shield"] +
         '<span>The model can read invoices, explain a decision and ask for approval. '
-        'It has no tool that can move money — that is a structural limit, not a '
+        'It has no tool that can move money: that is a structural limit, not a '
         'setting.</span></div>'))
 
 
@@ -2684,7 +2684,7 @@ def _live_bill_state(p: dict | None, stored: str) -> tuple[str, str, str]:
     if action == "PAY":
         if p.get("plan_needs_approval"):
             return "NEEDS YOUR OK", "warn", (p.get("plan_approval_reason") or note)
-        return "READY", "good", (note or "Within your limits — the planner will pay it.")
+        return "READY", "good", (note or "Within your limits: the planner will pay it.")
     if action in ("DEFER", "ESCALATE", "CHASE"):
         blockers = p.get("plan_blockers") or []
         return "HELD", "warn", (blockers[0] if blockers else note)
@@ -2703,7 +2703,7 @@ def _pill(status: str, label: str = "", tone: str = "") -> str:
     """
     key = (status or "").strip().upper()
     if tone:
-        return f'<span class="x-pill x-pill--{tone}">{e(label or key or "—")}</span>'
+        return f'<span class="x-pill x-pill--{tone}">{e(label or key or ".")}</span>'
     tone = "info"
     if key in ("PAID", "MATCHED", "PAYABLE", "VERIFIED", "OK", "SUCCESS", "SETTLED"):
         tone = "good"
@@ -2713,7 +2713,7 @@ def _pill(status: str, label: str = "", tone: str = "") -> str:
     elif key in ("OVERPAID", "FAILED", "CANCELLED", "REJECTED", "NO BENEFICIARY",
                  "INVALID", "PROBLEM"):
         tone = "bad"
-    return f'<span class="x-pill x-pill--{tone}">{e(label or key or "—")}</span>'
+    return f'<span class="x-pill x-pill--{tone}">{e(label or key or ".")}</span>'
 
 
 def _setup(c: dict) -> str:
@@ -2728,7 +2728,7 @@ def _setup(c: dict) -> str:
             '<div class="x-cardhead"><div><h3>This workspace is empty</h3>'
             '<p>Closebook ships with no sample invoices, suppliers or balances. '
             'Everything it shows comes from what you create here plus what '
-            'Airwallex returns — so a plan you see on Home is a plan about your '
+            'Airwallex returns: so a plan you see on Home is a plan about your '
             'own money.</p></div></div>'
             '<p class="x-empty">Start with Settings, then add a customer, an '
             'invoice, a supplier and a bill. Money in and money out come next.'
@@ -2758,8 +2758,8 @@ def _setup(c: dict) -> str:
           f'</div></form>')))
 
     # 2 ---- customers
-    cust_rows = [[e(x["name"]), e(x["country"] or "—"),
-                  e(x["email"] or "—"), str(x["open_count"])]
+    cust_rows = [[e(x["name"]), e(x["country"] or "."),
+                  e(x["email"] or "."), str(x["open_count"])]
                  for x in ws.get("customers", [])]
     out.append(_card(inner=(
         _cardhead("Customers", "Who owes you money.")
@@ -2780,7 +2780,7 @@ def _setup(c: dict) -> str:
         pill = _pill(x["status"])
         inv_rows.append([f'<strong>{e(x["number"])}</strong>', e(x["customer"]),
                          e(x["amount"]), e(x["paid"]), pill,
-                         e(x["due_date"] or "—")])
+                         e(x["due_date"] or ".")])
     out.append(_card(inner=(
         _cardhead("Invoices", "Money owed to you. Payments match against these "
                               "numbers, so a messy reference is the interesting case.")
@@ -2809,8 +2809,8 @@ def _setup(c: dict) -> str:
             state = (_pill("NO BENEFICIARY")
                      + (f'<div class="x-hint">{e(x["beneficiary_error"])}</div>'
                         if x["beneficiary_error"] else ""))
-        sup_rows.append([f'<strong>{e(x["name"])}</strong>', e(x["country"] or "—"),
-                         e(x["currency"] or "—"), e(x["payout_method"]), state])
+        sup_rows.append([f'<strong>{e(x["name"])}</strong>', e(x["country"] or "."),
+                         e(x["currency"] or "."), e(x["payout_method"]), state])
     out.append(_card(inner=(
         _cardhead("Suppliers", "A supplier is only payable once Airwallex has "
                                "given it a beneficiary. Validation runs first, "
@@ -2831,7 +2831,7 @@ def _setup(c: dict) -> str:
         + _field("account_number", "Account number", span="x-span-3",
                  hint="For SWIFT in an IBAN country, this is the IBAN.")
         + _field("routing_value", "Routing number", span="x-span-3",
-                 hint="LOCAL only — ABA for USD, sort code for GBP.")
+                 hint="LOCAL only. ABA for USD, sort code for GBP.")
         + _field("bank_name", "Bank name", span="x-span-3")
         + _field("swift_code", "SWIFT / BIC", span="x-span-3",
                  hint="SWIFT only, e.g. INGBNL2A")
@@ -2873,7 +2873,7 @@ def _setup(c: dict) -> str:
         reason = f'<div class="x-hint">{e(note)}</div>' if note else ""
         pay_rows.append([f'<strong>{e(x["number"])}</strong>', e(x["supplier"]),
                          e(x["amount"]), _pill(label, tone=tone) + reason, dep,
-                         e(x["payout_method"] or "—")])
+                         e(x["payout_method"] or ".")])
     out.append(_card(inner=(
         _cardhead("Bills to pay", "What you owe. A bill only becomes payable "
                                   "once its supplier has a beneficiary.")
@@ -2900,7 +2900,7 @@ def _setup(c: dict) -> str:
     out.append(_card(inner=(
         _cardhead("Start fresh", "Archive this workspace to a file and empty it.")
         + '<p class="x-hint">Every customer, invoice, supplier, bill, match and '
-          'ledger entry is archived first — nothing is destroyed without a '
+          'ledger entry is archived first: nothing is destroyed without a '
           'copy. Your reserve floor and automatic limit are kept, because they '
           'are policy rather than data. <strong>Airwallex transfers that already '
           'exist are not cancelled</strong>: this empties the book, not the bank.'
@@ -2922,7 +2922,7 @@ _SUBS = {
     "home": "Everything money did since the last time you looked.",
     "money-in": "What landed, and what it was for.",
     "money-out": "What you owe, and where each payment is.",
-    "ok": "Waiting on you — over the limit, or unclear.",
+    "ok": "Waiting on you: over the limit, or unclear.",
     "ai": "Every model call, and the rule that checked it.",
     "setup": "Build the workspace Closebook runs on.",
 }
@@ -2952,7 +2952,7 @@ def render_app(ctx: dict, tab: str = "home", health: dict | None = None) -> str:
         + '<div class="x-body">'
         + _top(NAV[[n[0] for n in NAV].index(tab)][1], _SUBS[tab], health)
         + f'<main class="x-main"><div class="x-screen">{screen}</div></main>'
-        + '<footer class="x-foot"><span>Closebook — sandbox only. '
+        + '<footer class="x-foot"><span>Closebook: sandbox only. '
         'No real money moves here.</span></footer>'
         + '</div>'
         + _bottom_tabs(tab, n_ok)
@@ -2961,9 +2961,9 @@ def render_app(ctx: dict, tab: str = "home", health: dict | None = None) -> str:
         # actually changed and the reader is not mid-task.
         + '<button id="x-new" class="x-new" hidden '
         + 'data-testid="new-activity" type="button">'
-        + 'New activity — tap to refresh</button>'
+        + 'New activity: tap to refresh</button>'
     )
-    return _shell(inner, app=True, title=f"Closebook — {NAV[[n[0] for n in NAV].index(tab)][1]}")
+    return _shell(inner, app=True, title=f"Closebook, {NAV[[n[0] for n in NAV].index(tab)][1]}")
 
 
 __all__ = ["render_landing", "render_app", "money", "e"]

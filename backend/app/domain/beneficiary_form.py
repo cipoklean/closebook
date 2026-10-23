@@ -51,7 +51,7 @@ def build_payload(f: dict) -> dict:
     entity = (f.get("entity_type") or "COMPANY").strip().upper()
     if entity not in ("PERSONAL", "COMPANY"):
         raise WorkspaceRefused(
-            f"Entity type has to be PERSONAL or COMPANY — Airwallex rejects "
+            f"Entity type has to be PERSONAL or COMPANY. Airwallex rejects "
             f"anything else with error 011. Got {entity!r}.")
 
     country = (f.get("country") or "").strip().upper()
@@ -128,7 +128,7 @@ def build_payload(f: dict) -> dict:
             if cat not in ("Checking", "Savings"):
                 raise WorkspaceRefused(
                     'For USD the account category has to be exactly "Checking" '
-                    'or "Savings" — other casing returns error 016.')
+                    'or "Savings": other casing returns error 016.')
             bank_details["bank_account_category"] = cat
 
     beneficiary: dict = {
@@ -185,7 +185,7 @@ def plain_error(exc: Exception) -> str:
 
     head = str(message or code or exc)
     if details:
-        return f"Airwallex refused: {head} — {'; '.join(details)}."
+        return f"Airwallex refused: {head}, {'; '.join(details)}."
     if status is not None:
         return f"Airwallex refused (HTTP {status}): {head}."
     return f"Airwallex refused: {head}."

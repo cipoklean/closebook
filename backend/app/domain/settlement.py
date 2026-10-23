@@ -85,7 +85,7 @@ class SettlementOutcome:
     currency: str = "USD"
 
     def __str__(self) -> str:
-        return f"{self.kind} {self.key}: {'posted' if self.posted else 'no posting'} — {self.reason}"
+        return f"{self.kind} {self.key}: {'posted' if self.posted else 'no posting'}, {self.reason}"
 
 
 # ------------------------------------------------------------------ variance
@@ -166,7 +166,7 @@ def post_conversion(db_session, *, conversion_id: str, sell_currency: str,
     if replayed and not vcreated:
         return SettlementOutcome(
             conversion_id, "conversion", False,
-            "already posted — the conversion is in the ledger, so this replay "
+            "already posted: the conversion is in the ledger, so this replay "
             "posted nothing", txn_ids=txn_ids)
 
     reason = (f"booked {sell_currency} sell and {buy_currency} buy at the actual "
@@ -210,7 +210,7 @@ def post_payout(db_session, *, transfer_id: str, payable_number: str,
     if not created:
         return SettlementOutcome(
             transfer_id, "payout", False,
-            "already posted — the payout is in the ledger, so this replay "
+            "already posted: the payout is in the ledger, so this replay "
             "posted nothing", txn_ids=[txn], payable_number=payable_number,
             amount_minor=amount_minor, currency=currency)
     return SettlementOutcome(

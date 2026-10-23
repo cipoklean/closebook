@@ -127,7 +127,7 @@ def build_agent(db: DB):
                               output={"_inputs": {"amount": amount_minor,
                                                   "currency": currency,
                                                   "payer": payer_name}},
-                              detail="no LLM key configured — deterministic "
+                              detail="no LLM key configured: deterministic "
                                      "tiers only")
         from ..domain.matching import Candidate
         s = db.session()
@@ -155,7 +155,7 @@ def build_agent(db: DB):
                                 "currency": currency, "payer": payer_name,
                                 "reference": reference},
                     "model_proposed": proposal},
-            detail="proposal recorded — re-validated in code before use")
+            detail="proposal recorded: re-validated in code before use")
 
     def explain_decision(*, decision: str, evidence: dict | None = None) -> dict:
         if explainer is None:
@@ -216,7 +216,7 @@ class LiveDemo:
         s = self.db.session()
         inv41 = s.query(InvoiceReceivable).filter_by(number="INV-0041").first()
         if inv41 is None:
-            self._record(beat, False, "INV-0041 missing — run `make seed` first")
+            self._record(beat, False, "INV-0041 missing: run `make seed` first")
             return
         if inv41.status in (RecStatus.PAID, RecStatus.OVERPAID):
             self._record(beat, True,
@@ -331,7 +331,7 @@ class LiveDemo:
                      f"'Invalid issuance details'. The Dev Help fix "
                      f"(is_personalized false, program COMMERCIAL only, no "
                      f"issue_to) was applied and the error was unchanged, and "
-                     f"an INDIVIDUAL cardholder fails identically — so the "
+                     f"an INDIVIDUAL cardholder fails identically: so the "
                      f"cardholder type is not the cause. Cardholders create "
                      f"fine; every issuing-management endpoint returns 'Admin "
                      f"permissions required'. Awaiting Airwallex.")
@@ -351,7 +351,7 @@ class LiveDemo:
                 .order_by(PlanStep.id.desc()).first())
         if step is None:
             self._record(beat, False,
-                         "no real transfer in the DB — run scripts/live_payout.py")
+                         "no real transfer in the DB: run scripts/live_payout.py")
             return
         transfer_id = step.airwallex_object_id
 
@@ -392,7 +392,7 @@ class LiveDemo:
         sub-threshold result is escalated to a human. All three are shown side
         by side so the boundary is visible rather than asserted.
         """
-        beat = "beat 6 (ambiguous inflow — agent proposes, code decides)"
+        beat = "beat 6 (ambiguous inflow: agent proposes, code decides)"
         amount = 440_000
         if _inflow_exists(self.db, amount, "USD", ""):
             self._record(beat, True,
@@ -467,12 +467,12 @@ class LiveDemo:
                        f"leaving {due:,.2f} USD still outstanding, so the "
                        f"payment is HELD for a human")
         elif inv43:
-            outcome = ("nothing was applied — the reading was too weak to "
+            outcome = ("nothing was applied: the reading was too weak to "
                        "prove, so it is held for a human to decide")
         else:
             outcome = "no invoice was affected"
         self._record(beat, escalated,
-                     f"USD {amount/100:,.2f} from 'L. Stores' (no reference) — "
+                     f"USD {amount/100:,.2f} from 'L. Stores' (no reference), "
                      f"the model proposed {result.status} and claimed "
                      f"{result.evidence.get('model_claimed_confidence', 0):.2f} "
                      f"confidence, which is its claim, not a verdict; code "
@@ -494,7 +494,7 @@ class LiveDemo:
         bad = [r for r in self.results if not r.ok]
         print(f"\nlive beats: {len(self.results) - len(bad)}/{len(self.results)} ok")
         for r in bad:
-            print(f"  FAILED: {r.name} — {r.detail}")
+            print(f"  FAILED: {r.name}, {r.detail}")
         return 1 if bad else 0
 
 
@@ -502,13 +502,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     offline = "--offline" in argv
     db = DB()
-    print("=== Closebook LIVE demo — Kano Craft Imports Ltd ===")
+    print("=== Closebook LIVE demo: Kano Craft Imports Ltd ===")
     if offline:
         print("(--offline: deterministic decisions only, no sandbox calls)")
         return 0
     from ..config import get_settings
     if not get_settings().sandbox_ready():
-        print("No sandbox credentials in .env — nothing live to run.")
+        print("No sandbox credentials in .env: nothing live to run.")
         print("Fill .env, or use `--offline`.")
         return 2
     return LiveDemo(db).run_all()

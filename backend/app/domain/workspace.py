@@ -49,14 +49,14 @@ def create_invoice(session, *, customer_id: int, number: str, currency: str,
                    amount: str, due_date: str = "") -> InvoiceReceivable:
     number = (number or "").strip()
     if not number:
-        raise WorkspaceRefused("The invoice needs a number — it is how a payment "
+        raise WorkspaceRefused("The invoice needs a number: it is how a payment "
                                "finds this invoice.")
     ccy = (currency or "").strip().upper()
     if len(ccy) != 3 or not ccy.isalpha():
         raise WorkspaceRefused("Currency must be a 3-letter code, e.g. USD.")
     if session.query(InvoiceReceivable).filter_by(number=number).first():
         raise WorkspaceRefused(f"Invoice {number} already exists. Numbers have to "
-                               f"be unique — a payment matches on the number.")
+                               f"be unique: a payment matches on the number.")
     if session.get(Customer, customer_id) is None:
         raise WorkspaceRefused("Pick a customer for this invoice.")
     try:

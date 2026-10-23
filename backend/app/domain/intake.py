@@ -105,7 +105,7 @@ def matcher_from_settings():
         return None, f"the model client could not be imported: {exc}"
     cfg = LLMConfig.from_settings()
     if not cfg.available:
-        return None, ("no model is configured — LLM_API_KEY is empty, so the "
+        return None, ("no model is configured. LLM_API_KEY is empty, so the "
                       "deterministic tiers decide alone")
     return OpenAICompatibleMatcher(cfg), ""
 
@@ -334,7 +334,7 @@ def ingest_deposit(db, deposit: dict, *, llm=None) -> Optional[IntakeResult]:
     # not settled it, and posting cash we may not have is the failure mode this
     # whole module exists to avoid.
     if f["status"] and f["status"] not in ("SETTLED", "PENDING"):
-        log.info("deposit %s is %s — not posting cash", f["deposit_id"], f["status"])
+        log.info("deposit %s is %s: not posting cash", f["deposit_id"], f["status"])
         return None
     # TWO INSTANCES SHARE ONE SANDBOX ACCOUNT, so `GET /deposits` hands each of
     # them the other's arrivals. Both the poller and the deposit webhook reach

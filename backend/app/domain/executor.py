@@ -141,7 +141,7 @@ class Executor:
     def _require_approval(self, step: Step, terms: ap.ApprovalTerms) -> ap.Approval:
         if self.dry_run:
             raise ExecutionRefused(
-                f"dry run — would need approval: {ap.describe(terms, self.rates)}",
+                f"dry run: would need approval: {ap.describe(terms, self.rates)}",
                 step)
         approval = self.approval
         if approval is None:
@@ -207,7 +207,7 @@ class Executor:
         if row.status in IN_FLIGHT and not self.dry_run:
             return self._resolve_ambiguous(row, step, self._rid(row),
                                            "step was already in flight "
-                                           "(possible crash) — resolving by lookup")
+                                           "(possible crash): resolving by lookup")
 
         terms = ap.ApprovalTerms(
             step_id=row.id,
@@ -308,7 +308,7 @@ class Executor:
                 row.status = StepStatus.SUBMITTED
                 self.db.commit()
             return StepResult(step, True, oid, "SUBMITTED",
-                              "found the original submission — not resent",
+                              "found the original submission: not resent",
                               resolved_from="lookup")
         return StepResult(step, True, None, "AMBIGUOUS",
                           "lookup found nothing; needs a human to retry",

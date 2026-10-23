@@ -200,7 +200,7 @@ Rules:
   evidence is one vague word; use a higher one when the reference names the
   invoice or the payer is clearly that customer.
 - If nothing in the payment points at any invoice, return
-  {{"allocations": [], "confidence": 0.0}} — an honest "I cannot tell" is worth
+  {{"allocations": [], "confidence": 0.0}}: an honest "I cannot tell" is worth
   more than a guess.
 - Never invent an invoice, an amount, or a currency."""
 
@@ -237,7 +237,7 @@ class OpenAICompatibleMatcher:
         self.last_model = None
         self.last_429s = 0
         if not self.cfg.available:
-            self.last_error = ("no model is configured — LLM_API_KEY is empty, "
+            self.last_error = ("no model is configured. LLM_API_KEY is empty, "
                                "so the deterministic tiers decide alone")
             return None
         try:
@@ -430,7 +430,7 @@ class Explanation:
                 {"role": "system", "content":
                     "Explain a treasury decision to a business owner in two "
                     "sentences. You may not change any number, amount, or "
-                    "outcome — restate the given decision only."},
+                    "outcome: restate the given decision only."},
                 {"role": "user", "content":
                     f"Subject: {json.dumps(subject, default=str)}\n"
                     f"Decision: {decision}\n"

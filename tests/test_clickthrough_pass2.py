@@ -153,10 +153,16 @@ class TestAReasonIsStatedOnce:
 class TestTheDropdownsReadLikeAccounts:
     def test_the_account_label_is_the_currency_and_the_last_four(self, client):
         html = client.get("/app?tab=money-in").text
-        for label in re.findall(r"<option[^>]*>([^<]+)</option>", html):
-            if "account" in label:
-                assert re.fullmatch(r"[A-Z]{3} account( …\d{4})?( — not active yet)?",
-                                    label.strip()), label
+        labels = re.findall(r"<option[^>]*>([^<]+)</option>", html)
+        # "Loading accounts..." is the placeholder shown while the startup warm is
+        # in flight. It is not an account, and treating it as one made this test
+        # depend on how quickly a background thread finished.
+        accounts = [x.strip() for x in labels
+                    if re.match(r"^[A-Z]{3} account", x.strip())]
+        assert accounts, [x.strip() for x in labels]
+        for label in accounts:
+            assert re.fullmatch(r"[A-Z]{3} account( …\d{4})?(, not active yet)?",
+                                label), label
 
     def test_the_old_shouted_form_is_gone(self, client):
         html = client.get("/app?tab=money-in").text

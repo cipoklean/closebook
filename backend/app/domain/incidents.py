@@ -235,7 +235,7 @@ def handle_event(event_name: str, payload: dict, *,
     if live_status in {"PAID", "COMPLETED", "SUCCESS"}:
         return Incident(recovery=Recovery.COMPLETE, severity=Severity.INFO,
                         summary=(f"transfer {transfer_id} reported {event_name} "
-                                 f"but is {live_status} on Airwallex — no action"),
+                                 f"but is {live_status} on Airwallex: no action"),
                         **base)
 
     # --- the transfer is still moving, so creating a replacement is unsafe ---
@@ -243,7 +243,7 @@ def handle_event(event_name: str, payload: dict, *,
         return Incident(
             recovery=Recovery.IN_FLIGHT_WATCH, severity=Severity.WARN,
             summary=(f"transfer {transfer_id} reported {event_name} but is still "
-                     f"{live_status} on Airwallex — watch it, do NOT create a "
+                     f"{live_status} on Airwallex: watch it, do NOT create a "
                      f"replacement payment"),
             # Explicitly False: this is the case where a replacement would double
             # pay. The incident must not look actionable.
@@ -264,9 +264,9 @@ def handle_event(event_name: str, payload: dict, *,
                        f"look up its real state before doing anything")
         elif recovery is Recovery.FIX_BENEFICIARY:
             summary = (f"transfer {transfer_id} failed on the beneficiary "
-                       f"({failure_type}) — fix the record; do NOT retry")
+                       f"({failure_type}): fix the record; do NOT retry")
         elif recovery is Recovery.REPLAN:
-            summary = (f"transfer {transfer_id} failed on funds/limits — "
+            summary = (f"transfer {transfer_id} failed on funds/limits, "
                        f"re-plan against the committed-cash budget")
         else:
             summary = (f"transfer {transfer_id} needs a human "

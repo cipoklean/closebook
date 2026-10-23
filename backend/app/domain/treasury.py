@@ -332,7 +332,7 @@ def funding_for(plan, payable_number: str, held: set[str],
             f_ccy, f_amt, "conversion" if planned else "planned",
             ("" if planned else
              f"the plan converts {f_ccy} into {pay.currency} as soon as it can "
-             f"be afforded — {money_str(f_amt, f_ccy)} set aside for it"))
+             f"be afforded, {money_str(f_amt, f_ccy)} set aside for it"))
 
     return Funding(
         pay.currency, pay.amount_minor, "unfunded",

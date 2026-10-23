@@ -943,7 +943,9 @@ class TestHeldPaymentsAreExplained:
         printing the same paragraph a second time."""
         self._held(db, depends_on="INV-0042")
         html = render_app(_ctx(), tab="ok")
-        assert "Held — and not waiting on you" in html
+        # the dash became a comma in the copy pass. Assert the sentence the app
+        # actually renders on THIS tab, not the one it used to.
+        assert "Held, and not waiting on you" in html
         assert "Why it is held" in html
         assert 'href="/app?tab=home#held-' in html
 

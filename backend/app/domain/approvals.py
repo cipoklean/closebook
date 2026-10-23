@@ -101,7 +101,7 @@ def _hmac_secret() -> bytes:
     s = get_settings().closebook_hmac_secret.get_secret_value()
     if not s:
         raise RuntimeError(
-            "CLOSEBOOK_HMAC_SECRET is not set — approvals cannot be signed. "
+            "CLOSEBOOK_HMAC_SECRET is not set: approvals cannot be signed. "
             "Add it to .env (never to a committed file)."
         )
     return s.encode("utf-8")
@@ -190,7 +190,7 @@ def check_fx_drift(approved_rate: Decimal, current_rate: Decimal,
     approved against, so a 0.01 move matters more at 0.88 than at 100.
     """
     if approved_rate == 0:
-        return "approved rate is zero — cannot assess drift"
+        return "approved rate is zero: cannot assess drift"
     drift = abs(current_rate - approved_rate) / approved_rate * Decimal(100)
     if drift > tolerance_pct:
         return (f"FX moved {drift:.4f}% from the approved rate "

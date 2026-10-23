@@ -8,7 +8,7 @@ customers in USD and GBP who pays suppliers in EUR and USD.
 
 > **The model proposes; deterministic code enforces.**
 > Amounts, limits, approvals, the reserve floor, idempotency and duplicate
-> protection are decided in code — never by a language model. A model may read a
+> protection are decided in code, never by a language model. A model may read a
 > messy bank reference and explain a decision. It cannot authorise a payment,
 > choose an amount, or mark money as matched.
 
@@ -24,9 +24,9 @@ customers in USD and GBP who pays suppliers in EUR and USD.
 | **Payments** | Has **no tool that can pay** | `executor.py` is the only module that moves money |
 | **Failures** | May explain one to a human | `incidents.py` looks the transfer up on Airwallex before deciding |
 | **Reserve floor** | Never sees or changes it | `policy.py` defers, never trims, a payout that breaches it |
-| **Duplicates** | — | `plan_store.py` makes `(payable, action)` a payment's identity |
+| **Duplicates** | none | `plan_store.py` makes `(payable, action)` a payment's identity |
 
-The agent is given five tools — `list_open_invoices`, `propose_match`,
+The agent is given five tools: `list_open_invoices`, `propose_match`,
 `explain_decision`, `request_approval`, `read_plan`. There is no payment tool, so
 it cannot express a payment even if it wanted to. That is a stronger guarantee
 than a policy check that could be mis-ordered or bypassed.
@@ -39,10 +39,10 @@ than a policy check that could be mis-ordered or bypassed.
 |---|---|
 | 1 | Plan the day. Real planner, real budget. Small USD payouts auto-pay; the big EUR payout needs a human. |
 | 2 | A USD 12,000 deposit arrives with a typo'd reference (`inv 0O41 brightline`) and matches `INV-0041` anyway. That unlocks `PO-7001`. |
-| 3 | A GBP 4,800 part-payment matches partially — and the dependent payable **stays held**. A part payment is not a settlement. |
-| 4 | Policy verdict: a 7,000.01 authorisation is declined by the inclusive 7,000 limit. **Not a live card decline** — see the caveat below. |
+| 3 | A GBP 4,800 part-payment matches partially, and the dependent payable **stays held**. A part payment is not a settlement. |
+| 4 | Policy verdict: a 7,000.01 authorisation is declined by the inclusive 7,000 limit. **Not a live card decline.** See the caveat below. |
 | 5 | A payout fails. Closebook looks the transfer up on Airwallex before deciding anything, and proposes a **replacement under a duplicate lock with a new request id**. It never auto-pays twice. |
-| 6 | A USD 4,400 deposit arrives from `L. Stores` with **no reference at all**. The model proposes it against `INV-0043` and asserts **0.85 confidence**. Code re-derives every number, applies it, and — because the invoice was 4,500 — leaves **100.00 USD still outstanding**. The result is pinned to the approval band: *a model's own score can never clear a payment.* The page shows the model's claim and code's decision side by side. |
+| 6 | A USD 4,400 deposit arrives from `L. Stores` with **no reference at all**. The model proposes it against `INV-0043` and asserts **0.85 confidence**. Code re-derives every number, applies it, and because the invoice was 4,500 it leaves **100.00 USD still outstanding**. The result is pinned to the approval band: *a model's own score can never clear a payment.* The page shows the model's claim and code's decision side by side. |
 | 7 | Reconciled double-entry ledger, unapplied cash shown, reserve floor respected. |
 
 ### The model does not grade its own work
@@ -50,14 +50,14 @@ than a policy check that could be mis-ordered or bypassed.
 The model writes a confidence number. It is **its claim, not the verdict**, and
 it is displayed as such. `MATCH_CONFIDENCE_AUTO` is 0.90 and code caps *any*
 model-sourced result at **0.89** (`matching._LLM_MAX_CONFIDENCE`), so an LLM
-proposal can be applied and recorded but can never reach the automatic band —
+proposal can be applied and recorded but can never reach the automatic band,
 regardless of what number it asserts about itself. A test sweeps 0.90–1.00 to
 prove the claim alone would have been AUTO, while the actual result is not.
 
 ### Every transfer here is sandbox money
 
-Closebook really does move money through the Airwallex **sandbox** — a real API
-call, a real transfer object, a real status — but **no real funds are involved
+Closebook really does move money through the Airwallex **sandbox**: a real API
+call, a real transfer object, a real status, but **no real funds are involved
 and no money can leave this demo**. Where the app shows a payment, it shows the
 status Airwallex reports *right now* (`dashboard.live_transfer_statuses()`),
 not what Closebook recorded. A step we submitted is `SUBMITTED`; only the bank
@@ -72,22 +72,22 @@ endpoint are fine.
 
 Card creation fails with `invalid_request: Invalid issuance details`.
 Airwallex Dev Help attributed this to `is_personalized: true` on a `DELEGATE`
-cardholder, so the payload was corrected — `is_personalized: false`, `program`
+cardholder, so the payload was corrected: `is_personalized: false`, `program`
 reduced to `{"purpose": "COMMERCIAL"}`, `issue_to` removed entirely. **The error
-was unchanged.** An `INDIVIDUAL` cardholder — the type Dev Help said
-personalized cards require — was then created and carded against, and it fails
+was unchanged.** An `INDIVIDUAL` cardholder (the type Dev Help said
+personalized cards require) was then created and carded against, and it fails
 identically, so the cardholder type is not the cause.
 
 The payload is not malformed: removing any required field returns a *named*
 error (`created_by is mandatory`, `limits field is required`), so the body is
-parsed field by field. Every *management* endpoint is gated —
+parsed field by field. Every *management* endpoint is gated,
 `/issuing/balances`, `/issuing/programs` and `/issuing/cards/create/schema` all
 return *"Admin permissions required"*. That pattern is an account-level issuing
 entitlement, not a payload bug, and it is with Airwallex.
 
 The simulation endpoint requires a real `card_id`, so there is nothing to
 authorise against. No card was issued and **no decline was returned by
-Airwallex** — so the caveat stays. A synthetic decline would not be evidence
+Airwallex**, so the caveat stays. A synthetic decline would not be evidence
 that our policy is enforced, and is not described as one.
 
 Full evidence: `docs/AIRWALLEX_CARD_ISSUING_REQUEST.md`, reproducible with
@@ -105,11 +105,11 @@ cd closebook
 make setup          # venv + deps; copies .env.example -> .env on first run
 ```
 
-Then fill in `.env` (see below). **An LLM key is optional** — with none set,
+Then fill in `.env` (see below). **An LLM key is optional**: with none set,
 matching, policy and planning run fully deterministically.
 
 ```bash
-make test           # 324 tests, hermetic — no secrets or network needed
+make test           # 922 tests, hermetic, no secrets or network needed
 make seed           # creates sandbox global accounts, deposits scenario cash
 make dev            # site on http://127.0.0.1:8000/ and app on /app
 make demo           # the 7 beats, deterministic decisions only
@@ -125,7 +125,7 @@ Exactly as `backend/app/config.py` reads them (pydantic-settings loads `.env`):
 | `AWX_CLIENT_ID` | for live | Airwallex sandbox client id |
 | `AWX_API_KEY` | for live | Airwallex sandbox API key |
 | `AWX_BASE_URL` | no | Fixed to the sandbox host; non-sandbox values are rejected at startup |
-| `AWX_WEBHOOK_SECRET` | to accept webhooks | HMAC secret. **If empty, every webhook is rejected (400)** — deliberate: an unauthenticated webhook endpoint is a payment-injection risk |
+| `AWX_WEBHOOK_SECRET` | to accept webhooks | HMAC secret. **If empty, every webhook is rejected (400)**, deliberate: an unauthenticated webhook endpoint is a payment-injection risk |
 | `AWX_ALLOW_TEST_EVENTS` | no | `true` accepts sandbox test events that carry the secret in a `client-secret-key` header. Default `false` |
 | `CLOSEBOOK_HMAC_SECRET` | to sign approvals | Signs the approval-bundle hashes. **An empty value fails at first real use** while unit tests still pass |
 | `DEMO_APPROVER_PIN` | to use the approval UI | Shared PIN for `POST /approvals/...`. If unset the endpoint is **closed**, not open |
@@ -154,7 +154,7 @@ cd backend
 ../.venv/bin/python -m app.seed.live_beats
 ```
 
-That needs `AWX_CLIENT_ID` and `AWX_API_KEY`. Beats are **idempotent** — running
+That needs `AWX_CLIENT_ID` and `AWX_API_KEY`. Beats are **idempotent**: running
 twice gives identical balances, which is checked on purpose.
 
 ### The probes
@@ -233,7 +233,7 @@ a single cent and the approval is void.
 
 **A failure webhook is a claim, not proof.** `payout.transfer.failed` triggers a
 lookup. If the transfer is still `PROCESSING`, Closebook watches it and creates
-**nothing** — because a replacement could double-pay a transfer that has not
+**nothing**, because a replacement could double-pay a transfer that has not
 settled yet. Webhooks are also rejected unless the timestamp is within five
 minutes, and an event with no id is refused so dedupe cannot be bypassed.
 
@@ -252,7 +252,7 @@ the deterministic reason. Offline is a supported mode, not a degraded one.
 
 ```
 backend/app/
-  domain/         pure logic — no I/O, fully unit-tested
+  domain/         pure logic, no I/O, fully unit-tested
     matching.py     5-tier invoice matcher
     ledger.py       double-entry, idempotent postings
     policy.py       reserve floor, limits, committed cash, priority
@@ -299,8 +299,8 @@ Two server-rendered pages, no build step and no JS framework:
 
 | URL | What it is |
 |---|---|
-| `/` | The landing page — hero, problems, how it works, safety, features, who it's for, built on, closing CTA, footer. Illustrative copy; **no live figures.** |
-| `/app` | The operator app — Home, Money in, Money out, Needs your OK (with a live count badge), AI activity. Sidebar on desktop, bottom tab bar under 768px. |
+| `/` | The landing page: hero, problems, how it works, safety, features, who it's for, built on, closing CTA, footer. Illustrative copy; **no live figures.** |
+| `/app` | The operator app: Home, Money in, Money out, Needs your OK (with a live count badge), AI activity. Sidebar on desktop, bottom tab bar under 768px. |
 
 The visual spec is `docs/design/closebook-mockup.html`: `#F6F7F9` ground, white
 cards, `#5B5BD6` accent, Inter, with system-font fallback so a blocked Google
@@ -309,7 +309,7 @@ Fonts never leaves the page unstyled. Tokens live in
 
 **Every number on `/app` comes from the dashboard context** (`build_context()`),
 which reads the same ledger, plan, incident and trace rows the JSON endpoints
-expose. The page never computes a decision — it renders what code already
+expose. The page never computes a decision: it renders what code already
 decided. Labels map onto the real fields:
 
 | On screen | Source |
@@ -325,7 +325,7 @@ decided. Labels map onto the real fields:
 A few deliberate UI rules, each of which is a bug that shipped once:
 
 - **A failed or stale step is never shown as approvable.** Terminal steps, and
-  steps naming no amount, render as a **Problem** with the reason — not as a
+  steps naming no amount, render as a **Problem** with the reason, not as a
   0.00 "approve" card.
 - **Incidents are grouped by transfer.** One transfer is one card with its
   events listed inside; the newest event sets the header, so a transfer that
@@ -351,7 +351,7 @@ you set it. That is the secure default, not a bug.
 **A payout says it is already done.** That is the duplicate guard working. Look
 at `/state` and the plan table.
 
-**Everything is refused.** Check `settings/committed_cash.json` — with
+**Everything is refused.** Check `settings/committed_cash.json`: with
 USD 40,000 committed and a USD 5,000 floor, a USD 36,000 payout is correctly
 refused. That is the point.
 

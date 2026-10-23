@@ -214,7 +214,7 @@ def try_exact(inflow_amount_minor: int, inflow_currency: str,
                         "folded_digits": ref_nums,
                     },
                     reason=(f"reference is only {c.number} if 0/O and 1/I are "
-                            f"folded — a human should confirm"),
+                            f"folded: a human should confirm"),
                 )
     return None
 
@@ -380,7 +380,7 @@ def try_partial(inflow_amount_minor: int, inflow_currency: str,
                           "short_fraction": round(float(short_frac), 4),
                           "payer_similarity": round(best_sim, 3)},
                 reason=f"amount is {diff/100:.2f} short of {c.number} "
-                       f"({float(short_frac)*100:.1f}%) — too large for a bank fee, "
+                       f"({float(short_frac)*100:.1f}%): too large for a bank fee, "
                        f"too small to be a deliberate part-payment; needs a human",
             )
         # diff < 0 -> the inflow EXCEEDS the open balance. Capped BELOW the

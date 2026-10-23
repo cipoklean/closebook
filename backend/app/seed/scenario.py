@@ -176,7 +176,7 @@ BEATS: list[DemoBeat] = [
                "Card CREATION fails with 'Invalid issuance details'. Airwallex "
                "Dev Help attributed that to is_personalized on a DELEGATE "
                "cardholder; the payload was corrected and the error was "
-               "unchanged, and an INDIVIDUAL cardholder fails identically — so "
+               "unchanged, and an INDIVIDUAL cardholder fails identically: so "
                "the cardholder type is not the cause. /issuing/programs, "
                "/issuing/balances and /issuing/cards/create/schema all return "
                "'Admin permissions required', so this looks like an "
