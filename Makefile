@@ -7,7 +7,7 @@ ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 PY := $(ROOT)/.venv/bin/python
 PIP := $(ROOT)/.venv/bin/pip
 
-.PHONY: help setup dev seed demo test webhook-url run-ui clean \
+.PHONY: help setup dev seed demo test test-e2e webhook-url run-ui clean \
         testsprite testsprite-reset testsprite-url
 
 help:
@@ -16,6 +16,7 @@ help:
 	@echo "make seed       create/reuse sandbox global accounts, deposit scenario cash, seed ledger, print balances"
 	@echo "make demo       run the 7-beat scripted demo (requires seed + .env + sandbox creds)"
 	@echo "make test       run pytest (policy, matching, money, webhook, idempotency)"
+	@echo "make test-e2e   browser smoke test (/, all six /app tabs) - needs playwright install chromium"
 	@echo "make webhook-url create a cloudflared tunnel and print the public webhook URL"
 	@echo ""
 	@echo "TestSprite (automated tester) — a SEPARATE instance, own DB, own PIN:"
@@ -38,8 +39,19 @@ seed:
 demo:
 	cd backend && $(PY) -m app.seed.run_demo
 
+# Unit/integration suite. The browser suite lives in tests/e2e and runs
+# separately (make test-e2e) because it needs a Chromium download; keeping it
+# out of this target means `make test` stays fast and green with only the
+# Python requirements installed.
 test:
-	$(PY) -m pytest -q tests/
+	$(PY) -m pytest -q tests/ --ignore=tests/e2e
+
+# Browser smoke test: "/" and all six /app tabs at 1280px and 390px, on an empty
+# temp DB with NO provider credentials. Fails on console errors, any 5xx, raw
+# exception text, or horizontal overflow at 390px.
+#   one-time: $(PY) -m playwright install chromium
+test-e2e:
+	$(PY) -m pytest -q tests/e2e
 
 # Public URL for the webhook receiver (Settings > Developer > Webhooks in the
 # sandbox app).

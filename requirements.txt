@@ -13,5 +13,10 @@ aiofiles>=23.2
 pytest>=8.0
 pytest-asyncio>=0.23
 
+# Browser smoke test (tests/e2e). The Python package installs here; the browser
+# binary is a separate one-time step: `playwright install --with-deps chromium`
+# (CI does it in the workflow; locally the e2e tests skip without it).
+playwright>=1.47
+
 # dev conveniences
 websockets>=12.0
