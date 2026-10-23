@@ -521,3 +521,36 @@ class TestTheIdempotencyKeyIsStored:
         b = Executor.reserve(s2.get(PlanStep, row.id))
         s2.commit()
         assert a == b, (a, b)
+
+
+class TestThePageDoesNotContradictTheSettleResponse:
+    """A settle response says PAID. The page said PROCESSING, because the pill
+    reads a cache that a background refresh fills and settle never wrote to.
+    Reporting one thing and displaying another is worse than either."""
+
+    def test_settling_writes_the_answer_it_just_read(self):
+        from app.dashboard import _LIVE_CACHE, live_transfer_statuses, note_live_status
+        from app.db import get_default_db
+        from app.domain.ledger import post  # noqa: F401
+        from app.models import PlanStep, StepStatus, StepType
+
+        db = get_default_db()
+        with session_scope() as s:
+            s.add(PlanStep(type=StepType.TRANSFER, status=StepStatus.SUBMITTED,
+                           step_key="PAY:QA-PILL-1",
+                           payload_json='{"payable_number": "QA-PILL-1", "action": "PAY"}',
+                           airwallex_object_id="tr_pill_1"))
+        _LIVE_CACHE.pop("tr_pill_1", None)
+
+        s = db.session()
+        assert live_transfer_statuses(s).get("tr_pill_1") == "UNCHECKED"
+
+        note_live_status("tr_pill_1", "paid")
+        assert live_transfer_statuses(s).get("tr_pill_1") == "PAID"
+
+    def test_it_ignores_an_empty_answer(self):
+        from app.dashboard import _LIVE_CACHE, note_live_status
+
+        _LIVE_CACHE.pop("tr_pill_2", None)
+        note_live_status("tr_pill_2", "")
+        assert "tr_pill_2" not in _LIVE_CACHE

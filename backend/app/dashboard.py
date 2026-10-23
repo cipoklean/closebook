@@ -974,6 +974,21 @@ def live_transfer_statuses(s) -> dict[str, str]:
     return out
 
 
+def note_live_status(transfer_id: str, status: str) -> None:
+    """Record a status we just learned FOR CERTAIN, without a lookup.
+
+    The pill reads the cache, and the cache is filled by a background refresh so
+    a page render never waits on Airwallex. That is right for a normal view. It
+    is wrong immediately after an action that ALREADY ASKED: settle reads the
+    real status back to report it, and then the page told the operator
+    PROCESSING for a payment the same response called PAID. When we hold the
+    answer, write it down instead of showing a stale one.
+    """
+    if not LIVE_STATUS_ENABLED or not transfer_id or not status:
+        return
+    _LIVE_CACHE[transfer_id] = (str(status).upper(), time.monotonic())
+
+
 def live_status_ids(s) -> list[str]:
     """Every transfer id the book refers to. A local read, nothing else."""
     rows = (s.query(PlanStep)

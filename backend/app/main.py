@@ -307,6 +307,13 @@ async def dev_transfer_transition(transfer_id: str, request: Request):
 
         live = _T(client).status_of(transfer_id)
         if live:
+            # WE JUST ASKED, so the page must not keep showing the old answer:
+            # the response below says PAID and the pill said PROCESSING.
+            try:
+                from .dashboard import note_live_status
+                note_live_status(transfer_id, live)
+            except Exception:                      # noqa: BLE001
+                pass
             with _database().session_scope() as sess:
                 outcomes = settle_transfer(sess, transfer_id, live)
             posted = [o for o in outcomes if o.posted]
