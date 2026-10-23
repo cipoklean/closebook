@@ -47,6 +47,12 @@ def _cash(ccy: str, minor: int) -> None:
                                    ("opening_balance", 0, minor, ccy)])
 
 
+def _visible(html: str) -> str:
+    """What a reader actually sees: tags stripped, whitespace collapsed."""
+    text = re.sub(r"<[^>]+>", " ", html)
+    return " ".join(text.split())
+
+
 def _amounts_in(html: str) -> list:
     """The numeric value of every rendered segment."""
     out = []
@@ -68,26 +74,91 @@ def _amounts_in(html: str) -> list:
     return out
 
 
-class TestTheCurrencyIsOnTheBar:
-    def test_the_label_is_visible_not_just_a_data_attribute(self):
-        html = _waterfall_bar("USD", cash_waterfall(cash_minor=1_000_00,
-                                                    committed_this_run_minor=100_00))
-        assert 'data-testid="wf-currency"' in html
-        assert re.search(r'data-testid="wf-currency">USD<', html)
+class TestEachThingAppearsOncePerBar:
+    """The bar must not say the same thing twice.
+
+    It did, in two places: a currency heading above a closing line that named
+    the currency again, and -- on the single-sentence form -- a heading above a
+    sentence that began with the currency, so the line read
+    "GBP GBP 4,800.00, nothing set aside, all free to spend". And the end
+    segment carried the figure with the words "free to spend" while the closing
+    line repeated both.
+
+    So: the CURRENCY CODE appears exactly once per bar, and the FREE-TO-SPEND
+    FIGURE -- the tile-format string, currency and all -- appears exactly once.
+    The end segment states the bare number; the closing line says what it is.
+    """
+
+    MULTI = dict(cash_minor=30_370_00, committed_this_run_minor=12_946_00,
+                 in_flight_minor=900_00, suspense_minor=15_770_00,
+                 refunds_owed_minor=4_400_00, floor_minor=5_000_00)
+
+    def _bar(self, ccy, **kw):
+        return _waterfall_bar(ccy, cash_waterfall(**kw))
+
+    def test_the_currency_appears_once_on_a_multi_segment_bar(self):
+        seen = _visible(self._bar("USD", **self.MULTI))
+        assert seen.count("USD") == 1, seen
+
+    def test_the_currency_appears_once_on_the_single_sentence_form(self):
+        seen = _visible(self._bar("GBP", cash_minor=4_800_00))
+        assert seen.count("GBP") == 1, seen
+
+    def test_the_currency_appears_once_for_every_currency(self):
+        for ccy in ("USD", "GBP", "EUR", "CNY"):
+            seen = _visible(self._bar(ccy, **self.MULTI))
+            assert seen.count(ccy) == 1, (ccy, seen)
+
+    def test_the_tile_format_figure_appears_once(self):
+        from app.money import money_str
+
+        html = self._bar("USD", **self.MULTI)
+        free = cash_waterfall(**self.MULTI)["free_minor"]
+        token = money_str(free, "USD")
+        assert _visible(html).count(token) == 1, _visible(html)
+
+    def test_free_to_spend_is_said_once(self):
+        """The words were on the end segment AND in the closing line."""
+        seen = _visible(self._bar("USD", **self.MULTI))
+        assert seen.count("free to spend") == 1, seen
+
+    def test_the_end_segment_states_the_bare_number(self):
+        html = self._bar("USD", **self.MULTI)
+        # From the OPENING tag: starting the match at the attribute left the
+        # rest of the tag in the string, where `_visible` could not strip it and
+        # the title read as visible text.
+        seg = re.search(r'<span[^>]*data-wf="free".*?</span>', html,
+                        flags=re.S).group(0)
+        assert "-8,646.00" in seg
+        assert "free to spend" not in _visible(seg)
+
+    def test_the_closing_line_carries_the_currency_and_the_words(self):
+        from app.money import money_str
+
+        html = self._bar("USD", **self.MULTI)
+        line = re.search(r'data-testid="wf-end">([^<]+)<', html).group(1)
+        assert line == money_str(-8_646_00, "USD") + " free to spend"
+        assert "USD" in line
+
+
+class TestTheCurrencyIsVisible:
+    def test_it_is_on_screen_not_just_a_data_attribute(self):
+        """A currency that exists only in `data-wf-ccy` cannot be read, and a
+        report of the bars got GBP and USD the wrong way round because of it."""
+        seen = _visible(_waterfall_bar(
+            "USD", cash_waterfall(cash_minor=1_000_00,
+                                  committed_this_run_minor=100_00)))
+        assert "USD" in seen
 
     def test_the_closing_figure_reads_in_the_tile_format(self):
-        """The same string `money_str` puts on the tile, so the bar and the tile
-        above it read as the same number."""
         from app.money import money_str
 
         html = _waterfall_bar("USD", cash_waterfall(cash_minor=1_000_00,
                                                     committed_this_run_minor=1_100_00))
-        expected = money_str(-100_00, "USD") + " free to spend"
-        assert f'data-testid="wf-currency">USD<' in html
-        assert expected in html, expected
+        assert money_str(-100_00, "USD") + " free to spend" in _visible(html)
 
     def test_the_currency_is_in_the_aria_label(self):
-        """A screen reader gets the currency too, and each term by name."""
+        """A screen reader gets the currency and every term by name."""
         html = _waterfall_bar("GBP", cash_waterfall(
             cash_minor=1_000_00, committed_this_run_minor=250_00, floor_minor=50_00))
         label = re.search(r'aria-label="([^"]+)"', html).group(1)
@@ -95,15 +166,14 @@ class TestTheCurrencyIsOnTheBar:
         assert "promised" in label and "reserve floor" in label
         assert "free to spend" in label
 
-    def test_the_label_is_not_confusable_between_bars(self):
-        """Two currencies, two labels, each naming itself."""
+    def test_the_bars_are_not_confusable(self):
         a = _waterfall_bar("GBP", cash_waterfall(cash_minor=1_000_00,
                                                  committed_this_run_minor=1_00))
         b = _waterfall_bar("USD", cash_waterfall(cash_minor=2_000_00,
                                                  committed_this_run_minor=1_00))
-        assert 'data-wf-ccy="GBP"' in a and "GBP" in a
-        assert 'data-wf-ccy="USD"' in b and "USD" in b
-        assert 'data-wf-ccy="USD"' not in a
+        assert 'data-wf-ccy="GBP"' in a and "GBP" in _visible(a)
+        assert 'data-wf-ccy="USD"' in b and "USD" in _visible(b)
+        assert "USD" not in _visible(a)
 
 
 class TestZeroSegmentsAreFolded:
@@ -150,8 +220,10 @@ class TestTheSingleLineForm:
         assert 'class="x-wf-bar"' not in html
 
     def test_it_still_names_its_currency(self):
+        """ONCE, in the sentence. The heading above it printed the same word a
+        second time, so the line read "GBP GBP 4,800.00, ..."."""
         html = _waterfall_bar("GBP", cash_waterfall(cash_minor=4_800_00))
-        assert 'data-testid="wf-currency">GBP<' in html
+        assert "GBP 4,800.00, nothing set aside, all free to spend" in _visible(html)
         assert 'data-wf-ccy="GBP"' in html
 
     def test_one_live_term_is_enough_to_draw_the_bar(self):

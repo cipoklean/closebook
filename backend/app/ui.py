@@ -182,7 +182,6 @@ def _waterfall_bar(ccy: str, w: dict) -> str:
     """
     free = w["free_minor"]
     closing = f'{money_str(free, ccy)} free to spend'
-    head = (f'<div class="x-wf-ccy" data-testid="wf-currency">{e(ccy)}</div>')
     start = w["start_minor"] or 1
 
     # keep the start (cash) and any subtraction that actually takes something
@@ -190,8 +189,12 @@ def _waterfall_bar(ccy: str, w: dict) -> str:
     takes = [st for st in live if st["kind"] != "start"]
 
     if not takes:
-        return (f'<div class="x-wf" data-wf-ccy="{e(ccy)}">{head}'
-                f'<p class="x-wf-simple" data-testid="wf-simple">'
+        # THE CURRENCY IS IN THE SENTENCE, so there is no heading above it. It
+        # read "GBP GBP 4,800.00, nothing set aside..." -- the same word twice,
+        # because the heading and the sentence each named it.
+        return (f'<div class="x-wf" data-wf-ccy="{e(ccy)}">'
+                f'<p class="x-wf-simple" data-testid="wf-simple" '
+                f'data-wf-ccy-label="{e(ccy)}">'
                 f'{e(money_str(w["start_minor"], ccy))}, nothing set aside, '
                 f'all free to spend</p></div>')
 
@@ -209,18 +212,22 @@ def _waterfall_bar(ccy: str, w: dict) -> str:
             f'<b>{sign} {e(money(st["minor"]))}</b>'
             f'<small>{e(st["label"])}</small></span>')
     free_cls = "x-wf-seg x-wf-seg--free" + (" is-overdrawn" if free < 0 else "")
+    # The closing line below says what this figure IS, so the segment states
+    # the number and nothing else -- otherwise "free to spend" arrived twice in
+    # two lines a few pixels apart.
     segs.append(
-        f'<span class="{free_cls}" style="--w:1" data-wf="free">'
-        f'<b>{e(money(free))}</b><small>free to spend</small></span>')
+        f'<span class="{free_cls}" style="--w:1" data-wf="free" '
+        f'title="free to spend">'
+        f'<b>{e(money(free))}</b><small></small></span>')
 
     label = (f'{ccy}: cash {money_str(w["start_minor"], ccy)}, then '
              + ", ".join(f'less {st["label"]} {money_str(st["minor"], ccy)}'
                          for st in takes)
              + f", ending at {closing}")
-    return (f'<div class="x-wf" data-wf-ccy="{e(ccy)}">{head}'
+    return (f'<div class="x-wf" data-wf-ccy="{e(ccy)}">'
             f'<div class="x-wf-bar" role="img" aria-label="{e(label)}">'
             f'{"".join(segs)}</div>'
-            f'<div class="x-wf-end">{e(closing)}</div></div>')
+            f'<div class="x-wf-end" data-testid="wf-end">{e(closing)}</div></div>')
 
 
 def _waterfall(m: dict, cash: dict) -> str:
