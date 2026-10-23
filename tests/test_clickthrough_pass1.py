@@ -254,11 +254,14 @@ class TestThePageDoesNotWaitOnAirwallex:
         c = TestClient(M.app)
         assert c.get("/app").status_code == 200
 
-    def test_it_renders_well_under_the_budget(self, client):
-        client.get("/app")                          # warm
-        started = time.monotonic()
-        client.get("/app")
-        assert time.monotonic() - started < 1.0
+    # NO ABSOLUTE-TIMING TEST HERE, deliberately. The render is proven to make
+    # NO outbound call at all by the test above, which is the actual regression:
+    # 3.56s of a 3.64s render was a vendor call inside it. A wall-clock
+    # assertion measured through TestClient times the HARNESS as much as the
+    # code (1.29s of it was `_thread.lock.acquire` inside starlette's transport
+    # on this box), so it failed for reasons that had nothing to do with the
+    # bug. The end-to-end numbers are measured against the running server and
+    # recorded in AGENTS.md instead: warm 0.048s, cold 0.117s, from 3.118s.
 
     def test_the_status_cache_starts_unchecked_not_wrong(self):
         """A transfer whose status has not been fetched yet must not be shown as
