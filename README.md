@@ -109,7 +109,7 @@ Then fill in `.env` (see below). **An LLM key is optional**: with none set,
 matching, policy and planning run fully deterministically.
 
 ```bash
-make test           # 922 tests, hermetic, no secrets or network needed
+make test           # 942 tests, hermetic, no secrets or network needed
 make seed           # creates sandbox global accounts, deposits scenario cash
 make dev            # site on http://127.0.0.1:8000/ and app on /app
 make demo           # the 7 beats, deterministic decisions only
