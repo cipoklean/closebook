@@ -1,189 +1,145 @@
-# Closebook — Product Requirements (TestSprite copy)
+# Closebook: Product Requirements for TestSprite
 
-Closebook closes the books in real time for a cross-border SME. Every time money
-lands it matches the inflow to open invoices, then makes the money decision that
-match unlocks: release or hold supplier payments, convert only the FX it needs,
-chase shortfalls, and escalate anything unclear to a person.
+**Test URL:** the Cloudflare tunnel URL Hermes prints (`make testsprite-url`). Start at `/app`.
+**PIN for every approval:** 314159
+**Login:** none.
+**Environment:** Airwallex sandbox only. No real money moves.
 
-**One principle governs everything below: the model proposes, deterministic code
-enforces.** Amounts, limits, reserve floors, approvals, idempotency and duplicate
-protection live in code, never in prompts. A model may read a messy reference and
-suggest which invoice it belongs to. It cannot move money, and no number it
-produces is used without being re-derived and re-checked in code.
-
-Runs against the Airwallex sandbox. No real money moves.
+> **Merged document.** The original TestSprite PRD's structure, screens and flows are kept as they were. What changed is the expectations section, corrected to what the app actually does, plus a new section 6 on testing in a shared workspace.
 
 ---
 
-## 1. What it does
+## 1. What Closebook is
 
-1. **Money in.** A deposit arrives with whatever the payer typed — a name, a
-   fragment of an invoice number, a typo. Closebook reads it through five tiers
-   in order: an exact reference match, a rule (known payer plus a plausible
-   amount), a subset-sum across several invoices, a best-fit part-payment, and
-   finally a model reading. Every model proposal is re-checked arithmetically.
-2. **The decision.** Matching an invoice is not permission to spend. The planner
-   answers what the money may do against a committed-cash position, a reserve
-   floor and an automatic payment limit.
-3. **Money out.** Payments go out through one module that persists a request id
-   before anything leaves, never re-sends a step that already has a bank
-   reference, and re-verifies every approval at execution time.
+Closebook is a real-time bookkeeping agent for a small business that gets paid by customers and pays suppliers in several currencies through Airwallex.
+
+1. A customer payment lands in the Airwallex account.
+2. Closebook matches it to the right invoice. Rules decide first, and an AI model only proposes when the rules can't decide.
+3. Anything unclear waits for a person, who approves with a PIN.
+4. When enough cash has landed, Closebook pays the suppliers that were waiting on it. It never takes cash below the reserve floor, and anything above the automatic limit needs a PIN.
+5. It follows each transfer until it's paid, failed or returned, and keeps a balanced ledger.
+
+**Core principle: the model proposes, code decides.** The AI's confidence is capped at 0.89, below the 0.90 auto-apply band, so the model can never move money on its own.
 
 ---
 
-## 2. Confidence and the auto band
+## 2. Screens (left sidebar on desktop, bottom tab bar on mobile)
 
-Matching runs on integer minor units and produces a confidence between 0 and 1.
-
-- **At or above 0.90** the reading may be applied automatically.
-- **Below 0.90 it is a PROPOSAL, not an application.** The money stays in
-  suspense, the invoice is untouched, and nothing is posted against it until a
-  person approves.
-- **A partial payment below 0.90 is HELD FOR APPROVAL.** It is not applied on
-  the strength of an amount that merely looks close, and it is not dropped: it
-  appears in **Needs your OK** with the invoice it claims and its confidence.
-- **Overpayments and part-payments are deliberately capped below 0.90** so they
-  can never auto-apply. An overpayment creates a refund obligation and a
-  part-payment needs a human to decide whether to chase.
-- **EXACT means a clean reference match only.** A folded `O`/`0` is a RULE at a
-  lower confidence, not an exact match.
-- A model's own claim is capped below the auto band before it can matter. If a
-  model claims 0.90 the code pins it to 0.89 and holds it for a person.
-
-Suspense can leave three ways, each a deliberate decision with a PIN: match it to
-an invoice, record a refund owed (the cash stays put and stops being spendable),
-or release it as income with a note.
+| Tab | Purpose |
+|---|---|
+| **Home** | Cash on hand, promised to suppliers, in flight, free to spend (with its working shown as a waterfall), suspense, refunds owed, today's checklist, problems, books balance |
+| **Money in** | One timeline of every deposit and how each was matched, each row expanding into its receipt and its resolution; the Simulate deposit form (inside the Sandbox controls panel) |
+| **Money out** | Bills (payables), their plan status, transfers, and the **Sandbox controls** panel holding Settle / Fail / Return |
+| **Needs your OK** | Proposals and payments waiting for a PIN; suspense items to resolve |
+| **AI activity** | Each model call: what it proposed, its claimed confidence, the code's verdict |
+| **Setup** | Settings, Customers, Invoices, Suppliers, Bills, Start fresh |
 
 ---
 
-## 3. Holds, and how they differ
+## 3. Key rules (what tests should assert)
 
-Every payable that is not being paid carries **all** the reasons it is not, not
-just the first, because two holds need two different actions.
-
-| Hold | What it means | What fixes it |
-|---|---|---|
-| **Dependency** | A bill waits on an invoice that has not fully landed | The customer pays |
-| **Reserve floor** | Paying would take committed cash below the floor | More cash, or an approval |
-| **Auto-pay limit** | The amount exceeds the limit a human must agree to | An approval |
-| **Capacity** | The currency is not held and cannot be bought | Funds, or a different rail |
-
-**A dependency hold is not a reserve hold.** They read similarly on a screen and
-need opposite responses: a dependency hold clears itself when the customer pays
-and no approval can release it, while a reserve hold clears the moment a person
-approves it or cash arrives. A part-payment does **not** release a dependent
-payable — the dependency is met only by a fully paid receivable.
-
-An over-limit bill that is otherwise payable **must produce an approval card in
-Needs your OK**. A bill blocked for another reason as well shows **both** reasons
-and stays in **Held — and not waiting on you**, because a hold that no person can
-lift does not belong in a queue of things for a person to do.
+1. **Free to spend** = cash − promised − in flight − unattributed suspense − refunds owed − reserve floor. Home shows this working.
+2. **Suspense (unmatched money) is shown but never spendable** until it's resolved.
+3. **Suspense resolves in exactly one of three ways:** Match to an invoice, **Refund owed** (needs a reason, stays non-spendable), or **Release as income** (needs a note, becomes spendable).
+4. **Every money decision needs the PIN.** A wrong PIN is refused with a clear message and changes nothing.
+5. **Any action done twice** (approve, resolve, settle) is refused the second time and writes nothing.
+6. **An invoice can never be paid beyond its open balance.**
+7. **A payment above the automatic limit, or one that would take cash below the floor, is held with a plain-English reason** — and a payment over the limit that is *otherwise payable produces an approval card in Needs your OK*. It does not sit in a Held list that no person can release.
+8. **A PARTIAL PAYMENT BELOW 0.90 IS HELD FOR APPROVAL.** It is proposed, never applied on the strength of an amount that merely looks close, and it appears in Needs your OK with the invoice it claims and its confidence.
+9. **A FAILED OR RETURNED TRANSFER ENDS CANCELLED, WITH ITS REASON SHOWN NEXT TO IT.** It posts nothing to the ledger. The bank reports a return as CANCELLED, which on its own reads as "someone stopped this", so the reason the bank gave must be shown.
+10. **A DEPENDENCY HOLD IS NOT A RESERVE HOLD.** They read similarly and need opposite responses: a dependency hold clears itself when the customer pays and **no approval can release it**, while a reserve hold clears the moment a person approves it or cash arrives. A part-payment does **not** release a dependent payable — the dependency is met only by a fully paid receivable.
+11. **A bill held for more than one reason states every reason**, not just the first, because two holds need two different actions.
+12. **"The books balance: yes" must stay true after every action.**
+13. **The payment tracker marks only FAILED, RETURNED and CANCELLED with a red X**, at the step where it stopped. A healthy in-flight transfer never shows one, however many earlier attempts on that bill failed.
+14. **No page shows a raw error, stack trace or HTTP 500.** Every button ends in a plain sentence within a few seconds. Vendor errors are replaced by a sentence, with the machine's own words behind a **Detail** toggle.
+15. **The Sandbox controls live in one collapsed, dashed-border panel labelled "sandbox only"**, holding the deposit simulator and Settle / Fail / Return. Fail and Return ask for confirmation, each row names its payment, and **the normal screens show none of it** — no sandbox control appears on Home, AI activity or Setup.
 
 ---
 
-## 4. Payments and their states
+## 4. Test flows (run in this order on an empty instance)
 
-```
-Planned → Checked → Approved → Sent → Confirmed
-```
+### A. Landing and navigation
+1. Open `/`. The landing page shows **"Every deposit matched. Every payment checked."** and a **Launch app** link in the top nav.
+2. Launch app goes to `/app` Home. Every tab opens without errors. Back to site returns to `/`.
+3. The landing page carries **one** live proof, counted from the app's own tables, and invents no evidence: no testimonial, no decorative figures.
 
-A payment that did not complete shows a **red X at the step where it stopped**.
+### B. Setup
+1. Settings: budget currency USD, reserve floor 5,000, automatic limit 2,500. Save, reload, and the values persist.
+2. Customers: add "Brightline Retail" (NG) and "Harrow & Co" (GB).
+3. Invoices: INV-1001 to Brightline, USD 12,000. INV-1002 to Harrow, GBP 8,000.
+4. Suppliers: add a USD supplier (US, LOCAL). The app creates a real Airwallex beneficiary and shows its ID. Invalid bank details must show a clear validation message, not a crash.
+5. Bills: PO-2001 to that supplier, USD 1,800, dependent on INV-1001.
+6. Duplicate invoice or bill numbers are refused with a message.
 
-- **Only FAILED, RETURNED and CANCELLED get the X.** A healthy in-flight
-  transfer never does, however many earlier attempts on that bill failed.
-- **A returned transfer ends CANCELLED, with its reason shown next to it.** The
-  bank reports a return as CANCELLED, which on its own reads as "someone stopped
-  this". The reason the bank gave is the point of the row.
-- **Between approval and a bank reference the card reads "Sending to the
-  bank…"**, not APPROVED with an empty reference line.
-- **A replacement is a new operation**, not a retry: a new request id and a
-  fresh approval, because the original terms were approved for a payment that
-  did not happen.
+### C. Money in, exact match
+1. On Money in, simulate a USD 12,000 deposit with reference "INV-1001".
+2. It matches INV-1001 as EXACT and auto-applies. INV-1001 shows paid and cash rises by 12,000.
 
----
+### D. Partial payment
+1. Simulate GBP 4,800 with reference "INV-1002 part".
+2. INV-1002 shows 4,800 paid, GBP 3,200 open. Any chase step shows GBP 3,200, not USD.
 
-## 5. Sandbox controls
+### E. Unclear match goes to approval
+1. Add invoice INV-1003 for a new customer "Lumen Stores", USD 4,400.
+2. Simulate USD 4,400 from "Apex Factors Ltd", reference "for the lumen stores account".
+3. It appears in Needs your OK as PROPOSED, with confidence at most 0.89.
+4. The **Model said / Code decided** receipt shows the model's claimed value **struck through** beside the code's final value, the rule that fired, and the verdict. The model's claimed confidence is never reported as the final one.
+5. Approve with the wrong PIN: refused, nothing changes.
+6. Approve with PIN 314159: INV-1003 is paid, suspense drops, and a success sentence appears.
+7. Approve again: refused, "already resolved".
 
-The deposit simulator and the **Settle / Fail / Return** buttons live in one
-**collapsed, dashed-border panel labelled "sandbox only"**. Fail and Return ask
-for confirmation. Each row names its payment ("PO-7001 · Atlanta Packaging ·
-USD 1,800") and carries a per-transfer test id, and a payment card that has a
-control links to its row in the panel.
+### F. Over-application guard
+1. Simulate a second USD 4,400 with the same Lumen reference.
+2. Match to INV-1003 is no longer offered (or is refused). The app explains that the invoice is already paid.
+3. Resolve as **Refund owed** with reason "duplicate payment". Refunds owed shows 4,400 and free to spend does not change. **The row's state reads "Refund owed", not PROPOSED** — the badge follows the resolution, not the stale matcher verdict.
 
-**The normal screens show none of it.** Home, AI activity and Setup contain no
-sandbox control at all.
+### G. Unknown payer
+1. Simulate USD 7,000 from "Unknown Party", reference "ZXQ-99881".
+2. It lands in suspense. Cash rises, free to spend does not.
+3. **Ask the model again** works without a PIN and posts no ledger entries.
+4. Resolve as **Release as income** with a note. Suspense drops and free to spend rises by 7,000.
 
-Once a transfer is terminal there is nothing to simulate, and the controls are
-not offered.
+### H. Paying suppliers
+1. After INV-1001 lands, PO-2001 (USD 1,800, under the limit) is sent automatically.
+2. Money out shows a transfer ID and PROCESSING, with **no red X** on its tracker.
+3. **Add a bill above 2,500.** It appears **in Needs your OK as an approval card** with a reason, and is sent only after a PIN approval.
+4. A bill that would break the reserve floor is held with a sentence naming the shortfall, and stays under **Held — and not waiting on you**, because no approval can release it.
+5. A bill held for two reasons at once states both.
 
----
+### I. Transfer outcomes (Sandbox controls on Money out)
+Open the collapsed **Sandbox controls** panel first; the controls are not on the page otherwise. Each row names its payment (for example "PO-7001 · Atlanta Packaging · USD 1,800.00").
+1. **Settle** a PROCESSING transfer. It shows PAID, cash drops by the amount, free to spend is unchanged, and the bill leaves the held/plan lists.
+2. Press Settle again: "already settled", no new ledger rows.
+3. **Fail** another transfer (confirm when asked). It ends CANCELLED **with its failure reason shown next to the status**, its tracker shows a red X at the step it stopped at, and nothing posts to the ledger. Problems offers "Re-plan and ask for my OK".
+4. **Return** another one (confirm when asked). Same as Fail, **with a "returned" reason shown next to CANCELLED**.
 
-## 6. Model said / Code decided
+### J. Integrity checks (run after every flow)
+1. Home shows "The books balance: yes".
+2. A bill never shows as both paid and on hold.
+3. Free to spend equals the working written under it — the waterfall segments and the closing figure sum to the tile.
+4. No page contains a raw stack trace or a vendor error.
 
-Every model call and every money-in payment carries a two-column receipt:
-
-- **Model said** — the invoice, the amount, the confidence it claimed, one line
-  of reasoning. Where the code overrode it, the claimed value is struck through.
-- **Code decided** — the verdict, the rule that fired, and the final confidence.
-
-The final confidence comes from the **stored decision**, never from the model's
-claim. When the code keeps the deterministic reading over the model, the final
-confidence is the deterministic one (for example 0.85) and the rule that fired
-is RULE.
-
-When the model was unavailable the left column says so in plain words ("Model
-unavailable, so this went to a person instead of guessing.") and the right column
-shows the escalation.
-
----
-
-## 7. What is never shown
-
-- **No raw vendor errors.** A refused sandbox call reads "Airwallex's sandbox
-  refused this step. Nothing changed in your books. Try again in a minute." The
-  machine's own words are kept behind a **Detail** toggle, including for
-  failures recorded days earlier.
-- **No invented evidence.** Every figure on a screen is counted from the book.
-- **No unbounded waits.** Every action resolves to a success or a plain error
-  with a timeout; a button never stays on "Working…".
-
----
-
-## 8. Testing in a shared workspace
-
-Several test runs share one sandbox account and one Airwallex key. Two instances
-of the app can see each other's deposits. Follow these rules so one run does not
-corrupt another's evidence.
-
-**Every record gets a unique suffix.** Names, invoice numbers, payable numbers
-and references must be unique per run — for example `QA-OVERLIMIT-7f31`, not
-`QA-OVERLIMIT-001`. Two runs using the same bill number will match each other's
-payments and neither result means anything.
-
-**Never assume another test's data or settings.** Do not assume a customer,
-supplier, invoice or payable exists because a previous run created one, and do
-not assume the reserve floor, auto-pay limit or committed cash is what you set
-unless this run set it. Read the settings you depend on and assert on what you
-read.
-
-**Read balances before and after.** Take the cash position, suspense, inflow
-counts and incident counts before the action, then again after, and assert on
-the **difference**. An absolute figure is a claim about the whole workspace,
-including everyone else's activity; a delta is a claim about your action.
-
-**Count what you found before asserting on it.** A parser or a page scan that
-matches zero rows and then asserts nothing about them passes over a broken
-parser.
-
-**Clean up by identity, not by wholesale reset.** Delete the records this run
-created, identified by their unique suffix. A reset that clears the workspace
-destroys another run's evidence.
+### K. Mobile
+At 390px wide: no horizontal scrolling on any tab, tiles at full width, bottom tab bar visible, and forms usable. The waterfall stacks its segments into labelled rows rather than a proportional bar.
 
 ---
 
-## 9. Out of scope
+## 5. Out of scope
 
-- Real money. This is the sandbox.
-- Card issuing: the sandbox rejects issuance for this account, so the card beat
-  is a policy verdict rather than a live card.
-- Multi-user sign-in. A single operator PIN gates every write.
+- Real money and production Airwallex.
+- **Card issuing.** Beat 4 shows a policy verdict only, not a real card. That's expected, not a bug.
+- **Refund transfers.** "Refund owed" records the liability only.
+- **Start fresh:** don't test it on a shared run, since it archives the workspace. Reset with `make testsprite-reset` instead.
+
+---
+
+## 6. Testing in a shared workspace
+
+Several runs share one sandbox account and one Airwallex key, and two instances of the app can see each other's deposits. Follow these so one run does not corrupt another's evidence.
+
+1. **Give every record a unique suffix.** Names, invoice numbers, bill numbers and references must be unique per run — `QA-OVERLIMIT-7f31`, not `QA-OVERLIMIT-001`. Two runs using the same bill number will match each other's payments and neither result means anything.
+2. **Never assume another test's data or settings.** Do not assume a customer, supplier, invoice or bill exists because a previous run created one, and do not assume the reserve floor, automatic limit or committed cash is what you set unless this run set it. Read the settings you depend on and assert on what you read.
+3. **Read balances before and after.** Take cash, suspense, inflow counts and incident counts before the action, then again after, and assert on the **difference**. An absolute figure is a claim about the whole workspace, including everyone else's activity; a delta is a claim about your action.
+4. **Count what you found before asserting on it.** A page scan or parser that matches zero rows and then asserts nothing about them passes over a broken parser.
+5. **Clean up by identity, not by wholesale reset.** Delete the records this run created, identified by their suffix. A reset that clears the workspace destroys another run's evidence — and `make testsprite-reset` is for the whole instance, not for tidying up one test.
+6. **Two instances, one sandbox account.** Each instance only ingests the deposits it created and only acts on transfers whose request id it issued. Anything else is logged and ignored, never put in suspense or raised as an incident. A deposit you did not simulate may belong to the other instance.
