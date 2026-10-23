@@ -1,7 +1,7 @@
 # Closebook: Product Requirements for TestSprite
 
 **Test URL:** the Cloudflare tunnel URL Hermes prints (`make testsprite-url`). Start at `/app`.
-**PIN for every approval:** 314159
+**PIN for every approval:** the instance's own PIN, in `.env` as `TESTSPRITE_PIN`. It is deliberately NOT written here — this file is in a public repository, and a credential that is committed is a credential that has to be rotated.
 **Login:** none.
 **Environment:** Airwallex sandbox only. No real money moves.
 
@@ -85,7 +85,7 @@ Closebook is a real-time bookkeeping agent for a small business that gets paid b
 3. It appears in Needs your OK as PROPOSED, with confidence at most 0.89.
 4. The **Model said / Code decided** receipt shows the model's claimed value **struck through** beside the code's final value, the rule that fired, and the verdict. The model's claimed confidence is never reported as the final one.
 5. Approve with the wrong PIN: refused, nothing changes.
-6. Approve with PIN 314159: INV-1003 is paid, suspense drops, and a success sentence appears.
+6. Approve with the correct PIN: INV-1003 is paid, suspense drops, and a success sentence appears.
 7. Approve again: refused, "already resolved".
 
 ### F. Over-application guard
@@ -142,4 +142,5 @@ Several runs share one sandbox account and one Airwallex key, and two instances 
 3. **Read balances before and after.** Take cash, suspense, inflow counts and incident counts before the action, then again after, and assert on the **difference**. An absolute figure is a claim about the whole workspace, including everyone else's activity; a delta is a claim about your action.
 4. **Count what you found before asserting on it.** A page scan or parser that matches zero rows and then asserts nothing about them passes over a broken parser.
 5. **Clean up by identity, not by wholesale reset.** Delete the records this run created, identified by their suffix. A reset that clears the workspace destroys another run's evidence — and `make testsprite-reset` is for the whole instance, not for tidying up one test.
-6. **Two instances, one sandbox account.** Each instance only ingests the deposits it created and only acts on transfers whose request id it issued. Anything else is logged and ignored, never put in suspense or raised as an incident. A deposit you did not simulate may belong to the other instance.
+6. **Never write a credential into a tracked file.** The PIN lives in `.env`, which is gitignored. A test that hardcodes it, or a doc that quotes it, puts it in the repository history and makes it a secret that has to be rotated.
+7. **Two instances, one sandbox account.** Each instance only ingests the deposits it created and only acts on transfers whose request id it issued. Anything else is logged and ignored, never put in suspense or raised as an incident. A deposit you did not simulate may belong to the other instance.
