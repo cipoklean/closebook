@@ -52,6 +52,48 @@ class PolicyError(Exception):
 
 
 # ---- THE ONE AVAILABLE-CASH RULE ----------------------------------------
+def cash_waterfall(*, cash_minor: int, in_flight_minor: int = 0,
+                   committed_this_run_minor: int = 0, suspense_minor: int = 0,
+                   refunds_owed_minor: int = 0, floor_minor: int = 0) -> dict:
+    """The SAME arithmetic as `available_cash_minor`, as ordered steps.
+
+    One basis, two presentations. The tile prints the answer and the waterfall
+    draws the working, and they cannot disagree because the working is derived
+    here — beside the function it is the working OF — and the last step's
+    running total IS `available_cash_minor`'s return value.
+
+    Zero subtractions are kept as steps but flagged `empty`, so the bar can draw
+    a labelled run of nothing rather than silently dropping a term the operator
+    is looking for. A term that is absent from the picture is a term nobody can
+    check.
+    """
+    terms = [
+        ("cash", "cash", int(cash_minor or 0), "start"),
+        ("in_flight", "in flight", int(in_flight_minor or 0), "minus"),
+        ("promised", "promised", int(committed_this_run_minor or 0), "minus"),
+        ("unmatched", "unmatched", int(suspense_minor or 0), "minus"),
+        ("refunds_owed", "refunds owed", int(refunds_owed_minor or 0), "minus"),
+        ("floor", "reserve floor", int(floor_minor or 0), "minus"),
+    ]
+    # `running` starts at ZERO and the first step adds the cash, so the running
+    # total is literally the sum of the segments DRAWN. Starting it at the cash
+    # figure double-counted it, and the closing number disagreed with the tile.
+    steps, running = [], 0
+    for key, label, minor, kind in terms:
+        delta = -minor if kind == "minus" else minor   # cash adds, the rest take away
+        running += delta
+        steps.append({"key": key, "label": label, "minor": abs(minor),
+                      "delta_minor": delta, "kind": kind,
+                      "running_minor": running,
+                      "empty": minor == 0 and kind != "start",
+                      # A step that takes the total below zero is the one to
+                      # paint red: the shortfall is THERE, not at the end.
+                      "overdrawn": running < 0})
+    return {"steps": steps, "start_minor": int(cash_minor or 0),
+            "free_minor": running,
+            "total_minor": sum(st["delta_minor"] for st in steps)}
+
+
 def available_cash_minor(*, cash_minor: int, in_flight_minor: int = 0,
                          committed_this_run_minor: int = 0,
                          suspense_minor: int = 0,

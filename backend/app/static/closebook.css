@@ -560,3 +560,76 @@ a { color: inherit; }
   .x-l-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .x-l-foot { padding: 36px 20px 64px; }
 }
+
+/* ---------- free-to-spend waterfall -----------------------------------------
+   One bar per currency: cash on the left, the subtractions in order, the
+   remainder at the right. It replaced a Details paragraph that stated the same
+   arithmetic in prose. */
+.x-wf { margin-top: 14px; }
+.x-wf-bar { display: flex; width: 100%; gap: 2px; border-radius: 10px; overflow: hidden; background: var(--x-line); }
+.x-wf-seg {
+  flex: 0 0 auto;
+  width: calc(var(--w) * 1%);
+  min-width: 0;
+  display: flex; flex-direction: column; justify-content: center; gap: 1px;
+  padding: 8px 6px; overflow: hidden;
+  background: #E8EAEE; color: #2A2F36;
+  font-size: 11px; line-height: 1.15; white-space: nowrap;
+}
+.x-wf-seg b { font-weight: 600; font-size: 11px; }
+.x-wf-seg small { font-size: 10px; opacity: .72; overflow: hidden; text-overflow: ellipsis; }
+.x-wf-seg--start { background: #DCE6E4; }
+.x-wf-seg--take { background: #EDE7DF; }
+.x-wf-seg--free { background: #D8E9DD; flex: 1 1 auto; width: auto; }
+/* RED PAST ZERO, at the point it happens -- the shortfall is caused there. */
+.x-wf-seg.is-overdrawn { background: #F6DDDA; color: #8A2B22; }
+.x-wf-seg--free.is-overdrawn { background: #F3D2CE; color: #7E2419; }
+.x-wf-legend { margin-top: 6px; color: var(--x-muted); font-size: 11px; }
+
+/* AT 390px THE SEGMENTS STACK INTO ROWS. A 6-segment bar is unreadable when it
+   is 390 pixels wide, so each term becomes its own labelled row and the bar
+   stops pretending to be proportional. */
+@media (max-width: 700px) {
+  .x-wf-bar { display: block; border-radius: 12px; overflow: visible; background: none; }
+  .x-wf-seg {
+    width: auto; max-width: none;
+    flex-direction: row; align-items: baseline; justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 4px; border-radius: 8px; padding: 7px 10px;
+    white-space: normal;
+  }
+  .x-wf-seg b { font-size: 13px; }
+  .x-wf-seg small { font-size: 11px; }
+}
+
+/* ---------- model said / code decided ---------------------------------------
+   Two columns, because the ORDER is the product: the model reads, the code
+   decides. Where the code overrode the model the model's number is struck
+   through rather than removed -- hiding it would hide the override. */
+.x-receipt {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+  margin-top: 10px; border: 1px solid var(--x-line); border-radius: 12px; overflow: hidden;
+}
+.x-receipt-col { padding: 10px 12px; min-width: 0; }
+.x-receipt-col--model { background: #FBFAF8; }
+.x-receipt-col--code { background: #F5F8F7; border-left: 1px solid var(--x-line); }
+.x-receipt-head {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--x-muted); margin-bottom: 7px;
+}
+.x-receipt-row {
+  display: flex; gap: 8px; align-items: baseline; justify-content: space-between;
+  font-size: 13px; line-height: 1.4; padding: 2px 0;
+}
+.x-receipt-row > span { color: var(--x-muted); flex: 0 0 auto; }
+.x-receipt-row > b, .x-receipt-row > s { text-align: right; min-width: 0; overflow-wrap: anywhere; }
+.x-receipt-row > s { color: #9A6B66; }
+.x-receipt-absent { font-size: 13px; line-height: 1.45; }
+.x-receipt-absent b { display: block; margin-bottom: 3px; }
+.x-receipt-absent span { color: var(--x-muted); }
+
+/* at 390px the two columns become two stacked blocks */
+@media (max-width: 700px) {
+  .x-receipt { grid-template-columns: 1fr; }
+  .x-receipt-col--code { border-left: none; border-top: 1px solid var(--x-line); }
+}

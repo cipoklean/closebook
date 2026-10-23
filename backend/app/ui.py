@@ -9,6 +9,8 @@ copy only, which is why its strings live here and not in the spec's data layer.
 """
 from __future__ import annotations
 
+import re
+
 import html
 import json
 import os
@@ -68,6 +70,158 @@ def _sum_by_currency(rows) -> dict:
         ccy = str(r.get("currency") or "")
         out[ccy] = out.get(ccy, 0) + int(r.get("amount_minor") or 0)
     return {k: v for k, v in out.items() if k}
+
+
+def pct(x) -> str:
+    """A confidence as a person reads it: 0.89, never 0.8900000000000001."""
+    try:
+        return f"{float(x):.2f}"
+    except (TypeError, ValueError):
+        return ""
+
+
+_FIRST_PERSON = re.compile(
+    r"^\s*(?:i\s+(?:think|believe|reckon|d\s*guess)|i'?m|i'?ll|i'?ve|"
+    r"my\s+(?:reading|guess|take)|in\s+my\s+(?:view|opinion))\b[\s,:-]*",
+    re.I)
+
+
+def _prose(text: object, limit: int = 120) -> str:
+    """ONE line of the model's reasoning, and never in the first person.
+
+    "I think this looks like INV-1001" is a sentence about the model. The
+    receipt is about the CLAIM, so the same content is stated flat: "looks like
+    INV-1001". The reader is comparing a claim with a verdict, and a narrator
+    in the middle of that comparison is noise.
+    """
+    t = str(text or "").strip().replace("\n", " ")
+    t = _FIRST_PERSON.sub("", t).strip()
+    if t and t[0].isupper() and not t[:2].isupper():
+        t = t[0].lower() + t[1:]
+    t = " ".join(t.split())
+    return t if len(t) <= limit else t[: limit - 1].rstrip() + "…"
+
+
+def _receipt(model: dict, code: dict) -> str:
+    """Model said / Code decided -- side by side, because that is the product.
+
+    The two columns are the whole argument in one component: the model reads
+    what a person typed, and the code decides what it is allowed to do. Putting
+    them next to each other makes the ORDER visible -- a claimed 0.90 rendered
+    struck through beside a final 0.89 says more than any sentence about the
+    model proposing and the code enforcing.
+
+    WHERE THE CODE OVERRODE THE MODEL, the model's value is struck through
+    rather than hidden. Hiding it would make the override invisible; showing it
+    unstruck would misreport the number that is actually in force.
+
+    WHEN THE MODEL WAS UNAVAILABLE the left column says so in plain words and
+    the right column shows the escalation. An unavailable model is not an error
+    state to be dressed up: it is the case the code was built to survive.
+    """
+    m = model or {}
+    c = code or {}
+    if m.get("unavailable"):
+        left = (f'<div class="x-receipt-absent" data-testid="receipt-model-absent">'
+                f'<b>Model did not answer</b>'
+                f'<span>{e(m["unavailable"])}</span></div>')
+    else:
+        rows = []
+        if m.get("invoice"):
+            rows.append(("Invoice", e(m["invoice"]), False))
+        if m.get("amount"):
+            rows.append(("Amount", e(m["amount"]), False))
+        if m.get("confidence") not in (None, ""):
+            rows.append(("Claimed confidence", e(pct(m["confidence"])),
+                         bool(m.get("struck"))))
+        if m.get("reason"):
+            rows.append(("Reasoning", e(m["reason"]), False))
+        left = "".join(
+            f'<div class="x-receipt-row"><span>{k}</span>'
+            + (f'<s data-testid="model-overridden">{v}</s>' if struck else f'<b>{v}</b>')
+            + '</div>' for k, v, struck in rows
+        ) or '<div class="x-receipt-row"><span>No claim recorded.</span></div>'
+
+    rows = []
+    if c.get("verdict"):
+        rows.append(("Verdict", e(c["verdict"])))
+    if c.get("rule"):
+        rows.append(("Rule that fired", e(c["rule"])))
+    if c.get("confidence") not in (None, ""):
+        rows.append(("Final confidence", e(pct(c["confidence"]))))
+    if c.get("note"):
+        rows.append(("", e(c["note"])))
+    right = "".join(f'<div class="x-receipt-row"><span>{k}</span><b>{v}</b></div>'
+                    for k, v in rows) or '<div class="x-receipt-row"><span>—</span></div>'
+
+    return (f'<div class="x-receipt" data-testid="receipt">'
+            f'<div class="x-receipt-col x-receipt-col--model">'
+            f'<div class="x-receipt-head">Model said</div>{left}</div>'
+            f'<div class="x-receipt-col x-receipt-col--code">'
+            f'<div class="x-receipt-head">Code decided</div>{right}</div></div>')
+
+
+def _waterfall_bar(ccy: str, w: dict) -> str:
+    """ONE horizontal bar from cash down to free to spend.
+
+    It replaces the Details paragraph, which stated the same arithmetic as a
+    line of prose and made the reader do the subtraction themselves. The working
+    now IS the picture.
+
+    WIDTHS. Every segment is a share of the CASH, which is the full bar, so the
+    segments and the leftover always add up to the whole. A term that would take
+    the total past zero is painted red at the point it happens rather than only
+    colouring the ending, because the shortfall is caused THERE.
+
+    Per currency, the way the tile is: a bar per currency, because a USD surplus
+    cannot pay a GBP bill, and one merged bar would say that it could.
+    """
+    steps = w["steps"]
+    start = w["start_minor"] or 1
+    segs = []
+    for st in steps:
+        share = max(1, round(abs(st["delta_minor"]) * 100 / start)) if start else 0
+        cls = ("x-wf-seg x-wf-seg--start" if st["kind"] == "start"
+               else "x-wf-seg x-wf-seg--take")
+        if st["overdrawn"]:
+            cls += " is-overdrawn"
+        sign = "+" if st["kind"] == "start" else "−"
+        segs.append(
+            f'<span class="{cls}" style="--w:{share}" '
+            f'data-wf="{st["key"]}" title="{e(st["label"])}">'
+            f'<b>{sign} {e(money(st["minor"]))}</b>'
+            f'<small>{e(st["label"])}</small></span>')
+    free = w["free_minor"]
+    free_cls = "x-wf-seg x-wf-seg--free" + (" is-overdrawn" if free < 0 else "")
+    segs.append(
+        f'<span class="{free_cls}" style="--w:1" data-wf="free">'
+        f'<b>{e(money(free))}</b><small>free to spend</small></span>')
+    return (f'<div class="x-wf" data-wf-ccy="{e(ccy)}">'
+            f'<div class="x-wf-bar" role="img" aria-label="'
+            f'cash {e(money(w["start_minor"]))} down to free to spend '
+            f'{e(money(free))}">{"" .join(segs)}</div></div>')
+
+
+def _waterfall(m: dict, cash: dict) -> str:
+    """The bar for every currency the page already reports free cash in."""
+    from .domain.policy import cash_waterfall
+
+    owed = m.get("refunds_owed") or {}
+    out = []
+    for ccy in sorted(m["free"]):
+        w = cash_waterfall(
+            # `cash` lives on the context, not on the metrics dict -- the
+            # metrics carry the BASES, the context carries the balances.
+            cash_minor=cash.get(ccy, 0),
+            in_flight_minor=m["in_flight"].get(ccy, 0),
+            committed_this_run_minor=m["promised"].get(ccy, 0),
+            suspense_minor=m["suspense"].get(ccy, 0),
+            refunds_owed_minor=owed.get(ccy, 0),
+            # The floor is a single currency's limit, the way the tile reads it.
+            floor_minor=m["reserve_floor_minor"] if ccy == m["headline_currency"] else 0,
+        )
+        out.append(_waterfall_bar(ccy, w))
+    return "".join(out) or '<p class="x-empty">Nothing to work out yet.</p>'
 
 
 def _shown(text) -> str:
@@ -871,13 +1025,13 @@ def _home(c: dict) -> str:
         '<div class="x-label">Free to spend</div>'
         f'<div class="x-fig"{head_cls} data-figure="free_to_spend">{e(headline)}</div>'
         + unfunded_note
-        + f'<details class="x-hist"><summary>Details</summary><div>{work}</div>'
-          + ("".join(
-              f'<div>{e(ln["payable_number"])} · {e(ln["where"].replace("_", " "))} · '
-              f'{e(money_str(ln["amount_minor"], ln["currency"]))}'
-              + (f' · {e(ln["note"])}' if ln["note"] else '')
-              + '</div>' for ln in m["lines"]) or '<div>Nothing outstanding.</div>')
-          + '</details>'
+        # THE WATERFALL REPLACES THE DETAILS TEXT. It is the same arithmetic,
+        # drawn, and per currency -- so the headline above and the bar below
+        # cannot disagree.
+        + _waterfall(m, c["cash"])
+        + (f'<p class="x-statnote">{len(m["lines"])} outgoings counted. '
+           f'<a href="/app?tab=money-out">See them</a>.</p>'
+           if m["lines"] else '<p class="x-statnote">Nothing outstanding.</p>')
     )))
 
     n_unmatched = len(c["unmatched"])
@@ -1513,7 +1667,9 @@ def _money_in(c: dict) -> str:
         f'<div class="x-stack">{("".join(un)) if un else empty_un}</div>'
         + note))
 
-    return _simulate_card(c) + _arrivals_card(c) + inv + side
+    # detail=True: this is the tab where a reader asks "why did it decide
+    # that", so the rows carry their receipt. The Home summary stays short.
+    return _simulate_card(c) + _arrivals_card(c, detail=True) + inv + side
 
 
 # ---- money out
@@ -1827,17 +1983,23 @@ def _arrival_row(a: dict, *, detail: bool = False) -> str:
         f'<div class="x-mono" style="margin-top:6px">ref: {e(ref)}</div>')
     if detail and a.get("reason"):
         out += f'<div class="x-hint" style="margin-top:4px">{e(a["reason"])}</div>'
+    rec = a.get("receipt") or {}
+    if detail and rec:
+        # MODEL SAID / CODE DECIDED, on the payment itself. Not a summary of the
+        # two -- the two, side by side, so the reader can see which number the
+        # system acted on and which one it only considered.
+        out += _receipt(rec.get("model") or {}, rec.get("code") or {})
     if detail and a.get("deposit_id"):
         out += (f'<div class="x-hint">Airwallex deposit '
                 f'<span class="x-mono">{e(a["deposit_id"])}</span></div>')
     return out + "</div>"
 
 
-def _arrivals_card(c: dict, *, span: str = "x-span-12",
+def _arrivals_card(c: dict, *, span: str = "x-span-12", detail: bool = False,
                    limit: int = 6, title: str = "What arrived",
                    sub: str = "") -> str:
     arr = (c.get("arrivals") or [])[:limit]
-    body = "".join(_arrival_row(a) for a in arr) if arr else (
+    body = "".join(_arrival_row(a, detail=detail) for a in arr) if arr else (
         '<p class="x-empty">Nothing has landed yet. Use the form above, or make '
         'a real transfer into your Airwallex Global Account.</p>')
     return _card(span=span, inner=(
@@ -1875,7 +2037,7 @@ def _ai(c: dict) -> str:
                                                    if is_model_call else ""),
                 # The machine's own words, when there are any. Folded away on
                 # screen rather than shouted.
-                "rules_raw": ""}
+                "rules_raw": "", "receipt": ""}
 
         if is_model_call:
             # The amount is `amount_minor` on the trace. Reading `amount` (which
@@ -1916,8 +2078,58 @@ def _ai(c: dict) -> str:
                 conf_label = f'claimed {claim:.2f}' if claim else "No guess"
             _rules = (t["detail"] or outs.get("explanation")
                       or "Checked every number against the open invoices.")
+            # The same two-column receipt, built from the TRACE. The AI screen
+            # is where a reader asks "what did it claim, and what was enforced",
+            # so it gets the same component the payment does rather than a
+            # differently-worded version of it.
+            # THE TWO COLUMNS, from what this trace actually holds. A
+            # propose_match trace carries the model's proposal under
+            # `model_proposed`; the code's half is the CAP, which is the rule
+            # that fired on every model reading: the claim is pinned below the
+            # auto band before it can matter. Reading `outputs.evidence` here
+            # found nothing, so nothing was ever struck through and the override
+            # was invisible on the one screen built to show it.
+            _mp = prop if isinstance(prop, dict) else {}
+            _alloc = _mp.get("allocations") or []
+            _inv = ", ".join(str(a.get("invoice_number") or a.get("invoice") or "")
+                             for a in _alloc
+                             if (a.get("invoice_number") or a.get("invoice")))
+            _amt_major = 0
+            for a in _alloc:
+                try:
+                    _amt_major += int(round(float(a.get("amount") or 0) * 100))
+                except (TypeError, ValueError):
+                    pass
+            _claimed = _mp.get("confidence")
+            try:
+                _final = (min(float(_claimed), _LLM_CAP)
+                          if _claimed is not None else None)
+            except (TypeError, ValueError):
+                _final = None
+            if outs.get("model_error"):
+                model_col = {"unavailable": _shown(str(outs["model_error"]))}
+            else:
+                model_col = {
+                    "invoice": _inv,
+                    "amount": (money(_amt_major, ins.get("currency") or "")
+                               if _amt_major else ""),
+                    "confidence": _claimed,
+                    "reason": _prose(_mp.get("rationale") or ""),
+                    # STRUCK WHEN THE CODE OVERRODE IT. 0.90 struck through
+                    # beside a final 0.89 says the whole thing in one glance.
+                    "struck": bool(_claimed is not None and _final is not None
+                                   and float(_claimed) > float(_final)),
+                }
+            code_col = {
+                "verdict": ("held for you"
+                            if _final is not None and _final < 0.90 else "applied"),
+                "rule": (f"capped at the {_LLM_CAP:.2f} auto band"
+                         if model_col.get("struck") else "re-checked in code"),
+                "confidence": _final,
+            }
             item.update(what=_shown(what), ai=reply, rules=_shown(_rules),
-                        rules_raw=_raw_of(_rules), conf=conf_label)
+                        rules_raw=_raw_of(_rules), conf=conf_label,
+                        receipt=_receipt(model_col, code_col))
         elif t["tool"] == "explain_decision":
             item.update(what=_shown(outs.get("explanation")
                                     or "Explained a decision."),
@@ -1944,13 +2156,22 @@ def _ai(c: dict) -> str:
         else:
             model_pill = ('<span class="x-pill x-pill--warn">no model configured'
                           '</span>')
+        # THE PROSE STAYS; THE NARRATOR GOES. The model's own answer is real
+        # content -- a refusal is information, and deleting it to make room for
+        # the receipt would hide the case where the model declined to guess. What
+        # goes is the FIRST PERSON: "I think this looks like INV-1001" is a
+        # sentence about the model, and the reader is comparing a claim with a
+        # verdict. The receipt then states the same claim in columns.
+        bubble = (f'<div class="x-msg x-msg--ai">'
+                  f'<span class="x-av x-av--ai">{_I["ai"]}</span>'
+                  f'<div><span class="x-bubble"><b class="x-who">The model</b>'
+                  f'{_prose(it["ai"], 240)}</span></div></div>')
         feed.append(
             '<li>'
-            f'<div class="x-msg x-msg--ai"><span class="x-av x-av--ai">{_I["ai"]}</span>'
-            f'<div><span class="x-bubble"><b class="x-who">The model</b>{it["ai"]}</span>'
-            f'<div class="x-aifoot"><span class="x-pill x-pill--'
+            + bubble
+            + f'<div class="x-aifoot"><span class="x-pill x-pill--'
             f'{"accent" if good else "warn"}">{e(it["verdict"])}</span>{conf_pill}'
-            f'{model_pill}<span>about {e(it["what"])}</span></div></div></div>'
+            f'{model_pill}<span>about {e(it["what"])}</span></div>'
             f'<div class="x-msg x-msg--rules"><span class="x-av x-av--rules">{_I["scale"]}</span>'
             f'<div><span class="x-bubble" data-testid="rules-bubble"><b class="x-who">The rules</b>'
             f'{e(it["rules"])}</span>'
@@ -1959,7 +2180,8 @@ def _ai(c: dict) -> str:
             # sentence today and its stack is one tap deep, not on the screen.
             + _detail_toggle(it.get("rules_raw") or "")
             + '</div></div>'
-            '</li>')
+            + (it.get("receipt") or "")
+            + '</li>')
 
     body = "".join(feed) if feed else '<p class="x-empty">No model calls yet.</p>'
 

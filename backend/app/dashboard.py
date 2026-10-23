@@ -698,6 +698,11 @@ def arrivals_block(s) -> list[dict]:
             # ledger so a part-allocated inflow shows only its remainder.
             "suspense_minor": left,
             "resolvable": bool(left > 0),
+            # MODEL SAID / CODE DECIDED, read from the stored proposal and the
+            # stored trace. Built here so the AI activity screen and the money-in
+            # item show the SAME pair -- one component, one source.
+            "receipt": receipt_data(s, i, _loads(i.proposed_json) or {},
+                                    conf, left),
             "resolution_reason": i.resolution_reason or "",
             "resolution_note": i.resolution_note or "",
             "resolved_by": i.resolved_by or "",
@@ -920,6 +925,108 @@ def refresh_live_statuses(ids: list[str]) -> None:
             status = "UNKNOWN"
         _LIVE_CACHE[tid] = (status, time.monotonic())
 
+
+
+def receipt_data(s, i, prop: dict, final_conf, applied) -> dict:
+    """The Model said / Code decided pair for one payment.
+
+    Read from the STORED proposal and the stored trace, never re-derived: the
+    page must show the numbers the system actually acted on, not a fresh
+    calculation that might read differently today.
+    """
+    from .domain.policy import MATCH_CONFIDENCE_AUTO
+
+    ev = (prop or {}).get("evidence") or {}
+    claimed = ev.get("model_claimed_confidence")
+    att = model_attempt(s, i.id)
+
+    model: dict = {}
+    if claimed is None and att.get("claimed") is not None:
+        claimed = att["claimed"]
+
+    if claimed is not None:
+        model["confidence"] = claimed
+        model["struck"] = (final_conf is not None
+                           and abs(float(claimed) - float(final_conf)) > 1e-9)
+    if prop:
+        allocs = prop.get("allocations") or []
+        nums = []
+        for a in allocs:
+            n = a.get("invoice_number") or a.get("invoice")
+            if not n and a.get("invoice_id"):
+                inv = s.get(InvoiceReceivable, a["invoice_id"])
+                n = inv.number if inv else None
+            if n:
+                nums.append(str(n))
+        if nums:
+            model["invoice"] = ", ".join(nums)
+        if allocs:
+            tot = sum(int(a.get("amount_minor") or 0) for a in allocs)
+            ccy = (prop.get("evidence") or {}).get("currency") or i.currency
+            model["amount"] = money_str(tot, ccy)
+        model["reason"] = prop.get("reason") or i.match_reason or ""
+    elif att.get("failed"):
+        # TRIED AND DID NOT ANSWER. Not "not needed", not a quiet shrug: an
+        # outage, and the payment went to a person because of it.
+        from .domain.plain_words import MODEL_UNAVAILABLE
+
+        model["unavailable"] = MODEL_UNAVAILABLE
+    elif att.get("never_asked") or (i.match_method and i.match_method != "LLM"):
+        model["reason"] = ("Not needed — a deterministic rule settled this "
+                           "before the model was consulted.")
+    elif i.match_method == "LLM":
+        # The model ran and we have no stored claim for it. Say that, rather
+        # than rendering an empty column that reads as "it claimed nothing".
+        model["reason"] = ("The model answered but no claim was stored on this "
+                           "payment, so the code went on the rules alone.")
+
+    verdict = "held for you" if applied <= 0 or getattr(i, "review_state", None) in (
+        "PENDING", "REJECTED") else "applied"
+    if i.match_status and i.match_status.value == "ESCALATED":
+        verdict = "escalated to a person"
+    elif i.match_status and i.match_status.value == "UNMATCHED":
+        verdict = "left unmatched"
+    code = {"verdict": verdict,
+            "rule": (i.match_method or "no rule"),
+            "confidence": final_conf,
+            "note": ("" if final_conf is None
+                     or final_conf >= MATCH_CONFIDENCE_AUTO
+                     else f"below the {MATCH_CONFIDENCE_AUTO:.2f} auto band, held for you")}
+    return {"model": model, "code": code}
+
+
+def model_attempt(s, inflow_id: int) -> dict:
+    """What the MODEL did on this payment, if anything.
+
+    Three outcomes, and the page has to tell them apart because they call for
+    three different reactions:
+
+      * it answered  -> we have a claim to show beside the code's verdict
+      * it was never needed -> a deterministic tier settled it, which is the
+        system working
+      * it was TRIED AND DID NOT ANSWER -> an outage, and the payment went to a
+        human because of it. Reporting this as "the model did not decide"
+        (as the old page did) hid an outage behind a shrug.
+    """
+    from .models import AgentTrace
+
+    rows = (s.query(AgentTrace)
+            .filter(AgentTrace.tool == "decide_match")
+            .order_by(AgentTrace.id.desc()).limit(200).all())
+    for t in rows:
+        ins = _loads(t.inputs_json) or {}
+        if int(ins.get("inflow_id") or -1) != int(inflow_id):
+            continue
+        outs = _loads(t.outputs_json) or {}
+        detail = (t.detail or "")
+        failed = bool(outs.get("unavailable")) or bool(
+            re.search(r"HTTPStatusError|Too Many Requests|Timeout|unavailable",
+                      detail, re.I))
+        return {"answered": not failed, "failed": failed,
+                "detail": detail, "outs": outs,
+                "claimed": outs.get("claimed_confidence")}
+    return {"answered": False, "failed": False, "detail": "", "outs": {},
+            "claimed": None, "never_asked": True}
 
 
 def landing_stats(s) -> dict:
