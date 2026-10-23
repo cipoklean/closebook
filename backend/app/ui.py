@@ -1308,6 +1308,30 @@ def _home(c: dict) -> str:
 
 
 
+def _sandbox_panel(simulate: str = "", devs: str = "") -> str:
+    """THE ONE FENCED PANEL holding every sandbox-only control on a screen.
+
+    These buttons do not exist in a real deployment: one invents a deposit, the
+    others ask Airwallex to move an in-flight transfer to its end state. They
+    were spread across the pages, styled like the operator's own controls, which
+    made the demo machinery look like part of the product.
+
+    Dashed border and an explicit label, collapsed by default, and it renders
+    NOTHING when there is nothing to put in it -- so a screen with nothing to
+    simulate shows no trace of the sandbox at all.
+    """
+    body = (simulate or "") + (devs or "")
+    if not body.strip():
+        return ""
+    return ('<details class="x-sandbox" data-testid="sandbox-controls">'
+            '<summary><span class="x-sandbox-tag">sandbox only</span>'
+            '<b>Sandbox controls</b>'
+            '<span class="x-hint">Not part of the product. These move sandbox '
+            'money so the demo can reach the interesting states.</span>'
+            '</summary>'
+            f'<div class="x-sandbox-body">{body}</div></details>')
+
+
 def _dev_controls(transfer_id: str, live: str) -> str:
     """Sandbox-only buttons that move an in-flight transfer to its END state.
 
@@ -1669,11 +1693,30 @@ def _money_in(c: dict) -> str:
 
     # detail=True: this is the tab where a reader asks "why did it decide
     # that", so the rows carry their receipt. The Home summary stays short.
-    return _simulate_card(c) + _arrivals_card(c, detail=True) + inv + side
+    return (_sandbox_panel(simulate=_simulate_card(c))
+            + _timeline(c) + inv + side)
 
 
 # ---- money out
 _STEP_LABELS = ["Planned", "Checked", "Approved", "Sent", "Confirmed"]
+
+#: Where a payment STOPPED, as opposed to where it currently is. A cancelled
+#: transfer auto-cancels within seconds of failing, so the bank reports
+#: CANCELLED for both; the step it reached is what tells the operator how far it
+#: got, and a red X there is the difference between "it never left" and "the
+#: money went and came back".
+_STOPPED_STATUSES = {"FAILED", "CANCELLED", "RETURNED", "REJECTED"}
+
+
+def _tracker_legend(stopped: bool = False) -> str:
+    """A tiny key under the tracker. Five steps with no key read as decoration."""
+    bits = [("is-done", "done"), ("is-now", "current")]
+    if stopped:
+        bits.append(("is-stopped", "stopped here"))
+    bits.append(("", "next"))
+    return ('<div class="x-legend" data-testid="tracker-legend">'
+            + "".join(f'<span class="{cls}"><i></i>{e(txt)}</span>'
+                      for cls, txt in bits) + '</div>')
 
 
 def _step_index(status: str) -> int:
@@ -1685,13 +1728,26 @@ def _step_index(status: str) -> int:
 
 def _money_out(c: dict) -> str:
     cards = []
+    # Collected rather than rendered inline: the sandbox buttons belong in ONE
+    # fenced place, not scattered down the payment list looking like the
+    # operator's own controls.
+    dev_targets: list = []
     for p in c["payables"]:
         st = p["display_status"]
         idx = _step_index(st)
+        # A FAILED OR RETURNED PAYMENT KEEPS ITS RED X. It used to render as a
+        # tick up to the step it reached, which reads as progress and hides that
+        # the money stopped there.
+        stopped = st in _STOPPED_STATUSES or bool(p.get("previous_attempt_failed"))
         steps = []
         for i, label in enumerate(_STEP_LABELS):
-            cls = "is-done" if i < idx else ("is-now" if i == idx else "")
-            mark = "✓" if i < idx else (str(i + 1))
+            if stopped and i == idx:
+                cls, mark = "is-stopped", "✕"
+            elif stopped and i > idx:
+                cls, mark = "", str(i + 1)      # never reached: "next", not "done"
+            else:
+                cls = "is-done" if i < idx else ("is-now" if i == idx else "")
+                mark = "✓" if i < idx else str(i + 1)
             steps.append(f'<li class="{cls}"><i>{mark}</i>'
                          f'<span>{e(label)}</span></li>')
         done = st == "PAID"
@@ -1751,8 +1807,10 @@ def _money_out(c: dict) -> str:
                    f'<span class="x-tag x-mono">{e(str(obj))}</span></div>'
                    f'<div class="x-meta"><span class="x-label">Environment</span>'
                    f'<span class="x-tag">sandbox</span></div>'
-                   f'</details>'
-                   f'{_dev_controls(str(obj), live)}')
+                   f'</details>')
+            # Registered for the one Sandbox controls panel at the foot of the
+            # page, rather than rendered here among the operator's own buttons.
+            dev_targets.append((str(obj), live))
 
         # criticality is an int 1-5 on the model; 1 is most urgent.
         crit = int(p["criticality"] or 3)
@@ -1769,6 +1827,7 @@ def _money_out(c: dict) -> str:
             f'<span class="x-mono">{e(p["number"])}</span></div></div>'
             f'{badge}</div>'
             f'<ol class="x-steps">{"".join(steps)}</ol>'
+            f'{_tracker_legend(stopped)}'
             f'{note}{ref}</div>'
         )))
 
@@ -1816,7 +1875,8 @@ def _money_out(c: dict) -> str:
             'for my OK</button></form>'
             f'{past_block}'))
 
-    return head + prob
+    devs = "".join(_dev_controls(tid, live) for tid, live in dev_targets)
+    return head + prob + _sandbox_panel(devs=devs)
 
 
 # ---- needs your OK
@@ -1919,25 +1979,12 @@ def _ok(c: dict) -> str:
     # Every card that belongs after the main body is gathered into ONE string and
     # appended once. Carrying two hand-built returns meant the second one won by
     # accident and silently dropped a card that had been built correctly.
-    note_in = ""
-    if wait:
-        note_in = _card(inner=(
-            '<div class="x-cardhead"><div><h3>Money in that needs a look</h3>'
-            '<p class="x-help">The cash is already in the book and on the '
-            'invoice, but the match was not confident enough to settle itself. '
-            'Chase it, re-apply it, or refund it.</p></div>'
-            f'<span class="x-pill x-pill--warn">{len(wait)} to review</span>'
-            '</div>'
-            + "".join(
-                # `data-card` marks the UNIT a resolution finishes. Without it
-                # the form vanished and the stale row stayed behind it.
-                '<div class="x-waititem" data-card data-testid="review-item-'
-                + str(a["id"]) + '">'
-                + _arrival_row(a, detail=True)
-                + _resolve_form(a)
-                + _reask_form(a)
-                + '</div>'
-                for a in wait)))
+    # ALWAYS RENDERED, even with nothing to show: the component carries its own
+    # empty state, so "nothing needs you" is a sentence rather than a missing
+    # card. Guarding it on `wait` made that state unreachable -- the screen went
+    # quiet exactly when it had the most reassuring thing to say.
+    note_in = _timeline(c, only_needing_human=True)
+
 
     done = [a for a in (c.get("arrivals") or [])
             if (a.get("review_state") or "").upper()
@@ -1993,6 +2040,82 @@ def _arrival_row(a: dict, *, detail: bool = False) -> str:
         out += (f'<div class="x-hint">Airwallex deposit '
                 f'<span class="x-mono">{e(a["deposit_id"])}</span></div>')
     return out + "</div>"
+
+
+def _timeline_row(a: dict, *, needs_human: bool) -> str:
+    """ONE deposit, collapsed, expanding into its receipt and its resolution.
+
+    The three lists this replaces -- "What arrived", the model activity strip
+    and the review queue -- each held a different FRAGMENT of the same payment,
+    so a reader had to visit three places and hold the joins in their head. A
+    deposit arrived once; it is listed once.
+    """
+    conf = a.get("confidence")
+    tone = ("good" if a.get("settled_match")
+            else ("bad" if (conf is not None and conf < 0.75) else "warn"))
+    can_resolve = bool(a.get("resolvable"))
+    return (
+        f'<details class="x-tl" data-testid="timeline-row" '
+        f'data-deposit="{a["id"]}" id="deposit-{a["id"]}"'
+        + (" open" if needs_human else "") + '>'
+        f'<summary><b>{e(money(a["amount_minor"], a["currency"]))}</b>'
+        f'<span class="x-hint">{e(a["payer"] or "payer not given")}</span>'
+        f'<span class="x-pill x-pill--{tone}">{e(a["match_status"])}</span>'
+        + ('<span class="x-pill x-pill--warn" data-testid="needs-you">'
+           'needs you</span>' if needs_human else '')
+        + '</summary>'
+        '<div class="x-tl-body">'
+        + _arrival_row(a, detail=True)
+        # THE RESOLUTION IS HERE TOO, next to the evidence for it. It used to be
+        # a separate list, which meant the form and the facts it acts on were
+        # never on screen together.
+        + (_resolve_form(a) + _reask_form(a) if can_resolve else "")
+        + _resolution_audit(a)
+        + '</div></details>')
+
+
+def _timeline(c: dict, *, only_needing_human: bool = False,
+              span: str = "x-span-12") -> str:
+    """Every deposit, once. Or only the ones a person has to decide.
+
+    `only_needing_human` is the ONLY difference between the Money in timeline
+    and Needs your OK, so the two cannot disagree about what a deposit is --
+    which is what let a payment look resolved on one screen and open on the
+    other.
+    """
+    rows = list(c.get("arrivals") or [])
+    if only_needing_human:
+        rows = [a for a in rows
+                if a.get("awaiting_human") and (a.get("suspense_minor") or 0) > 0]
+    if not rows:
+        empty = ('<p class="x-empty">Nothing here needs a person. Every deposit '
+                 'that landed was matched with certainty.</p>'
+                 if only_needing_human else
+                 '<p class="x-empty">No deposits yet. Money that arrives appears '
+                 'here, with what the code decided about it.</p>')
+        return _card(span=span, inner=empty)
+    head = (
+        '<div class="x-cardhead"><div><h3>'
+        + ("Deposits needing you" if only_needing_human
+           else "One timeline of every deposit")
+        + '</h3><p class="x-help">'
+        + ("Only the deposits a person has to decide. Each one opens on its "
+           "receipt and its resolution."
+           if only_needing_human else
+           "What arrived, what the model said, what the code decided, and where "
+           "the money went. Each row expands.")
+        + '</p></div>'
+        f'<span class="x-pill x-pill--warn">{len(rows)} to review</span>'
+        '</div>' if only_needing_human else
+        '<div class="x-cardhead"><div><h3>One timeline of every deposit</h3>'
+        '<p class="x-help">What arrived, what the model said, what the code '
+        'decided, and where the money went. Each row expands.</p></div>'
+        f'<span class="x-pill x-pill--accent">{len(rows)} '
+        f'deposit{"s" if len(rows) != 1 else ""}</span></div>')
+    return _card(span=span, inner=(
+        head + '<div class="x-timeline" data-testid="money-timeline">'
+        + "".join(_timeline_row(a, needs_human=only_needing_human) for a in rows)
+        + '</div>'))
 
 
 def _arrivals_card(c: dict, *, span: str = "x-span-12", detail: bool = False,

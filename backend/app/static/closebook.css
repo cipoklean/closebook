@@ -633,3 +633,56 @@ a { color: inherit; }
   .x-receipt { grid-template-columns: 1fr; }
   .x-receipt-col--code { border-left: none; border-top: 1px solid var(--x-line); }
 }
+
+/* ---------- one money timeline ----------------------------------------------
+   One deposit, one row, expanding into its receipt and its resolution. It
+   replaces three separate lists that each held a fragment of the same payment. */
+.x-timeline { display: flex; flex-direction: column; gap: 8px; }
+.x-tl { border: 1px solid var(--x-line); border-radius: 12px; background: #FFF; }
+.x-tl > summary {
+  display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+  padding: 11px 13px; cursor: pointer; list-style: none;
+}
+.x-tl > summary::-webkit-details-marker { display: none; }
+.x-tl > summary::before { content: "▸"; color: var(--x-muted); font-size: 11px; }
+.x-tl[open] > summary::before { content: "▾"; }
+.x-tl[open] > summary { border-bottom: 1px solid var(--x-line); }
+.x-tl-body { padding: 4px 13px 13px; }
+
+/* ---------- the payment tracker's stopped step ------------------------------
+   A failed or returned payment keeps a red X where it stopped, and the steps it
+   never reached are "next", not "done". */
+.x-steps li.is-stopped i { background: #F3D2CE; color: #8A2B22; border-color: #E0B4AF; }
+.x-steps li.is-stopped span { color: #8A2B22; font-weight: 600; }
+.x-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; font-size: 11px; color: var(--x-muted); }
+.x-legend span { display: inline-flex; gap: 5px; align-items: center; }
+.x-legend i { width: 9px; height: 9px; border-radius: 3px; border: 1px solid var(--x-line); background: #FFF; }
+.x-legend .is-done i { background: #D8E9DD; border-color: #B9D6C3; }
+.x-legend .is-now i { background: #DCE6E4; border-color: #A9C6C2; }
+.x-legend .is-stopped i { background: #F3D2CE; border-color: #E0B4AF; }
+
+/* ---------- sandbox controls ------------------------------------------------
+   Fenced, labelled, collapsed: the demo machinery must not look like the
+   product. Dashed border is the convention for "not real". */
+.x-sandbox {
+  border: 1px dashed #C9B7A8; border-radius: 12px;
+  background: #FDFBF7; margin-top: 16px; padding: 0;
+}
+.x-sandbox > summary {
+  display: flex; gap: 9px; align-items: center; flex-wrap: wrap;
+  padding: 11px 13px; cursor: pointer; list-style: none; font-size: 13px;
+}
+.x-sandbox > summary::-webkit-details-marker { display: none; }
+.x-sandbox > summary::before { content: "▸"; color: #A88F79; font-size: 11px; }
+.x-sandbox[open] > summary::before { content: "▾"; }
+.x-sandbox-tag {
+  font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  color: #8A6A4F; background: #F3E7DA; border: 1px solid #E0CDBA;
+  border-radius: 999px; padding: 2px 8px;
+}
+.x-sandbox-body { padding: 0 13px 13px; border-top: 1px dashed #E2D5C7; }
+
+@media (max-width: 700px) {
+  .x-sandbox > summary { font-size: 12px; }
+  .x-tl > summary { padding: 10px 11px; }
+}

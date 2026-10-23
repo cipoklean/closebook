@@ -183,7 +183,10 @@ class TestThePageOffersBothChoices:
         _invoice()
         _proposed_inflow(db)
         html = client.get("/app?tab=ok").text
-        assert "Money in that needs a look" in html
+        # Pass 3 merged the three money-in lists into one timeline, and Needs
+        # your OK now renders the SAME component filtered to the rows a person
+        # has to decide -- so the heading changed and the three choices did not.
+        assert "Deposits needing you" in html
         assert "/inflows/1/resolve" in html
         assert 'value="match"' in html
         assert 'value="refund"' in html
