@@ -541,20 +541,33 @@ __all__ = ["IntakeResult", "WANTED_ACCOUNTS", "accounts", "candidates_from_db",
 _ACCOUNTS_CACHE: dict = {"at": 0.0, "items": []}
 
 
-def accounts_cached(db, *, ttl: float = 60.0) -> list[dict]:
-    """`accounts()` behind a short TTL cache.
+def accounts_cached(db, *, ttl: float = 60.0, blocking: bool = False) -> list[dict]:
+    """The global accounts behind a TTL cache. NON-BLOCKING BY DEFAULT.
 
-    The deposit form shows the global accounts, and rendering it must not make a
-    live API call on every page view — a dashboard that blocks on Airwallex is a
-    dashboard that shows nothing when Airwallex is slow. Cached for a minute;
-    a failure returns the last known list rather than an empty one, and says so
-    through the returned list being empty only on a genuinely cold failure.
+    A DASHBOARD THAT BLOCKS ON AIRWALLEX SHOWS NOTHING WHEN AIRWALLEX IS SLOW,
+    and that is not a hypothetical: on a cold process the first `/app` render
+    waited 1.14 seconds on SSL reads plus a 1.00-second token backoff inside
+    `AirwallexClient`, because this function fetched on a cache miss. The render
+    now gets whatever was last known and nothing more; the refresh is scheduled
+    after the response.
+
+    `blocking=True` is for the one caller that genuinely needs an answer before
+    it can proceed — the operator pressing "simulate a deposit" and expecting the
+    list of accounts to deposit into.
     """
     import time as _time
 
     now = _time.time()
-    if _ACCOUNTS_CACHE["items"] and now - _ACCOUNTS_CACHE["at"] < ttl:
+    fresh = bool(_ACCOUNTS_CACHE["items"]) and now - _ACCOUNTS_CACHE["at"] < ttl
+    if fresh or not blocking:
         return _ACCOUNTS_CACHE["items"]
+    return refresh_accounts(db)
+
+
+def refresh_accounts(db) -> list[dict]:
+    """Go and ask Airwallex, and cache the answer. NEVER called from a render."""
+    import time as _time
+
     try:
         from ..airwallex.client import AirwallexClient
         items = accounts(AirwallexClient(), db)
@@ -563,8 +576,16 @@ def accounts_cached(db, *, ttl: float = 60.0) -> list[dict]:
         return _ACCOUNTS_CACHE["items"]
     if items:
         _ACCOUNTS_CACHE["items"] = items
-        _ACCOUNTS_CACHE["at"] = now
+        _ACCOUNTS_CACHE["at"] = _time.time()
     return items
+
+
+def accounts_stale(*, ttl: float = 60.0) -> bool:
+    """Whether the cached account list wants refreshing."""
+    import time as _time
+
+    return not _ACCOUNTS_CACHE["items"] or (
+        _time.time() - _ACCOUNTS_CACHE["at"] > ttl)
 
 
 def forget_accounts_cache() -> None:

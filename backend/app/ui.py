@@ -61,6 +61,15 @@ def blockers_html(p: dict) -> str:
             + '</ul>')
 
 
+def _sum_by_currency(rows) -> dict:
+    """Add up `{currency, amount_minor}` rows into one figure per currency."""
+    out: dict = {}
+    for r in rows or []:
+        ccy = str(r.get("currency") or "")
+        out[ccy] = out.get(ccy, 0) + int(r.get("amount_minor") or 0)
+    return {k: v for k, v in out.items() if k}
+
+
 def _flag(cond, cls) -> str:
     return f" {cls}" if cond else ""
 
@@ -226,6 +235,75 @@ _JS = """
     });
   }
 
+  /* --- what a successful action does to the page -------------------------
+     THE PAGE UPDATES ITSELF; it does not reload. A reload throws the reader
+     back to the top of a page they were reading and makes every element a test
+     has located stale, which is exactly the fault this replaced. So on success
+     the card goes, the PIN is cleared, the counts and the Home figures are
+     patched from the server's own numbers. */
+  var patchTiles = function () {
+    fetch("/state/tiles", { headers: { "Accept": "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (res) {
+        if (!res || !res.ok) return;
+        Object.keys(res.tiles || {}).forEach(function (k) {
+          [].forEach.call(
+            document.querySelectorAll('[data-figure="' + k + '"]'),
+            function (el) { el.textContent = res.tiles[k]; });
+        });
+        var badges = document.querySelectorAll(
+          '.x-nav .x-badge, .x-tabs .x-badge, [data-testid="needs-you-count"]');
+        [].forEach.call(badges, function (b) {
+          var n = res.needs_you;
+          if (typeof n !== "number") return;
+          if (n > 0) { b.textContent = String(n); }
+          else { b.remove(); document.body.setAttribute("data-needs-you", "0"); }
+        });
+      })
+      .catch(function () { /* the page keeps the numbers it has */ });
+  };
+
+  var settled = function (f, msg) {
+    // Clear the PIN the moment it is spent: leaving it in a field on a card
+    // that no longer needs it invites it to be typed somewhere it must not be.
+    var p = f.querySelector("input[name=pin]");
+    if (p) p.value = "";
+
+    // The card goes, replaced by one line saying it is done. A card that stays
+    // with its controls live looks like the action did not happen.
+    var host = f.closest("[data-card]") || f.closest(".x-card");
+    var note = document.createElement("div");
+    note.className = "x-note x-note--done";
+    note.setAttribute("data-testid", "done-note");
+    note.textContent = "Done — this no longer needs you.";
+    if (host && host.hasAttribute("data-card")) {
+      host.innerHTML = "";
+      host.appendChild(note);
+      host.setAttribute("data-done", "1");
+    } else {
+      f.parentNode.insertBefore(note, f);
+      f.remove();
+    }
+    patchTiles();
+  };
+
+  var showDetail = function (f, text) {
+    // The machine's own words, kept for whoever has to report the problem, and
+    // folded away so they help instead of shouting.
+    var box = f.querySelector("[data-detail]");
+    if (!box) return;
+    box.innerHTML = "";
+    var d = document.createElement("details");
+    d.className = "x-hist";
+    var sum = document.createElement("summary");
+    sum.textContent = "Detail";
+    var pre = document.createElement("pre");
+    pre.className = "x-raw";
+    pre.textContent = text;
+    d.appendChild(sum); d.appendChild(pre);
+    box.appendChild(d);
+  };
+
   /* --- every form that acts on money ------------------------------------
      Posts, then reports the SERVER'S OWN SENTENCE. The endpoints answer JSON
      when the caller asks for it, because a fetch cannot see through a redirect:
@@ -273,19 +351,22 @@ _JS = """
         return r.json().catch(function () { return {}; });
       }).then(function (res) {
         if (timer) window.clearTimeout(timer);
-        if (res && res.err) {
-          say(res.err, "bad");
-        } else if (res && res.ok) {
-          say(res.ok, "good");
-          var card = f.closest(".x-card");
-          if (card) {
-            card.querySelectorAll("[data-detail]").forEach(function (d) {
-              d.innerHTML = '<div class="x-note">' + res.ok + '</div>';
-            });
-          }
-        } else {
+        // `ok` IS A BOOLEAN and `message` is the sentence. Deciding on the
+        // sentence is what produced "The server did not say what happened" on
+        // an approval that had SUCCEEDED — a successful action reported as
+        // unknown is worse than a failure reported as one, because it invites
+        // the operator to do it again.
+        if (!res || typeof res.ok !== "boolean") {
           say("The server did not say what happened. Reload to see the books.",
               "bad");
+          return;
+        }
+        if (res.ok) {
+          say(res.message, "good");
+          settled(f, res.message);
+        } else {
+          say(res.err || res.message || "That did not work.", "bad");
+          if (res.detail) showDetail(f, res.detail);
         }
       }).catch(function (err) {
         if (timer) window.clearTimeout(timer);
@@ -734,13 +815,68 @@ def _card(*, span: str = "x-span-12", inner: str) -> str:
 
 
 # ---- home
+def needs_you(c: dict) -> int:
+    """How many things are waiting on a human. ONE definition.
+
+    Counted as distinct OBLIGATIONS — an approvable step and its payable are
+    the same commitment, so summing them would double-count one decision —
+    PLUS the deposits sitting in suspense waiting to be reviewed. It used to
+    count only payments, so money waiting for a person was invisible in the
+    one number the operator uses to decide whether to go and look.
+    """
+    obligations = {x.get("payable_number") for x in c["approvable"]}
+    obligations |= {p["number"] for p in c.get("awaiting_approval") or []}
+    obligations.discard(None)
+    return len(obligations) + len(c.get("inflows_waiting") or [])
+
+
+def tile_text(c: dict) -> dict:
+    """What each Home figure SAYS. The render and the patch share this.
+
+    An action that changes the books updates these figures in place; if it
+    formatted them itself, the page and the server would drift apart the
+    first time a format changed.
+    """
+    m = c["money"]
+    b = c["budget"]
+    bud_ccy = b["currency"]
+    cash = c["cash"] or {}
+    susp = c["suspense"] or {}
+    owed = m.get("refunds_owed") or {}
+
+    def join(d):
+        return " · ".join(money_str(v, k) for k, v in sorted(d.items()))
+
+    floor_txt = money_str(m["reserve_floor_minor"], m["reserve_applies_to"])
+    shorts = dict(m["shortfall"])
+    if shorts:
+        bits = " and ".join(money_str(v, ccy) for ccy, v in sorted(shorts.items()))
+        headline = f"Short by {bits} after promised payments and the {floor_txt} reserve floor"
+    else:
+        headline = (f"{money_str(m['headline_free_minor'], m['headline_currency'])} "
+                    f"after promised payments and the {floor_txt} reserve floor")
+    paid = m.get("paid_today") or []
+    return {
+        "cash": join(cash) or "no cash yet",
+        "promised": join(m["promised"]) or "Nothing owed",
+        "in_flight": join(m["in_flight"]) or "Nothing sent",
+        "free_to_spend": headline,
+        "unmatched": join(susp) or "Nothing waiting",
+        "refunds_owed": join(owed),
+        "paid_today": join(_sum_by_currency(paid)) if paid else "Nothing yet",
+        "auto_pay_limit": money_str(b["auto_pay_limit_minor"], bud_ccy),
+    }
+
+
 def _home(c: dict) -> str:
+    # ONE SOURCE for the tile text: the same function the patch endpoint uses,
+    # so the screen and the server cannot drift apart on the same number.
+    tt = tile_text(c)
     cash = c["cash"] or {}
     b = c["budget"]
     susp = c["suspense"] or {}
 
-    cash_str = (" · ".join(money_str(v, k) for k, v in sorted(cash.items()))
-                or "no cash yet")
+    cash_str = tt["cash"]
 
     cards = []
     m = c["money"]
@@ -750,7 +886,7 @@ def _home(c: dict) -> str:
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["wallet"]}</span>'
         '<div class="x-label">Cash you have</div>'
-        f'<div class="x-fig">{e(cash_str)}</div>'
+        f'<div class="x-fig" data-figure="cash">{e(cash_str)}</div>'
         f'<div class="x-statnote">Ledger balance, per currency. Balanced: '
         f'{"yes" if c["ledger_balanced"] else "no"}.</div>'
         # Expected inflows are a FORECAST and never spendable. Say both, on
@@ -758,17 +894,23 @@ def _home(c: dict) -> str:
         # thinks otherwise will not understand why a payment was deferred.
         f'<div class="x-statnote">Forecast: {e(money_str(b["forecast_minor"], bud_ccy))} '
         f'invoiced and expected, not landed. Not spendable.</div>'
+        f'<details class="x-hist"><summary>What is expected</summary><div>'
+        + ("".join(
+            f'<div>{e(ln.get("number") or "invoice")} · '
+            f'{e(money_str(int(ln.get("usd_minor") or 0), bud_ccy))}</div>'
+            for ln in (b.get("forecast_lines") or []))
+           or "<div>Nothing invoiced and outstanding.</div>")
+        + '</div></details>'
     )))
 
     # 2. What we owe, in the currency that will PAY for it, excluding anything
     # already sent. "GBP 3,200.00", never "3200 GBP" — the project had both
     # shapes on screen at once and they read as different quantities.
-    promised_str = " · ".join(
-        money_str(v, k) for k, v in sorted(m["promised"].items()))
+    promised_str = tt["promised"]
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["shield"]}</span>'
         '<div class="x-label">Promised to suppliers</div>'
-        f'<div class="x-fig">{e(promised_str) if promised_str else "Nothing owed"}</div>'
+        f'<div class="x-fig" data-figure="promised">{e(promised_str) if promised_str else "Nothing owed"}</div>'
         '<div class="x-statnote">Unpaid, not yet sent, costed in the currency '
         'that buys them. A part-payment does not release one.</div>'
     )))
@@ -776,8 +918,7 @@ def _home(c: dict) -> str:
     # 3. Sent but not settled. This money is committed and gone from the
     # spendable balance, so it must be neither dropped nor still called
     # "promised" — counted exactly once, here.
-    inflight_str = " · ".join(
-        money_str(v, k) for k, v in sorted(m["in_flight"].items()))
+    inflight_str = tt["in_flight"]
     n_inflight = len([ln for ln in m["lines"] if ln["where"] == "in_flight"])
     inflight_note = (
         f'{n_inflight} sent to the bank and not settled yet — a sandbox '
@@ -786,7 +927,7 @@ def _home(c: dict) -> str:
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["clock"]}</span>'
         '<div class="x-label">In flight</div>'
-        f'<div class="x-fig">{e(inflight_str) if inflight_str else "Nothing sent"}</div>'
+        f'<div class="x-fig" data-figure="in_flight">{e(inflight_str) if inflight_str else "Nothing sent"}</div>'
         f'<div class="x-statnote">{inflight_note}</div>'
     )))
 
@@ -845,7 +986,7 @@ def _home(c: dict) -> str:
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["bolt"]}</span>'
         '<div class="x-label">Free to spend</div>'
-        f'<div class="x-fig"{head_cls}>{e(headline)}</div>'
+        f'<div class="x-fig"{head_cls} data-figure="free_to_spend">{e(headline)}</div>'
         + unfunded_note
         + f'<details class="x-hist"><summary>Details</summary><div>{work}</div>'
           + ("".join(
@@ -857,11 +998,11 @@ def _home(c: dict) -> str:
     )))
 
     n_unmatched = len(c["unmatched"])
-    susp_str = " · ".join(money_str(v, k) for k, v in sorted(susp.items()))
+    susp_str = tt["unmatched"]
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["in"]}</span>'
         '<div class="x-label">Suspense — not spendable</div>'
-        f'<div class="x-fig">{e(susp_str) if susp_str else "Nothing waiting"}</div>'
+        f'<div class="x-fig" data-figure="unmatched">{e(susp_str) if susp_str else "Nothing waiting"}</div>'
         f'<div class="x-statnote">It is in the bank and it is not in the figure '
         f'above. {n_unmatched} payment'
         f'{"s" if n_unmatched != 1 else ""} waiting on you.</div>'
@@ -870,7 +1011,7 @@ def _home(c: dict) -> str:
     # 5. Money we have decided is owed back. Real cash in the bank, and still not
     # ours to spend — so it comes off the same total, and it is shown separately
     # so the subtraction is visible rather than implied.
-    owed_str = " · ".join(money_str(v, k) for k, v in sorted(owed.items()))
+    owed_str = tt["refunds_owed"]
     if owed_str:
         owed_rows = "".join(
             f'<div>{e(a.get("payer") or "unknown payer")} · '
@@ -882,7 +1023,7 @@ def _home(c: dict) -> str:
         cards.append(_card(span="x-span-3", inner=(
             f'<span class="x-stat-ico">{_I["warn"]}</span>'
             '<div class="x-label">Refunds owed</div>'
-            f'<div class="x-fig">{e(owed_str)}</div>'
+            f'<div class="x-fig" data-figure="refunds_owed">{e(owed_str)}</div>'
             '<div class="x-statnote">Recorded as a liability. No transfer has '
             'been sent, and this money is not spendable.</div>'
             f'<details class="x-hist"><summary>Details</summary>'
@@ -899,11 +1040,19 @@ def _home(c: dict) -> str:
             f'{e(money_str(p["amount_minor"], p["currency"]))}'
             f'{" · " + e(str(p["posted_at"])[:19]) if p.get("posted_at") else ""}</div>'
             for p in paid)
-        paid_body = (f'<div class="x-fig">{len(paid)} settled</div>'
+        # THE AMOUNT, not a count. The label says "Paid today" and a reader
+        # reads a number as money; "2 settled" made them do the addition
+        # themselves, and the addition was the interesting part.
+        paid_total = tt["paid_today"]
+        paid_body = (f'<div class="x-fig" data-figure="paid_today">{e(paid_total)}</div>'
+                     f'<div class="x-statnote">{len(paid)} settled payout'
+                     f'{"s" if len(paid) != 1 else ""} since midnight UTC, from the '
+                     f'ledger. An FX conversion is not here: it moved money '
+                     f'between our own currencies and paid nobody.</div>'
                      f'<details class="x-hist"><summary>Details</summary>'
                      f'<div>{paid_rows}</div></details>')
     else:
-        paid_body = ('<div class="x-fig">Nothing yet</div>'
+        paid_body = ('<div class="x-fig" data-figure="paid_today">Nothing yet</div>'
                      '<div class="x-statnote">Settled payouts appear here once '
                      'the bank confirms them and the books record the outflow.</div>')
     cards.append(_card(span="x-span-3", inner=(
@@ -914,7 +1063,7 @@ def _home(c: dict) -> str:
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["scale"]}</span>'
         '<div class="x-label">Automatic limit</div>'
-        f'<div class="x-fig">{e(money_str(b["auto_pay_limit_minor"], bud_ccy))}</div>'
+        f'<div class="x-fig" data-figure="auto_pay_limit">{e(tt["auto_pay_limit"])}</div>'
         f'<div class="x-statnote">Per payment. Anything over it needs a person. '
         f'Reserve floor {e(floor_txt)}.</div>'
     )))
@@ -925,10 +1074,7 @@ def _home(c: dict) -> str:
     #
     # Counted as distinct OBLIGATIONS: an approvable step and its payable are the
     # same commitment, so summing them would double-count one decision.
-    _ok_obligations = {s.get("payable_number") for s in c["approvable"]}
-    _ok_obligations |= {p["number"] for p in c.get("awaiting_approval") or []}
-    _ok_obligations.discard(None)
-    n_ok = len(_ok_obligations)
+    n_ok = needs_you(c)
     n_prob = len(c["problems"])
     n_wait = len(c.get("waiting") or [])
     if n_ok:
@@ -1447,10 +1593,13 @@ def _money_in(c: dict) -> str:
 
     # The refused-match reason, read from the ledger rather than asserted.
     n_unmatched = len(c["unmatched"])
+    # NO "COMING SOON". Resolving exists and is on the Needs your OK tab;
+    # telling the operator a working feature is unbuilt sends them away from
+    # the screen that would have answered them.
     note = ('<div class="x-note" style="margin-top:16px">'
             f'{_I["info"]}<span>Applying a held payment to an invoice needs a '
-            'person — no endpoint exists for it yet, so this is '
-            '<b>Coming soon</b>.</span></div>')
+            'person — it is on <b>Needs your OK</b>, where you can match it, '
+            'record a refund owed, or release it as income.</span></div>')
     empty_un = ('<p class="x-empty">Nothing is held. Every deposit that landed '
                 'was matched with certainty.</p>')
     side = _card(span="x-span-4", inner=(
@@ -1543,7 +1692,7 @@ def _money_out(c: dict) -> str:
             '<div class="x-sup">'
             f'<div class="x-sup-top"><div>'
             f'<span class="x-label">{e(p["supplier"] or "Supplier")}</span>'
-            f'<div class="x-fig">{e(p["currency"])} {money(p["amount_minor"])}</div>'
+            f'<div class="x-fig">{e(_bill_amount(p))}</div>'
             f'<div class="x-meta"><span class="x-pill">{e(p["payout_method"] or "unknown rail")}</span>'
             f'<span class="x-urg x-urg--{urg_cls}"><i></i>{urg_word}</span>'
             f'<span class="x-mono">{e(p["number"])}</span></div></div>'
@@ -1706,9 +1855,14 @@ def _ok(c: dict) -> str:
             f'<span class="x-pill x-pill--warn">{len(wait)} to review</span>'
             '</div>'
             + "".join(
-                _arrival_row(a, detail=True)
+                # `data-card` marks the UNIT a resolution finishes. Without it
+                # the form vanished and the stale row stayed behind it.
+                '<div class="x-waititem" data-card data-testid="review-item-'
+                + str(a["id"]) + '">'
+                + _arrival_row(a, detail=True)
                 + _resolve_form(a)
                 + _reask_form(a)
+                + '</div>'
                 for a in wait)))
 
     done = [a for a in (c.get("arrivals") or [])
@@ -1885,7 +2039,9 @@ def _ai(c: dict) -> str:
         '<div class="x-cardhead"><div><h3>What the model said, and what the rules did</h3>'
         '<p class="x-help">Straight from <span class="x-mono">agent_trace</span>. '
         'Nothing here is a decision — every row is one the code already made.</p></div>'
-        '<span class="x-pill x-pill--accent">' + str(len(items)) + ' calls</span></div>'
+        '<span class="x-pill x-pill--accent" data-testid="ai-count">'
+        + str(len(items)) + (" call" if len(items) == 1 else " calls")
+        + '</span></div>'
         f'<ul class="x-feed">{body}</ul>'
     )) + _card(inner=(
         '<div class="x-note">' + _I["shield"] +
@@ -1943,6 +2099,24 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
 def _cardhead(title: str, sub: str) -> str:
     return (f'<div class="x-cardhead"><div><h3>{e(title)}</h3>'
             f'<p>{e(sub)}</p></div></div>')
+
+
+def _bill_amount(p: dict) -> str:
+    """`EUR 9,000.00 (USD 10,346.00 at 1.1496)` when a conversion funds it.
+
+    A EUR bill paid from USD is not a EUR obligation — we hold no EUR, so
+    the bill is really "buy EUR 9,000 with USD 10,346". Showing only the EUR
+    figure hid the conversion the plan had already decided to make, and the
+    two screens then quoted different numbers for the same payment.
+    """
+    own = f'{p["currency"]} {money(p["amount_minor"])}'
+    fund_ccy = p.get("funding_currency")
+    fund_minor = int(p.get("funding_amount_minor") or 0)
+    if not fund_ccy or fund_ccy == p["currency"] or fund_minor <= 0:
+        return own
+    rate = fund_minor / p["amount_minor"] if p.get("amount_minor") else 0
+    return (f'{own} ({fund_ccy} {money(fund_minor)} at {rate:.4f} '
+            f'{fund_ccy}/{p["currency"]})')
 
 
 def _live_bill_state(p: dict | None, stored: str) -> tuple[str, str, str]:
@@ -2150,8 +2324,13 @@ def _setup(c: dict) -> str:
                       if p.get("number")}
     pay_rows = []
     for x in ws.get("payables", []):
-        dep = (f'<span class="x-pill x-pill--warn">after {e(x["depends_on"])}</span>'
-               if x["depends_on"] else '<span class="x-hint">none</span>')
+        # FROM THE SAME SOURCE AS THE PLAN REASON. This read the workspace
+        # dump's own column while the plan quoted the planner's answer, so a
+        # bill could show a dependency on one screen and none on the next.
+        live = live_by_number.get(x["number"]) or {}
+        dep_on = live.get("depends_on") or x.get("depends_on") or ""
+        dep = (f'<span class="x-pill x-pill--warn">after {e(dep_on)}</span>'
+               if dep_on else '<span class="x-hint">none</span>')
         label, tone, note = _live_bill_state(live_by_number.get(x["number"]),
                                              x["status"])
         reason = f'<div class="x-hint">{e(note)}</div>' if note else ""
@@ -2208,7 +2387,7 @@ _SUBS = {
     "money-out": "What you owe, and where each payment is.",
     "ok": "Waiting on you — over the limit, or unclear.",
     "ai": "Every model call, and the rule that checked it.",
-    "setup": "Build the workspace Closebook runs on. No sample data.",
+    "setup": "Build the workspace Closebook runs on.",
 }
 
 

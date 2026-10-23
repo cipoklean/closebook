@@ -276,6 +276,13 @@ a { color: inherit; }
 .x-new:hover { filter: brightness(1.06); }
 .x-new:focus-visible { outline: 3px solid rgba(31, 111, 107, 0.45); outline-offset: 2px; }
 .x-tabs { display: none; }
+/* One reviewable item: the row plus its controls, so a resolution can clear
+   the whole unit rather than leaving a stale row behind the form. */
+.x-waititem { display: block; }
+.x-waititem > * + * { margin-top: 12px; }
+.x-waititem:not(:last-child) { border-bottom: 1px solid var(--x-line); padding-bottom: 20px; margin-bottom: 20px; }
+/* A resolution that finished. Calm, not triumphant — it is a receipt. */
+.x-note--done { background: #EDF5F1; border: 1px solid #BFD9CE; color: #1F5B45; padding: 12px 14px; border-radius: 10px; font-size: 14px; font-weight: 500; }
 
 /* ---------- landing ---------- */
 .x-landing { overflow-x: clip; }

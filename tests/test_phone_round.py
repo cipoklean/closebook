@@ -84,8 +84,8 @@ class TestResolveNeverLosesItsWork:
                   {"what": "match", "by": "david", "pin": PIN})
         assert r.status_code == 200, r.text[:200]
         body = r.json()
-        assert body["ok"] and not body["err"], body
-        assert "Matched" in body["ok"]
+        assert body["ok"] is True and not body["err"], body
+        assert body["message"]
 
         # and the work survived the reply
         with session_scope() as s:
@@ -494,4 +494,4 @@ class TestEditingThePinTakesEffectWithoutARestart:
         _deposit(db)
         monkeypatch.setattr(I2, "matcher_from_settings", lambda: (Stub(), ""))
         body = _post(client, "/inflows/1/reask", {}).json()
-        assert "never applies anything" in body["ok"], body
+        assert "never applies anything" in body["message"], body

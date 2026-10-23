@@ -218,8 +218,17 @@ async def dev_transfer_transition(transfer_id: str, request: Request):
                 transfer_id, next_status, failure_type=failure_type)
     except Exception as exc:                       # noqa: BLE001
         log.exception("transition failed for %s", transfer_id)
-        return _back(request, tab="money-out",
-                     err=f"Airwallex refused the transition: {exc}")
+        # A SENTENCE, NOT A BLOB. This used to put Airwallex's raw JSON on the
+        # query string, so the operator read braces and a status code where they
+        # needed to know whether their books had changed.
+        from .domain.plain_words import settle_failure
+
+        sentence, detail = settle_failure(exc)
+        if "application/json" in (request.headers.get("accept") or ""):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(_action_body("money-out", "", sentence,
+                                             detail=detail))
+        return _back(request, tab="money-out", err=sentence)
 
     pre_note = (f"Airwallex already reported {already}, so nothing was asked of "
                 f"it and the existing state was settled instead."
@@ -304,6 +313,29 @@ def state_version() -> dict:
         return {"ok": False, "version": "unreadable"}
     version = "-".join(str(int(v or 0)) for v in row)
     return {"ok": True, "version": version}
+
+
+@app.get("/state/tiles")
+def state_tiles() -> dict:
+    """The Home figures as TEXT, so an action can patch them in place.
+
+    The figures come from `ui.tile_text`, the SAME function the Home render
+    uses. If an action formatted them itself the screen and the server would
+    drift apart the first time a format changed, and the operator would be
+    reading two versions of their own money.
+    """
+    try:
+        from .dashboard import build_context
+        from .ui import needs_you, tile_text
+
+        c = build_context(INCIDENTS)
+        return {"ok": True, "tiles": tile_text(c), "needs_you": needs_you(c),
+                "version": state_version().get("version", "")}
+    except Exception as exc:                       # noqa: BLE001
+        log.exception("could not read tiles")
+        return {"ok": False, "tiles": {},
+                "error": (f"Could not read the figures ({type(exc).__name__}). "
+                          f"Nothing was changed by this request.")}
 
 
 @app.get("/state")
@@ -441,6 +473,45 @@ async def _read_body(request: Request) -> dict:
         return {}
 
 
+def _state_version() -> str:
+    """The same stamp `/state/version` serves, for an action's reply."""
+    try:
+        return state_version().get("version", "")
+    except Exception:
+        return ""
+
+
+def _action_body(tab: str, ok: str, err: str, detail: str = "") -> dict:
+    """THE REPLY EVERY HUMAN ACTION RETURNS. One shape, always.
+
+    `ok` is a BOOLEAN and `message` is the sentence, so a caller can never
+    mistake a sentence for a success flag or the other way round. Before this,
+    the approve route answered with its own object shape that had no `ok` key at
+    all, so the page fell through to its last resort and told the operator
+
+        "The server did not say what happened. Reload to see the books."
+
+    on a click that had SUCCEEDED and whose approval was already recorded. A
+    successful action reported as unknown is worse than a failure reported as
+    one: it invites the operator to do it again.
+
+    `state_version` rides along so the page can tell whether the book moved
+    without asking a second question.
+    """
+    success = bool(ok) and not err
+    return {
+        "tab": tab,
+        "ok": success,
+        "message": ok or err or "",
+        "err": "" if success else (err or ok or ""),
+        # The vendor's own words, kept for the person who has to report the
+        # problem, and rendered behind a toggle rather than shouted on screen.
+        "detail": detail,
+        "state_version": _state_version(),
+        "done": True,
+    }
+
+
 @app.post("/approvals/{step_id}/approve")
 async def approve(step_id: int, request: Request) -> dict:
     """Record a HUMAN approval. Does not move money.
@@ -452,21 +523,31 @@ async def approve(step_id: int, request: Request) -> dict:
     """
     from .domain.approval_api import ApprovalRefused, approve_step
 
+    from .money import money_str
+
     body = await _read_body(request)
     pin = str(body.get("pin") or "")
-    by = str(body.get("approved_by") or "dashboard")
+    by = str(body.get("approved_by") or get_settings().operator_name or "dashboard")
     # A missing SecretStr is not an empty one; treat both as "closed".
     _pin_field = get_settings().demo_approver_pin
     configured = (_pin_field.get_secret_value()
                    if _pin_field is not None else "")
     if not configured:
-        return {"detail": "DEMO_APPROVER_PIN is not configured — the approval "
-                          "endpoint is closed rather than open."}
+        return _action_body("ok", "", "The approval PIN is not configured, so "
+                                      "this endpoint is closed rather than open.")
     try:
-        return approve_step(_database(), step_id, pin=pin, approved_by=by,
-                            configured_pin=configured)
+        res = approve_step(_database(), step_id, pin=pin, approved_by=by,
+                           configured_pin=configured)
     except ApprovalRefused as exc:
-        return {"detail": str(exc)}
+        return _action_body("ok", "", str(exc))
+    amount = money_str(int(res.get("amount_minor") or 0),
+                       str(res.get("currency") or "USD"))
+    who = res.get("counterparty") or "the supplier"
+    return _action_body(
+        "ok",
+        f"Approved {amount} to {who}. The decision is recorded — the payment "
+        f"still has to pass the executor's own checks before anything moves.",
+        "")
 
 
 @app.post("/approvals/{step_id}/reject")
@@ -475,20 +556,24 @@ async def reject(step_id: int, request: Request) -> dict:
 
     body = await _read_body(request)
     pin = str(body.get("pin") or "")
-    by = str(body.get("rejected_by") or "dashboard")
+    by = str(body.get("rejected_by") or get_settings().operator_name or "dashboard")
     reason = str(body.get("reason") or "")
     # A missing SecretStr is not an empty one; treat both as "closed".
     _pin_field = get_settings().demo_approver_pin
     configured = (_pin_field.get_secret_value()
                    if _pin_field is not None else "")
     if not configured:
-        return {"detail": "DEMO_APPROVER_PIN is not configured — the rejection "
-                          "endpoint is closed rather than open."}
+        return _action_body("ok", "", "The approval PIN is not configured, so "
+                                      "this endpoint is closed rather than open.")
     try:
-        return reject_step(_database(), step_id, pin=pin, rejected_by=by,
-                           reason=reason, configured_pin=configured)
+        res = reject_step(_database(), step_id, pin=pin, rejected_by=by,
+                          reason=reason, configured_pin=configured)
     except ApprovalRefused as exc:
-        return {"detail": str(exc)}
+        return _action_body("ok", "", str(exc))
+    return _action_body(
+        "ok",
+        "Rejected. Nothing was sent, and the payment will not be re-planned on "
+        "its own — it needs a fresh decision.", "")
 
 
 @app.post(_settings.webhook_path)
@@ -871,7 +956,7 @@ async def money_in_simulate(request: Request):
     try:
         from .airwallex.client import AirwallexClient
         client = AirwallexClient()
-        accts = accounts_cached(_database())
+        accts = accounts_cached(_database(), blocking=True)
         account = next((a for a in accts if a["id"] == chosen), None) if chosen else None
         if account is None:
             # No account chosen: pick the first ACTIVE one for the asked currency.
@@ -999,7 +1084,7 @@ def _back(request: Request, tab: str = "setup", ok: str = "", err: str = ""):
     from fastapi.responses import JSONResponse, RedirectResponse
 
     if "application/json" in (request.headers.get("accept") or ""):
-        return JSONResponse({"tab": tab, "ok": ok, "err": err, "done": True})
+        return JSONResponse(_action_body(tab, ok, err))
     q = {"tab": tab}
     if ok:
         q["ok"] = ok
@@ -1189,7 +1274,8 @@ def landing() -> str:
 
 
 @app.get("/app", response_class=HTMLResponse)
-def app_page(tab: str = "home", ok: str = "", err: str = "") -> str:
+def app_page(background: BackgroundTasks, tab: str = "home",
+             ok: str = "", err: str = "") -> str:
     """The operator app. Everything on it was decided by the deterministic layer
     before this function ran — the page only presents.
 
@@ -1231,6 +1317,25 @@ def app_page(tab: str = "home", ok: str = "", err: str = "") -> str:
         ctx["flash_err"] = err
     health = healthz()
     ctx["sandbox_ready"] = bool(health.get("sandbox_ready"))
+
+    # THE PAGE NEVER WAITS ON AIRWALLEX. The render above read cached transfer
+    # statuses; anything stale is refreshed AFTER this response has gone out, so
+    # a slow or dead sandbox costs a slightly old label, never a slow page. This
+    # is the whole of the 3.1-second render.
+    try:
+        from .dashboard import refresh_live_statuses, stale_live_status_ids
+        with _database().session() as s:
+            stale = stale_live_status_ids(s)
+        if stale:
+            background.add_task(refresh_live_statuses, stale)
+        # The global-account list is fetched the same way and for the same
+        # reason: it is what made a COLD first render wait on a token fetch.
+        from .domain.intake import accounts_stale, refresh_accounts
+        if accounts_stale():
+            background.add_task(refresh_accounts, _database())
+    except Exception:
+        log.warning("could not schedule the live-status refresh")
+
     return render_app(ctx, tab=tab, health=health)
 
 

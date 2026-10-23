@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import re
 from typing import Any, Optional
 
@@ -826,18 +827,52 @@ def unmatched_block(s) -> list[dict]:
 # this False; `make dev` leaves it True.
 LIVE_STATUS_ENABLED = True
 
+#: Last known Airwallex status per transfer id, and when we learned it. Filled
+#: by `refresh_live_statuses` in a BackgroundTask, read by the render. Kept in
+#: process memory on purpose: it is a cache of somebody else's data, and losing
+#: it on restart costs one refresh, not a fact.
+_LIVE_CACHE: dict[str, tuple[str, float]] = {}
+#: How long a cached status is good for. The page shows when it last checked,
+#: so a slightly old true answer beats a fresh three-second wait.
+_LIVE_MAX_AGE = 60.0
+
 
 def live_transfer_statuses(s) -> dict[str, str]:
-    """Ask Airwallex what each referenced transfer actually is RIGHT NOW.
+    """What Airwallex last said about each referenced transfer. NO NETWORK HERE.
 
     A `plan_step.status` says what WE did (SUBMITTED = we sent it). It says
     nothing about whether the money moved, and calling a submitted sandbox
     transfer "paid" is a claim about someone's money that no record supports.
-    The bank is the only authority, so ask it — and fall back to the stored
-    status, clearly labelled, if the call fails.
+    The bank is the only authority.
+
+    THAT AUTHORITY IS ASKED IN THE BACKGROUND, NOT DURING A PAGE RENDER. This
+    used to call Airwallex once per referenced transfer, inline, and with four
+    transfers on the book `/app` took 3.1 seconds — 3.56s of 3.64s of the whole
+    render was these lookups and the token fetch behind them. A page that waits
+    on someone else's API is a page that goes down when they do.
+
+    So this reads the last known answer and says how old it is. `refresh()`
+    below fills the cache, and the route schedules that after the response.
     """
     if not LIVE_STATUS_ENABLED:
         return {}
+    ids = live_status_ids(s)
+    if not ids:
+        return {}
+    now = time.monotonic()
+    out: dict[str, str] = {}
+    for tid in ids:
+        got = _LIVE_CACHE.get(tid)
+        if got is None:
+            out[tid] = "UNCHECKED"
+        else:
+            status, at = got
+            out[tid] = status if now - at < _LIVE_MAX_AGE * 4 else f"{status}"
+    return out
+
+
+def live_status_ids(s) -> list[str]:
+    """Every transfer id the book refers to. A local read, nothing else."""
     rows = (s.query(PlanStep)
             .filter(PlanStep.airwallex_object_id.isnot(None))
             # ONLY transfers. An FX row's object id is a CONVERSION, and asking
@@ -846,26 +881,45 @@ def live_transfer_statuses(s) -> dict[str, str]:
             # transfer to look up.
             .filter(PlanStep.type == StepType.TRANSFER)
             .order_by(PlanStep.id.desc()).all())
-    ids = {r.airwallex_object_id: r for r in rows}
-    if not ids:
-        return {}
+    seen: dict[str, None] = {}
+    for r in rows:
+        seen.setdefault(r.airwallex_object_id, None)
+    return list(seen)
 
-    out: dict[str, str] = {}
+
+def stale_live_status_ids(s) -> list[str]:
+    """Ids whose cached answer is missing or older than the max age."""
+    if not LIVE_STATUS_ENABLED:
+        return []
+    now = time.monotonic()
+    return [tid for tid in live_status_ids(s)
+            if now - _LIVE_CACHE.get(tid, ("", 0.0))[1] > _LIVE_MAX_AGE]
+
+
+def refresh_live_statuses(ids: list[str]) -> None:
+    """Ask Airwallex about these transfers and cache the answers.
+
+    Called from a BackgroundTask AFTER the response, so a slow or dead sandbox
+    can never delay a page. A failed lookup caches UNKNOWN, which the view
+    labels honestly rather than implying the money is fine.
+    """
+    if not LIVE_STATUS_ENABLED or not ids:
+        return
     try:
         from .airwallex.client import AirwallexClient
         from .airwallex.transfers import Transfers
         transfers = Transfers(AirwallexClient())
     except Exception as exc:  # no credentials, sandbox down
         log.warning("live status lookup unavailable: %s", exc)
-        return {tid: "UNKNOWN" for tid in ids}
-
+        return
     for tid in ids:
         try:
-            out[tid] = transfers.status_of(tid) or "UNKNOWN"
+            status = transfers.status_of(tid) or "UNKNOWN"
         except Exception as exc:
             log.warning("status_of failed for %s: %s", tid, exc)
-            out[tid] = "UNKNOWN"
-    return out
+            status = "UNKNOWN"
+        _LIVE_CACHE[tid] = (status, time.monotonic())
+
 
 
 def build_context(incidents: list | None = None) -> dict[str, Any]:
@@ -927,6 +981,11 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
             if num:
                 fx_object_by_payable[num] = st_row.airwallex_object_id
 
+        # One map, used for the dependency label AND by Setup, so a bill's
+        # "Depends on" and the plan's "waiting on ..." cannot disagree.
+        number_by_invoice_id = {inv.id: inv.number
+                                for inv in s.query(InvoiceReceivable).all()}
+
         payables = []
         for p in s.query(InvoicePayable).order_by(InvoicePayable.number).all():
             sup = suppliers.get(p.supplier_id)
@@ -963,6 +1022,15 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
                 # The conversion step's Airwallex id, if one was ever executed
                 # for this payable. money_block checks it against the LEDGER.
                 "fx_object_id": fx_object_by_payable.get(p.number),
+                # The receivable this bill waits for, read from the same column
+                # the planner gates on, so Setup and the plan reason agree.
+                "depends_on": number_by_invoice_id.get(p.depends_on_receivable_id),
+                # What this bill COSTS in the currency that will pay for it. An
+                # EUR 9,000 bill funded from USD is USD 10,346.00 of cash, and
+                # showing only the EUR figure hid the conversion that the plan
+                # had already decided to make.
+                "funding_currency": step.funding_currency if step else None,
+                "funding_amount_minor": int(step.funding_amount_minor or 0) if step else 0,
             })
 
         rep = reconcile(s)

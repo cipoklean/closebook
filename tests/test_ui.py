@@ -1233,6 +1233,21 @@ class TestStateAgreement:
 
 
 # ------------------------------------------------------------ approve form
+@pytest.fixture
+def fresh_db():
+    """An isolated book for the approval tests.
+
+    They all post to step 1, and the FIRST one genuinely approves it — so
+    without a reset the next test's approval is correctly refused as a
+    duplicate, and the test reads a refusal as a wiring failure.
+    """
+    from app.db import reset_default_db
+
+    reset_default_db()
+    yield
+    reset_default_db()
+
+
 def _pending_step(db, payable="PO-7001"):
     """A real approvable step: PROPOSED, no object id, names an amount."""
     _write_step(db, payable=payable, amount=900000,
@@ -1248,8 +1263,13 @@ def _pin(monkeypatch, value="1234"):
     """
     from pydantic import SecretStr
     from app.config import Settings
-    monkeypatch.setattr("app.main._settings",
-                        Settings.model_construct(
+
+    # THE READER, not the snapshot. The routes read `get_settings()` at CALL
+    # time so that editing .env takes effect without a restart; patching
+    # `_settings` therefore stopped controlling anything, and these tests were
+    # silently comparing against the real .env PIN and passing on a refusal.
+    monkeypatch.setattr("app.main.get_settings",
+                        lambda: Settings.model_construct(
                             demo_approver_pin=SecretStr(value)))
 
 
@@ -1270,32 +1290,43 @@ class TestApproveWiring:
                           "/apply-inflow", "/match-invoice"):
             assert forbidden not in html
 
-    def test_unimplemented_action_is_coming_soon(self):
-        assert "Coming soon" in render_app(_ctx(), tab="money-in")
+    def test_no_screen_claims_a_working_feature_is_unbuilt(self):
+        """It said "Coming soon — no endpoint exists for it yet" for resolving a
+        held payment, which DOES exist and is on Needs your OK. Telling the
+        operator a working feature is missing sends them away from the screen
+        that would have answered them."""
+        html = render_app(_ctx(), tab="money-in")
+        assert "Coming soon" not in html
+        assert "Needs your OK" in html
 
-    def test_approve_accepts_a_form_post(self, db, monkeypatch):
+    def test_approve_accepts_a_form_post(self, fresh_db, db, monkeypatch):
         _pending_step(db)
         _pin(monkeypatch)
         r = _client().post("/approvals/1/approve",
                            data={"pin": "1234", "approved_by": "test"})
         assert r.status_code == 200
-        assert "error" not in r.json()
+        assert r.json()["ok"] is True, r.json()
+        assert r.json()["message"]
 
-    def test_wrong_pin_is_refused_with_a_readable_reason(self, db, monkeypatch):
+    def test_wrong_pin_is_refused_with_a_readable_reason(self, fresh_db, db, monkeypatch):
         _pending_step(db)
         _pin(monkeypatch)
         body = _client().post("/approvals/1/approve",
                               data={"pin": "0000"}).json()
-        assert body.get("detail")
+        # ONE shape for every human action: `ok` is a BOOLEAN and `message` is
+        # the sentence. Reading a sentence where a flag belongs is what made a
+        # SUCCESSFUL approval report "the server did not say what happened".
+        assert body["ok"] is False
+        assert body["err"]
 
-    def test_reject_accepts_a_form_post(self, db, monkeypatch):
+    def test_reject_accepts_a_form_post(self, fresh_db, db, monkeypatch):
         _pending_step(db)
         _pin(monkeypatch)
         r = _client().post("/approvals/1/reject",
                            data={"pin": "1234", "reason": "not now"})
         assert r.status_code == 200
 
-    def test_closed_without_a_configured_pin(self, db, monkeypatch):
+    def test_closed_without_a_configured_pin(self, fresh_db, db, monkeypatch):
         from app.config import Settings
         _pending_step(db)
         # The gate reads get_settings() at call time now, not the snapshot
@@ -1305,7 +1336,8 @@ class TestApproveWiring:
                                 demo_approver_pin=None))
         body = _client().post("/approvals/1/approve",
                               data={"pin": "1234"}).json()
-        assert "not configured" in (body.get("detail") or "")
+        assert body["ok"] is False
+        assert "not configured" in body["err"]
 
 
 # ------------------------------------------------------------- formatting
