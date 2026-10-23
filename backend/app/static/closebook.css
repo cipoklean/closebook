@@ -532,3 +532,31 @@ a { color: inherit; }
   .x-fig { font-size: 21px; }
   .x-card { padding: 16px; }
 }
+
+/* ---------- landing, pass 2 -------------------------------------------------
+   The page was cut down to hero + How it works + Safety + one live proof. These
+   are the pieces the slimmer page needs; the grids and chips it used to carry
+   (pills, problems, what-it-does, audience, the decorative figures) are gone
+   with their rules. */
+.x-l-cta { margin-left: auto; }
+.x-l-hero-cta { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 28px; }
+.x-l-num { font-size: 13px; font-weight: 600; letter-spacing: 0.14em; color: var(--x-accent, #1f6f6b); }
+.x-l-h3 { font-size: 19px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+.x-l-card p { color: var(--x-muted); font-size: 15px; line-height: 1.55; }
+
+/* The ONE proof, and it is counted from the running book. */
+.x-l-proof { max-width: 60rem; }
+.x-l-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 20px; }
+.x-l-stats > div { background: #F7F8FA; border: 1px solid var(--x-line); border-radius: 14px; padding: 18px 20px; }
+.x-l-stat { display: block; font-size: 30px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; }
+.x-l-stats small { display: block; margin-top: 6px; color: var(--x-muted); font-size: 13px; line-height: 1.4; }
+.x-l-proofnote { margin-top: 18px; color: var(--x-muted); font-size: 14px; }
+
+.x-l-foot { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; justify-content: space-between; padding: 48px 48px 72px; border-top: 1px solid var(--x-line); margin-top: 8px; }
+.x-l-fine { color: var(--x-muted); font-size: 13px; margin: 8px 0 0; }
+
+@media (max-width: 700px) {
+  .x-l-cta { margin-left: 0; }
+  .x-l-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .x-l-foot { padding: 36px 20px 64px; }
+}

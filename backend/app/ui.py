@@ -70,6 +70,28 @@ def _sum_by_currency(rows) -> dict:
     return {k: v for k, v in out.items() if k}
 
 
+def _shown(text) -> str:
+    """What a stored trace or rules line may SHOW. See plain_words.render."""
+    from .domain.plain_words import render
+
+    return render(text)[0]
+
+
+def _raw_of(text) -> str:
+    """The machine's own words from a stored line, or "" when it is prose."""
+    from .domain.plain_words import render
+
+    return render(text)[1]
+
+
+def _detail_toggle(raw: str, what: str = "Detail") -> str:
+    """The raw text, folded away. Rendered only when there IS raw text."""
+    if not raw:
+        return ""
+    return (f'<details class="x-hist"><summary>{e(what)}</summary>'
+            f'<pre class="x-raw">{e(raw)}</pre></details>')
+
+
 def _flag(cond, cls) -> str:
     return f" {cls}" if cond else ""
 
@@ -421,10 +443,46 @@ def _shell(inner: str, *, app: bool, title: str) -> str:
 
 
 # ------------------------------------------------------- landing page
-def render_landing() -> str:
-    """Static marketing page. Illustrative copy only — no live figures."""
+def landing_proof(stats: dict | None) -> dict:
+    """Real figures for the landing page's one live proof.
+
+    THE PAGE USED TO INVENT ITS EVIDENCE: a glowing quote from "Kano Craft
+    Imports", a decorative "0.96", a "9,012.85 EUR Processing" chip. None of it
+    was a fact about anything, and a reader who checked would find nothing
+    behind any of it. A proof is only a proof if it comes from the running book.
+
+    Everything here is counted from the same tables the app renders, and it is
+    honest about being empty: a fresh workspace says so rather than showing a
+    zero dressed up as a result.
+    """
+    s = dict(stats or {})
+    deposits = int(s.get("deposits") or 0)
+    by_rules = int(s.get("by_rules") or 0)
+    by_model = int(s.get("by_model") or 0)
+    return {
+        "deposits": deposits,
+        "by_rules": by_rules,
+        "by_model": by_model,
+        "invoices": int(s.get("invoices") or 0),
+        "bills": int(s.get("bills") or 0),
+        "balanced": bool(s.get("balanced")),
+        "empty": deposits == 0,
+        "ledger_rows": int(s.get("ledger_rows") or 0),
+    }
+
+
+def render_landing(stats: dict | None = None) -> str:
+    """The marketing page. Short on purpose, and honest about its evidence.
+
+    CUT DOWN. It carried six sections of tile grids — a problem list, a
+    what-it-does grid, an audience grid, a testimonial and decorative figures —
+    and the useful parts (how it works, safety, one real proof) were buried
+    between them. A page that says one true thing four times is worse than one
+    that says it once.
+    """
     L: list[str] = []
     a = L.append
+    pr = landing_proof(stats)
 
     a('''<header class="x-l-nav">
   <div class="x-l-wrap">
@@ -435,319 +493,144 @@ def render_landing() -> str:
     <div class="x-l-links">
       <a href="/#how" data-testid="how-it-works">How it works</a>
       <a href="/#safety" data-testid="safety">Safety</a>
-      <a href="/#who" data-testid="who-its-for">Who it's for</a>
+    </div>
+    <div class="x-l-cta">
       <a href="/app" class="x-btn x-btn--pill x-btn--primary"
          data-testid="launch-app">Launch app</a>
     </div>
   </div>
 </header>''')
 
-    # hero
+    # ---- hero ------------------------------------------------------------
     a('''<section class="x-l-wrap"><div class="x-l-hero">
-  <div>
-    <h1>Your books close<br><span>while the money moves.</span></h1>
-    <p class="x-l-sub">Closebook keeps up with every deposit that lands. It matches the
-      payment to the right invoice, checks your cash against the floor you set, releases
-      what is safe to pay, and puts anything unclear in front of a person — with the
-      reason, not a shrug.</p>
-    <div class="x-actions">
-      <a href="/#how" class="x-btn x-btn--pill x-btn--lg">See how it works</a>
-    </div>
-    <div class="x-l-trust">
-      <span>''' + _I["check"] + '''No blind retries</span>
-      <span>''' + _I["check"] + '''Every move explained</span>
-      <span>''' + _I["check"] + '''Humans approve money</span>
-    </div>
-  </div>
-  <div>
-    <div class="x-card x-feature">
-      <div class="x-feature-head">
-        <span class="x-banner-ico">''' + _I["in"] + '''</span>
-        <div>
-          <h3>An invoice, paid</h3>
-          <p class="x-help">The reference has a typo. Closebook still finds it.</p>
-        </div>
-      </div>
-      <div class="x-arrived">
-        <span class="x-fig">12,000.00</span><span>USD</span>
-        <span class="x-pill x-pill--good">''' + _I["check"] + '''Matched</span>
-      </div>
-      <div class="x-cols">
-        <div class="x-col x-col--ai">
-          <div class="x-col-h">''' + _I["ai"] + '''Reads the paperwork</div>
-          <ul>
-            <li>''' + _I["check"] + '''Reference "inv 0O41" is invoice INV-0041</li>
-            <li>''' + _I["check"] + '''Payer "Brightline Retail" matches the customer</li>
-            <li>''' + _I["check"] + '''Amount matches the open balance</li>
-          </ul>
-        </div>
-        <div class="x-col x-col--rules">
-          <div class="x-col-h">''' + _I["scale"] + '''Checks every number</div>
-          <ul>
-            <li>''' + _I["check"] + '''Allocation equals the amount that arrived</li>
-            <li>''' + _I["check"] + '''Invoice is really open</li>
-            <li>''' + _I["check"] + '''Same currency, no conversions invented</li>
-          </ul>
-        </div>
-      </div>
-      <div class="x-sure">
-        <div class="x-bar x-bar--done"><span style="width:96%"></span></div>
-        <b>0.96</b>
-      </div>
-    </div>
+  <div class="x-l-eyebrow">Real-time books for a cross-border business</div>
+  <h1 class="x-l-h1">Every deposit matched.<br><em>Every payment checked.</em></h1>
+  <p class="x-l-sub">Closebook keeps up with the money that lands, and decides what
+  it can safely do with it. The model reads the messy parts. The rules hold the
+  amounts, the limits and the reserve floor.</p>
+  <div class="x-l-hero-cta">
+    <a href="/app" class="x-btn x-btn--primary x-btn--pill x-btn--lg"
+       data-testid="launch-app-hero">Launch app</a>
+    <a href="/#how" class="x-btn x-btn--pill">See how it decides</a>
   </div>
 </div></section>''')
 
-    # problems
-    a('''<section class="x-l-sec"><div class="x-l-wrap">
-  <div class="x-l-head">
-    <div class="x-l-eyebrow">The problem</div>
-    <h2 class="x-l-h2">Three things go wrong every time money crosses a border.</h2>
-  </div>
-  <div class="x-l-grid x-l-grid--3">
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-warn">''' + _I["warn"] + '''</span>
-      <h3>You can't see the balance that matters</h3>
-      <p>Your bank shows every currency at once. It does not show what you have already
-        promised to pay, so the same money gets spent twice.</p>
-    </div>
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-bad">''' + _I["x"] + '''</span>
-      <h3>Payments arrive looking like nothing</h3>
-      <p>"L. Stores. No reference." Four words and an amount. Someone has to work out
-        which invoice it belongs to, and a guess becomes the record.</p>
-    </div>
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-info">''' + _I["clock"] + '''</span>
-      <h3>A failed transfer looks like a paid one</h3>
-      <p>The webhook says failed, the bank says processing, and the fix is a second
-        payment for a supplier who was already paid.</p>
-    </div>
-  </div>
-</div></section>''')
-
-    # how it works
+    # ---- how it works ----------------------------------------------------
     a('''<section class="x-l-sec x-l-sec--white" id="how"><div class="x-l-wrap">
   <div class="x-l-head">
     <div class="x-l-eyebrow">How it works</div>
     <h2 class="x-l-h2">The model reads. The rules decide.</h2>
-    <p>Closebook never lets a model's word be the record. A model proposes, and
-      deterministic code checks every number before anything is written down.</p>
   </div>
-  <div class="x-l-grid x-l-grid--4">
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-info">''' + _I["in"] + '''</span>
-      <h3>1. Money lands</h3>
-      <p>A deposit, a payout, a card swipe. Whatever arrives first, Closebook reacts
-        while it is still relevant.</p>
-    </div>
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-info">''' + _I["doc"] + '''</span>
-      <h3>2. The model proposes</h3>
-      <p>For anything untidy — a typo, a nickname, a blank reference — a model suggests
-        what the money probably is. That is all it does.</p>
-    </div>
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-warn">''' + _I["scale"] + '''</span>
-      <h3>3. The rules check it</h3>
-      <p>Code re-derives the allocation, confirms the invoice is open, and refuses
-        anything it cannot prove. A wrong guess never becomes the record.</p>
-    </div>
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-good">''' + _I["bolt"] + '''</span>
-      <h3>4. Money moves, or waits</h3>
-      <p>Clear cases pay themselves within your limits. Everything else waits, with a
-        one-line reason a person can act on.</p>
-    </div>
-  </div>
+  <div class="x-l-grid x-l-grid--3">''')
+    for n, title, body in (
+        ("01", "It reads the reference",
+         "A deposit arrives with whatever the payer typed — a name, a fragment "
+         "of an invoice number, a typo. The matcher tries the exact reading "
+         "first, then a rule, then the model. Every proposal the model makes is "
+         "re-checked in code before it can change anything."),
+        ("02", "It decides what the money may do",
+         "Matching an invoice is not permission to spend. Closebook holds a "
+         "reserve floor, an automatic payment limit and a committed-cash "
+         "position, and a payment that would breach any of them is deferred "
+         "with the reason rather than quietly trimmed."),
+        ("03", "It asks a person when unsure",
+         "Anything below the confidence band is proposed, never applied. "
+         "Overpayments, part-payments and unclear references go to a human with "
+         "the evidence attached — and nothing a person has not approved can "
+         "move."),
+    ):
+        a(f'''    <div class="x-l-card">
+      <div class="x-l-num">{n}</div>
+      <h3 class="x-l-h3">{title}</h3>
+      <p>{body}</p>
+    </div>''')
+    a('''  </div>
 </div></section>''')
 
-    # safety
+    # ---- safety ----------------------------------------------------------
     a('''<section class="x-l-sec" id="safety"><div class="x-l-wrap">
   <div class="x-l-head">
     <div class="x-l-eyebrow">Safety</div>
     <h2 class="x-l-h2">Four ways a wrong move is impossible.</h2>
   </div>
-  <div class="x-l-grid x-l-grid--4" style="margin-bottom:48px">
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-good">''' + _I["shield"] + '''</span>
-      <h3>Nothing pays itself twice</h3>
-      <p>Every payment carries an identity before it is sent. If the process dies
-        mid-payment, the next run finds the original and stops.</p>
-    </div>
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-good">''' + _I["lock"] + '''</span>
-      <h3>Terms are locked at approval</h3>
-      <p>A human approves a hash of the exact amount, currency, supplier and rate.
-        Change any of them and the approval stops being valid.</p>
-    </div>
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-good">''' + _I["scale"] + '''</span>
-      <h3>No money without a reserve</h3>
-      <p>Payments that would breach the floor you set are deferred in full — never
-        quietly trimmed to fit.</p>
-    </div>
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-good">''' + _I["users"] + '''</span>
-      <h3>People approve money, not software</h3>
-      <p>Anything over your limit, or unclear, waits for a person. Approving records a
-        decision — it does not itself move a cent.</p>
-    </div>
-  </div>
+  <div class="x-l-grid x-l-grid--4">''')
+    for title, body in (
+        ("Amounts are integers",
+         "Money is held in minor units end to end, so a rounding error cannot "
+         "become a payment that is a penny out."),
+        ("Nothing is sent twice",
+         "Every payment carries a reference recorded before it leaves. A crash "
+         "mid-submission is resolved by looking the payment up, never by "
+         "sending it again."),
+        ("Approvals bind the terms",
+         "An approval covers the amount, the currency, the supplier and the "
+         "rate — all hashed. Change any one of them and the approval is void."),
+        ("Nothing moves itself",
+         "A model can propose. Only one module in the codebase is permitted to "
+         "move money, and it re-checks every rule on the way out."),
+    ):
+        a(f'''    <div class="x-l-card">
+      <h3 class="x-l-h3">{title}</h3>
+      <p>{body}</p>
+    </div>''')
+    a('''  </div>
   <div class="x-l-safe">
     <div class="x-l-prose">
-      <h2 class="x-l-h2">A "failed" webhook is a claim, not a fact.</h2>
-      <p>Closebook treats a failure notice as a rumour. Before doing anything, it looks
-        the payment up directly and reads the real status.</p>
-      <p><b>Still processing?</b> It waits and does nothing. Creating a replacement
-        payment now would pay a supplier twice.</p>
-      <p><b>Actually failed?</b> It classifies why — bad beneficiary, not enough money,
-        compliance hold — and says so.</p>
-      <p><b>Not sure?</b> It escalates to a human with what it knows and what it
-        checked, rather than guessing.</p>
-    </div>
-    <div>
-      <div class="x-arrived">
-        <span class="x-fig">9,012.85</span><span>EUR</span>
-        <span class="x-pill x-pill--warn">''' + _I["clock"] + '''Processing</span>
-      </div>
-      <div class="x-card x-l-card" style="margin-top:16px">
-        <h3>What Closebook checked</h3>
-        <ul class="x-todo" style="margin-top:12px">
-          <li><span class="x-todo-ico is-good">''' + _I["check"] + '''</span>
-            <div><b>Webhook said failed</b>
-            <p>Heard. Not yet acted on.</p></div>
-            <span class="x-pill x-pill--warn">unverified</span></li>
-          <li><span class="x-todo-ico is-info">''' + _I["doc"] + '''</span>
-            <div><b>Looked the transfer up</b>
-            <p>Status is still PROCESSING at the bank.</p></div>
-            <span class="x-pill x-pill--info">checked</span></li>
-          <li><span class="x-todo-ico is-warn">''' + _I["warn"] + '''</span>
-            <div><b>Waiting — nothing created</b>
-            <p>No replacement payment. No new approval.</p></div>
-            <span class="x-pill x-pill--warn">in flight</span></li>
-        </ul>
-      </div>
+      <h2 class="x-l-h2">A &ldquo;failed&rdquo; webhook is a claim, not a fact.</h2>
+      <p>When a bank says a transfer failed, Closebook does not act on the
+      message. It goes and looks at the transfer first. A failure notice for a
+      payment that is still in flight means <em>watch it</em>, not
+      <em>send it again</em> — and a replacement is treated as a new payment
+      with a new approval, because that is what it is.</p>
     </div>
   </div>
 </div></section>''')
 
-    # features
-    a('''<section class="x-l-sec x-l-sec--white"><div class="x-l-wrap">
+    # ---- the one live proof ---------------------------------------------
+    if pr["empty"]:
+        proof_body = ('<p class="x-l-proofnote">This workspace is empty, so there '
+                      'is nothing to show yet. Launch the app and build it — the '
+                      'figures here come from the same tables the app renders, '
+                      'not from a fixture.</p>')
+    else:
+        proof_body = f'''<div class="x-l-stats">
+      <div><span class="x-l-stat">{pr["deposits"]}</span>
+        <small>deposit{"s" if pr["deposits"] != 1 else ""} recorded</small></div>
+      <div><span class="x-l-stat">{pr["by_rules"]}</span>
+        <small>settled by a rule alone</small></div>
+      <div><span class="x-l-stat">{pr["by_model"]}</span>
+        <small>read by the model, then re-checked</small></div>
+      <div><span class="x-l-stat">{pr["invoices"]}</span>
+        <small>invoice{"s" if pr["invoices"] != 1 else ""}</small></div>
+      <div><span class="x-l-stat">{"yes" if pr["balanced"] else "no"}</span>
+        <small>ledger balanced</small></div>
+    </div>
+    <p class="x-l-proofnote">Counted from this instance&rsquo;s own book just now
+    — {pr["ledger_rows"]} ledger posting{"s" if pr["ledger_rows"] != 1 else ""}
+    behind it. Nothing here is a sample.</p>'''
+    a(f'''<section class="x-l-sec x-l-sec--white"><div class="x-l-wrap">
   <div class="x-l-head">
-    <div class="x-l-eyebrow">What it does</div>
-    <h2 class="x-l-h2">The daily work of a cross-border business.</h2>
+    <div class="x-l-eyebrow">Live from this book</div>
+    <h2 class="x-l-h2">What the app has actually done.</h2>
   </div>
-  <div class="x-l-grid x-l-grid--5">
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-info">''' + _I["in"] + '''</span>
-      <h3>Matches money in</h3>
-      <p>Exact references, then rules, then a model — and code re-checks every
-        proposal before it counts.</p>
-    </div>
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-good">''' + _I["wallet"] + '''</span>
-      <h3>Watches the floor</h3>
-      <p>Committed cash against a reserve you set. Payments that would breach it are
-        deferred, never quietly trimmed.</p>
-    </div>
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-info">''' + _I["refund"] + '''</span>
-      <h3>Converts only what it needs</h3>
-      <p>Converts the exact amount a payment needs, with headroom for a small rate
-        move — no speculative conversions.</p>
-    </div>
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-warn">''' + _I["warn"] + '''</span>
-      <h3>Escalates honestly</h3>
-      <p>When it does not know, it says so and tells you exactly what would settle it.</p>
-    </div>
-    <div class="x-card x-l-card">
-      <span class="x-todo-ico is-good">''' + _I["doc"] + '''</span>
-      <h3>Explains every move</h3>
-      <p>Each decision carries its reason, the evidence it used, and the code that
-        made the call.</p>
-    </div>
-  </div>
+  <div class="x-l-proof">{proof_body}</div>
 </div></section>''')
 
-    # who it's for
-    a('''<section class="x-l-sec" id="who"><div class="x-l-wrap">
-  <div class="x-l-head">
-    <div class="x-l-eyebrow">Who it's for</div>
-    <h2 class="x-l-h2">If money arrives and leaves in different currencies, this is yours.</h2>
+    # ---- footer ----------------------------------------------------------
+    a('''<footer class="x-l-wrap x-l-foot">
+  <div>
+    <div class="x-word"><span class="x-logo">'''
+      '''<svg class="x-ico x-ico--s" viewBox="0 0 24 24" aria-hidden="true">'''
+      '''<path d="M6.5 3.5h11a1.5 1.5 0 0 1 1.5 1.5v14.5A1.5 1.5 0 0 1 17.5 21h-11A1.5 1.5 0 0 1 5 19.5V5a1.5 1.5 0 0 1 1.5-1.5z"/>'''
+      '''<path d="M9 8h6M9 12h6M9 16h3"/></svg></span>Closebook</div>
+    <p class="x-l-fine">Runs against the Airwallex sandbox. No real money moves.</p>
   </div>
-  <div class="x-l-who">
-    <div class="x-card x-l-persona">
-      <div class="x-l-persona-top">
-        <span class="x-l-avatar">KC</span>
-        <div><b>Kano Craft Imports</b><small>Lagos · imports and resells</small></div>
-      </div>
-      <p>"I get paid in dollars and pay suppliers in euros and yuan. I used to find out
-        about a problem when a supplier rang me. Now I see it the morning it
-        happens."</p>
-      <div class="x-l-flow">
-        <div><span class="x-label">Gets paid in</span><span class="x-pill x-pill--good">USD · GBP</span></div>
-        <div><span class="x-label">Pays out in</span><span class="x-pill x-pill--info">EUR · USD · CNY</span></div>
-        <div><span class="x-label">Pain</span><span class="x-pill x-pill--warn">Never knows what is left to spend</span></div>
-      </div>
-    </div>
-    <div>
-      <div class="x-l-chips x-l-grid x-l-grid--3">
-        <div class="x-l-chip">
-          <span class="x-pill x-pill--accent">Importers</span>
-          <p>Paid in one currency, paying suppliers in three.</p>
-        </div>
-        <div class="x-l-chip">
-          <span class="x-pill x-pill--accent">Freelancers &amp; studios</span>
-          <p>Invoices out, fees in, no bookkeeper.</p>
-        </div>
-        <div class="x-l-chip">
-          <span class="x-pill x-pill--accent">Agencies &amp; payroll</span>
-          <p>Many small payouts, one treasury person.</p>
-        </div>
-      </div>
-      <div class="x-card x-l-card" style="margin-top:24px">
-        <h3>Not a bank, and does not try to be</h3>
-        <p>Closebook is the reasoning layer on top of an account. It runs on sandbox
-          money in this demo, and every rule it enforces is written in code you can
-          read.</p>
-      </div>
-    </div>
+  <div class="x-l-links">
+    <a href="/#how">How it works</a>
+    <a href="/#safety">Safety</a>
+    <a href="/app">Launch app</a>
   </div>
-</div></section>''')
-
-    # built on
-    a('''<section class="x-l-sec x-l-sec--white"><div class="x-l-wrap">
-  <div class="x-l-head" style="max-width:640px">
-    <h2 class="x-l-h2" style="font-size:28px">Built on</h2>
-  </div>
-  <div class="x-l-built">
-    <span><b>Airwallex</b> sandbox — accounts, balances, FX, payouts</span><i>·</i>
-    <span><b>FastAPI</b> — the app and the webhook receiver</span><i>·</i>
-    <span><b>Python</b> — every rule, no black boxes</span><i>·</i>
-    <span><b>OpenAI-compatible</b> model, optional and offline-safe</span>
-  </div>
-</div></section>''')
-
-    # closing CTA
-    a('''<section class="x-l-wrap">
-  <div class="x-l-cta">
-    <h2>See your books close themselves.</h2>
-    <div class="x-actions" style="justify-content:center">
-      <a href="/app" class="x-btn x-btn--primary x-btn--pill x-btn--lg"
-         data-testid="launch-app-hero">Launch app'''
-      + _I["arrow"] + '''</a>
-    </div>
-    <small>''' + _I["lock"] + '''Sandbox money only — no real payment can leave this demo.</small>
-  </div>
-</section>''')
-
-    # footer
-    a('''<footer class="x-l-wrap"><div class="x-l-foot">
-  <span>Closebook — a real-time books agent for cross-border business.</span><br>
-  <span>Runs on the Airwallex sandbox. Sandbox money only.</span>
-</div></footer>''')
+</footer>''')
 
     return _shell("".join(L), app=False, title="Closebook — real-time books")
 
@@ -968,9 +851,9 @@ def _home(c: dict) -> str:
         f'− promised {money(m["promised"].get(ccy, 0))} '
         + (f' − in flight {money(m["in_flight"].get(ccy, 0))}'
            if m["in_flight"].get(ccy) else '')
-        + (f' − unattributed {money(m["suspense"].get(ccy, 0))}'
+        + (f' − unmatched {money(m["suspense"].get(ccy, 0))}'
            if m["suspense"].get(ccy) else '')
-        + (f' − owed back {money(owed.get(ccy, 0))}' if owed.get(ccy) else '')
+        + (f' − refunds owed {money(owed.get(ccy, 0))}' if owed.get(ccy) else '')
         + (f' − floor {money(m["reserve_floor_minor"])}' if ccy == hccy else '')
         + f' = {money(m["free"].get(ccy, 0))}</div>'
         for ccy in sorted(m["free"]))
@@ -1001,7 +884,7 @@ def _home(c: dict) -> str:
     susp_str = tt["unmatched"]
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["in"]}</span>'
-        '<div class="x-label">Suspense — not spendable</div>'
+        '<div class="x-label">Unmatched money — not spendable</div>'
         f'<div class="x-fig" data-figure="unmatched">{e(susp_str) if susp_str else "Nothing waiting"}</div>'
         f'<div class="x-statnote">It is in the bank and it is not in the figure '
         f'above. {n_unmatched} payment'
@@ -1229,7 +1112,10 @@ def _home(c: dict) -> str:
             '<p class="x-help">Held by policy — not waiting on a person.</p>'
             '</div></div><ul class="x-todo">' + "".join(
                 f'<li><span class="x-todo-ico is-warn">{_I["clock"]}</span>'
-                f'<div><b>{e(p["number"])} · {e(p["supplier"] or "supplier")}</b>'
+                f'<div id="held-{e(p["number"])}">'
+                f'<b>{e(p["number"])} · {e(p["supplier"] or "supplier")}</b>'
+                # THE reason, once, on the screen that shows the plan. Every
+                # other mention links here rather than saying it again.
                 f'{blockers_html(p)}</div>'
                 f'<span class="x-pill x-pill--warn">'
                 f'{e(p.get("plan_policy_reason") or "held")}</span></li>'
@@ -1340,7 +1226,7 @@ def _resolve_form(a: dict) -> str:
     options += (
         '<option value="refund">Refund owed — record the liability</option>'
         '<option value="income">Release as unallocated income</option>'
-        '<option value="reject">Not this invoice — leave it in suspense</option>')
+        '<option value="reject">Not this invoice — leave it unmatched</option>')
 
     blocked = ""
     if not (invs and fit.get("ok")) and a.get("no_match_why"):
@@ -1399,7 +1285,7 @@ def _resolution_audit(a: dict) -> str:
     """
     state = (a.get("review_state") or "").upper()
     if state == "REFUND_OWED":
-        head = "Recorded as owed back"
+        head = "Recorded as refunds owed"
     elif state == "RELEASED_INCOME":
         head = "Released as unallocated income"
     else:
@@ -1427,12 +1313,14 @@ def _simulate_card(c: dict) -> str:
         opts = "".join(
             f'<option value="{e(a["id"])}"'
             + ("" if a.get("usable") else " disabled")
+            + (f' title="{e(" · ".join(x for x in (a.get("country"), a.get("status")) if x))}"'
+               if (a.get("country") or a.get("status")) else "")
             + '>'
-            + f'{e(a["currency"] or "unknown")}'
-            + (" · " + e(a["country"]) if a["country"] else "")
-            + (" · " + e(a["status"]) if a["status"] else "")
-            + (" · " + e((a["account_number"] or "")[-4:]) if a["account_number"] else "")
-            + (" — not active yet" if a.get("usable") is False else "")
+            # "USD account …5888", not "USD · US · ACTIVE · 5888". The
+            # operator is picking an ACCOUNT, and the country and status are
+            # not what tells two of them apart -- the last four digits are.
+            # Both stay available as a hover title, so nothing is lost.
+            + _acct_label(a)
             + '</option>'
             for a in accts)
         usable = sum(1 for a in accts if a.get("usable"))
@@ -1479,6 +1367,21 @@ def _simulate_card(c: dict) -> str:
           'that is late. Both paths use the same intake, so neither can post the '
           'cash twice.</span></div></form>')
     return _card(inner=body)
+
+
+def _acct_label(a: dict) -> str:
+    """The one line that tells two global accounts apart."""
+    ccy = e(a.get("currency") or "unknown")
+    # A missing number is not the digit "-". Airwallex returns literal "-" for
+    # an account that has no number yet, and slicing its last four characters
+    # produced "HKD account …-" -- a wrong number on the row where the number is
+    # the ONLY thing distinguishing two accounts.
+    num = str(a.get("account_number") or "")
+    last4 = num[-4:] if sum(c.isdigit() for c in num) >= 4 else ""
+    label = f"{ccy} account" + (f" …{e(last4)}" if last4 else "")
+    if a.get("usable") is False:
+        label += " — not active yet"
+    return label
 
 
 def _money_in(c: dict) -> str:
@@ -1604,7 +1507,7 @@ def _money_in(c: dict) -> str:
                 'was matched with certainty.</p>')
     side = _card(span="x-span-4", inner=(
         '<div class="x-cardhead"><div><h3>Money we couldn\'t match</h3>'
-        '<p class="x-help">Held in suspense — not applied to any invoice, and no '
+        '<p class="x-help">Unmatched — not applied to any invoice, and no '
         'supplier paid from it.</p></div>'
         f'<span class="x-pill x-pill--warn">{n_unmatched} held</span></div>'
         f'<div class="x-stack">{("".join(un)) if un else empty_un}</div>'
@@ -1656,8 +1559,12 @@ def _money_out(c: dict) -> str:
         # "Held" on its own tells a reader nothing they can act on. ALL the
         # rules, not the first.
         if p.get("plan_blockers"):
+            # The rules are stated ONCE, on Home, next to the plan they
+            # explain. Here the reader gets the verdict and a way to the why.
             note = (f'<div class="x-callnote" style="margin-top:20px">'
-                    f'{_I["info"]}<div>{blockers_html(p)}</div></div>')
+                    f'{_I["info"]}<div><p>Held by policy. '
+                    f'<a href="/app?tab=home#held-{e(p["number"])}">'
+                    f'Why it is held</a></p></div></div>')
         else:
             reason = (p.get("step_reason") or "").strip()
             if not reason:
@@ -1674,13 +1581,21 @@ def _money_out(c: dict) -> str:
         ref = ""
         if obj:
             live = p.get("live_status") or "UNKNOWN"
-            ref = (f'<div class="x-meta"><span class="x-label">On the bank</span>'
-                   f'<span class="x-tag x-mono">{e(str(obj)[:18])}…</span>'
+            # The bank's own identifier is a 36-character UUID and the
+            # environment is the same word on every card. Both are needed when
+            # something goes wrong and neither is worth a line on every row, so
+            # the status stays visible (it is the answer) and the reference and
+            # the environment fold away behind it.
+            ref = (f'<details class="x-hist x-hist--bank" data-testid="bank-ref">'
+                   f'<summary><span class="x-label">On the bank</span>'
                    f'<span class="x-pill x-pill--'
                    f'{"good" if live in ("PAID", "COMPLETED", "SUCCESS") else ("warn" if live in ("PROCESSING", "PENDING", "SUBMITTED") else "info")}"'
-                   f'>{e(live)}</span></div>'
+                   f'>{e(live)}</span></summary>'
+                   f'<div class="x-meta"><span class="x-label">Reference</span>'
+                   f'<span class="x-tag x-mono">{e(str(obj))}</span></div>'
                    f'<div class="x-meta"><span class="x-label">Environment</span>'
                    f'<span class="x-tag">sandbox</span></div>'
+                   f'</details>'
                    f'{_dev_controls(str(obj), live)}')
 
         # criticality is an int 1-5 on the model; 1 is most urgent.
@@ -1824,15 +1739,18 @@ def _ok(c: dict) -> str:
     waits = c.get("waiting") or []
     if waits:
         held = _card(inner=(
-            '<div class="x-cardhead"><div><h3>Held — and not waiting on you</h3>'
+            '<div class="x-cardhead" id="held"><div><h3>Held — and not '
+            'waiting on you</h3>'
             '<p class="x-help">No approval can release these. They are waiting on '
             'something outside your control, and Closebook will re-plan '
             'automatically when it happens.</p></div>'
             f'<span class="x-pill x-pill--warn">{len(waits)} held</span></div>'
             '<ul class="x-todo">' + "".join(
-                f'<li><span class="x-todo-ico is-warn">{_I["clock"]}</span>'
+                f'<li>'
+                f'<span class="x-todo-ico is-warn">{_I["clock"]}</span>'
                 f'<div><b>{e(p["number"])} · {e(p["supplier"] or "supplier")}</b>'
-                f'{blockers_html(p)}</div>'
+                f'<p class="x-help"><a href="/app?tab=home#held-{e(p["number"])}">'
+                f'Why it is held</a></p></div>'
                 f'<span class="x-pill x-pill--warn">'
                 f'{e(p.get("plan_policy_reason") or "held")}</span></li>'
                 for p in waits)
@@ -1871,7 +1789,7 @@ def _ok(c: dict) -> str:
     if done:
         note_in += _card(inner=(
             '<div class="x-cardhead"><div><h3>Resolved money</h3>'
-            '<p class="x-help">Where suspense went, and who decided. A refund '
+            '<p class="x-help">Where unmatched money went, and who decided. A refund '
             'owed is a liability we have not paid; released income is cash that '
             'is now ours to spend.</p></div>'
             f'<span class="x-pill x-pill--info">{len(done)} resolved</span>'
@@ -1954,7 +1872,10 @@ def _ai(c: dict) -> str:
         # never calls a model (the code's own decisions) must not claim one is
         # missing — that is a false alarm about the configuration.
         item = {"verdict": t["verdict"], "model": (str(ins.get("model") or "")
-                                                   if is_model_call else "")}
+                                                   if is_model_call else ""),
+                # The machine's own words, when there are any. Folded away on
+                # screen rather than shouted.
+                "rules_raw": ""}
 
         if is_model_call:
             # The amount is `amount_minor` on the trace. Reading `amount` (which
@@ -1993,19 +1914,21 @@ def _ai(c: dict) -> str:
                 if claim:
                     reply += f' It put its own certainty at {claim:.2f}.'
                 conf_label = f'claimed {claim:.2f}' if claim else "No guess"
-            item.update(what=what, ai=reply, rules=(
-                t["detail"] or outs.get("explanation")
-                or "Checked every number against the open invoices."),
-                conf=conf_label)
+            _rules = (t["detail"] or outs.get("explanation")
+                      or "Checked every number against the open invoices.")
+            item.update(what=_shown(what), ai=reply, rules=_shown(_rules),
+                        rules_raw=_raw_of(_rules), conf=conf_label)
         elif t["tool"] == "explain_decision":
-            item.update(what=outs.get("explanation") or "Explained a decision.",
+            item.update(what=_shown(outs.get("explanation")
+                                    or "Explained a decision."),
                         ai="I only explain. I do not decide.",
                         rules="The reason is whatever the code recorded.",
-                        conf="")
+                        rules_raw="", conf="")
         else:
             item.update(what=f'Tool: {e(t["tool"])}',
                         ai="Checked the books and answered.",
-                        rules=t["detail"] or "No further detail.", conf="")
+                        rules=_shown(t["detail"] or "No further detail."),
+                        rules_raw=_raw_of(t["detail"]), conf="")
         items.append(item)
 
     feed = []
@@ -2029,8 +1952,13 @@ def _ai(c: dict) -> str:
             f'{"accent" if good else "warn"}">{e(it["verdict"])}</span>{conf_pill}'
             f'{model_pill}<span>about {e(it["what"])}</span></div></div></div>'
             f'<div class="x-msg x-msg--rules"><span class="x-av x-av--rules">{_I["scale"]}</span>'
-            f'<div><span class="x-bubble"><b class="x-who">The rules</b>'
-            f'{e(it["rules"])}</span></div></div>'
+            f'<div><span class="x-bubble" data-testid="rules-bubble"><b class="x-who">The rules</b>'
+            f'{e(it["rules"])}</span>'
+            # THE MACHINE'S OWN WORDS, folded away. Every stored trace line is
+            # translated on the way out, so a 429 recorded days ago reads as a
+            # sentence today and its stack is one tap deep, not on the screen.
+            + _detail_toggle(it.get("rules_raw") or "")
+            + '</div></div>'
             '</li>')
 
     body = "".join(feed) if feed else '<p class="x-empty">No model calls yet.</p>'

@@ -339,24 +339,27 @@ class TestThePageShowsIt:
         assert "Forecast:" in html
         assert "not landed" in html or "Not spendable" in html
 
-    def test_a_deferred_payment_shows_its_waiting_reason_on_every_tab(self, db):
+    def test_the_waiting_reason_is_stated_once_and_linked_elsewhere(self, db):
+        """The reason lives on Home, ONCE, and every other mention links to it.
+
+        It used to print in full on every tab, so a reader met the same
+        paragraph on Home, again in the plan row and again on Needs your OK.
+        Stating it once and linking is what makes the link worth following --
+        and a link must point at an anchor that is really on the page, which is
+        why Home is the one that keeps the text.
+        """
         _cash("USD", 600_000)
         _payable("PO-X", "USD", 300_000)
         _receivable("INV-BIG", "USD", 1_200_000)
         ctx = build_context([])
-        for tab in ("home", "money-out", "ok"):
+        for tab, expect_text in (("home", True), ("money-out", False), ("ok", False)):
             html = render_app(ctx, tab=tab)
-            assert "waits for INV-BIG to land" in html, tab
-
-
-# ------------------------------------------- a same-currency bill is not an FX
-class TestASameCurrencyBillIsNotAConversion:
-    """A USD bill paid out of a USD budget needs no conversion.
-
-    The first version of this modelled one anyway, which inflated the
-    requirement by the FX drift headroom (a USD 1,800 bill reported as needing
-    USD 1,809.00) and stated the same fact twice, once with each number.
-    """
+            if expect_text:
+                assert "waits for INV-BIG to land" in html, tab
+                assert 'id="held-PO-X"' in html, "Home must own the anchor"
+            else:
+                assert "waits for INV-BIG to land" not in html, tab
+                assert "held-PO-X" in html, f"{tab} must link to it"
 
     def test_a_usd_bill_is_never_given_an_fx_step(self, db):
         _payable("PO-X", "USD", 180_000)
@@ -499,7 +502,7 @@ class TestSuspenseCashCannotFundAPayment:
         assert m["free"]["USD"] != available_cash_minor(
             cash_minor=1_400_000, floor_minor=500_000)
         html = render_app(build_context([]), tab="home")
-        assert "unattributed" in html, "the money is still visible, just not spendable"
+        assert "unmatched" in html, "the money is still visible, just not spendable"
 
     def test_an_approved_proposal_stops_being_suspense(self, db):
         """Once a human approves it the money is attributed, so it is spendable."""

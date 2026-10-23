@@ -922,6 +922,40 @@ def refresh_live_statuses(ids: list[str]) -> None:
 
 
 
+def landing_stats(s) -> dict:
+    """Real counts for the landing page's one live proof.
+
+    Counted from the same tables the app renders, so the page cannot claim
+    something the book does not show. `by_rules` is what the deterministic
+    tiers settled on their own and `by_model` what the model read and the code
+    then re-checked — the two numbers that are the whole pitch.
+    """
+    from .domain.ledger import reconcile
+    from .models import Inflow, InvoicePayable, InvoiceReceivable, LedgerEntry
+
+    inflows = s.query(Inflow).all()
+    by_rules = by_model = 0
+    for i in inflows:
+        m = (i.match_method or "").upper()
+        if m == "LLM":
+            by_model += 1
+        elif m:
+            by_rules += 1
+    try:
+        balanced = bool(reconcile(s).balanced)
+    except Exception:
+        balanced = False
+    return {
+        "deposits": len(inflows),
+        "by_rules": by_rules,
+        "by_model": by_model,
+        "invoices": s.query(InvoiceReceivable).count(),
+        "bills": s.query(InvoicePayable).count(),
+        "ledger_rows": s.query(LedgerEntry).count(),
+        "balanced": balanced,
+    }
+
+
 def build_context(incidents: list | None = None) -> dict[str, Any]:
     from .db import get_default_db
     from .domain.ledger import reconcile

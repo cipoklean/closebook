@@ -335,8 +335,8 @@ class TestTheNumbersAddUpOnScreen:
         assert m["free"]["USD"] == cash - 300_000 - 700_000 - floor
 
         html = client.get("/app?tab=home").text
-        assert "Suspense" in html and "not spendable" in html
+        assert "Unmatched money" in html and "not spendable" in html
         assert "Refunds owed" in html
         assert "Free to spend" in html
         # the working, so the figure can be checked by hand
-        assert "unattributed" in html and "owed back" in html
+        assert "unmatched" in html and "refunds owed" in html

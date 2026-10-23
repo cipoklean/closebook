@@ -634,7 +634,7 @@ def reask_model(db, inflow_id: int, *, llm=None):
         if inflow is None:
             return None, "That payment no longer exists."
         if suspense_for(s, inflow) <= 0:
-            return None, ("Nothing is left in suspense on this payment, so there "
+            return None, ("Nothing is left unmatched on this payment, so there "
                           "is nothing to re-read.")
         if getattr(inflow, "review_state", None) in ("REFUND_OWED",
                                                      "RELEASED_INCOME"):

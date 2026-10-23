@@ -118,26 +118,65 @@ class TestLanding:
     def test_serves_200_and_the_hero_copy(self):
         html = _client().get("/").text
         assert "Closebook" in html
-        assert "Your books close" in html
-        assert "while the money moves" in html
+        # Pass 2 rewrote the hero to say what the product DOES rather than
+        # promising a feeling. The old line ("Your books close while the money
+        # moves") is gone with the invented testimonial that sat under it.
+        assert "Every deposit matched." in html
+        assert "Every payment checked." in html
 
     def test_has_every_section_the_mockup_specifies(self):
         html = _client().get("/").text
-        for anchor in ('id="how"', 'id="safety"', 'id="who"'):
+        # CUT TO: hero, How it works, Safety and one live proof. The extra tile
+        # grids -- the problem list, what-it-does, the audience grid and the
+        # invented testimonial -- were removed on purpose, so this asserts the
+        # short page and, just as importantly, that the slop has not crept back.
+        for anchor in ('id="how"', 'id="safety"'):
             assert anchor in html, f"missing section {anchor}"
-        for heading in ("The problem", "How it works", "Safety",
-                        "Who it's for", "Built on"):
+        for heading in ("How it works", "Safety", "Live from this book"):
             assert heading in html
+        for slop in ("The problem", "Who it's for", "Built on", "Kano Craft",
+                     "0.96", "9,012.85"):
+            assert slop not in html, f"cut in pass 2 but still present: {slop}"
 
-    def test_launch_app_is_nav_and_closing_cta_only_not_the_hero(self):
+    def test_launch_app_appears_in_the_nav_hero_and_footer(self):
+        """Three, and each reachable: the nav one from anywhere on the page,
+        the hero one where a reader decides, the footer one at the end. The
+        hero CTA has its OWN testid because two elements sharing one id makes
+        a strict-mode selector ambiguous and fails rather than picking one."""
         html = render_landing()
-        assert html.count(">Launch app<") == 2
+        assert html.count(">Launch app<") == 3
         assert 'href="/app"' in html
+        assert 'data-testid="launch-app"' in html
+        assert 'data-testid="launch-app-hero"' in html
 
-    def test_landing_carries_no_live_figures(self):
-        """Illustrative numbers are fine; a live balance must never appear."""
-        html = render_landing()
-        assert "ledger" not in html.lower()
+    def test_the_landing_shows_a_real_proof_or_says_it_has_none(self):
+        """The page INVENTS nothing now.
+
+        It used to carry illustrative figures with no source. It now shows
+        counts from the same tables the app renders -- or, on an empty
+        workspace, says so. What it must never do is show a number that is not
+        traceable to the book.
+        """
+        empty = render_landing({"deposits": 0, "invoices": 0, "bills": 0})
+        assert "nothing to show yet" in empty
+        assert "9,012.85" not in empty
+
+        real = render_landing({"deposits": 6, "by_rules": 4, "by_model": 1,
+                               "invoices": 4, "bills": 5, "ledger_rows": 18,
+                               "balanced": True})
+        assert ">6<" in real                       # deposits
+        assert ">4<" in real                       # settled by a rule alone
+        assert ">1<" in real                       # read by the model
+        assert "read by the model, then re-checked" in real
+        assert "ledger balanced" in real
+        assert "Nothing here is a sample" in real
+
+    def test_it_never_shows_a_balance(self):
+        """A proof of WORK, never a balance: the landing is public."""
+        html = render_landing({"deposits": 6, "by_rules": 4, "by_model": 1,
+                               "invoices": 4, "bills": 5, "ledger_rows": 18,
+                               "balanced": True})
+        assert "$" not in html and "GBP 4,800" not in html
 
     def test_uses_the_mockup_palette_and_inter(self):
         """Accent #5B5BD6, ground #F6F7F9, Inter — from the stylesheet, which is
@@ -327,7 +366,7 @@ class TestLabelMapping:
         assert ctx["money"]["promised"] == {}
 
     def test_money_we_couldnt_match_is_suspense(self):
-        assert "Suspense" in render_app(_ctx(), tab="home")
+        assert "Unmatched money" in render_app(_ctx(), tab="home")
 
     def test_automatic_limit_is_the_auto_pay_limit(self):
         html = render_app(_ctx(), tab="home")
@@ -878,24 +917,35 @@ class TestHeldPaymentsAreExplained:
         assert "Nothing needs you right now" not in html
 
     def test_the_vague_phrase_waiting_on_policy_is_gone(self, db):
-        """The exact wording item 2 was raised about. A hold must carry the rule
-        and its numbers, on every tab that shows it."""
+        """The exact wording item 2 was raised about: a hold must carry the rule
+        and its numbers. Pass 2 states that sentence ONCE, on Home, and links
+        to it from the tabs, so the check follows the sentence rather than
+        demanding it three times -- and still refuses the vague version."""
         self._held(db, depends_on="INV-0042")
         ctx = build_context([])
-        for tab in ("home", "money-out", "ok"):
-            html = render_app(ctx, tab=tab)
-            assert "Waiting on policy" not in html, tab
-        assert "INV-0042" in render_app(ctx, tab="money-out")
-        assert "INV-0042" in render_app(ctx, tab="home")
 
-    def test_the_ok_tab_shows_held_payments_too(self, db):
-        """Header and tab must agree: if the header mentions a hold, the tab
-        the header links to must show it."""
+        for tab in ("home", "money-out", "ok"):
+            assert "Waiting on policy" not in render_app(ctx, tab=tab), tab
+            assert "waiting on policy" not in render_app(ctx, tab=tab).lower(), tab
+
+        home = render_app(ctx, tab="home")
+        assert "INV-0042" in home, "Home names the invoice that is holding it"
+        assert 'id="held-' in home, "Home owns the anchor"
+
+        out = render_app(ctx, tab="money-out")
+        assert "Why it is held" in out
+        assert "held-" in out, "money-out must point at the reason"
+
+    def test_the_ok_tab_lists_held_payments_and_links_to_the_reason(self, db):
+        """Header and tab must still agree: if the header mentions a hold, the
+        tab it links to must show the held bill. What changed in pass 2 is that
+        the EXPLANATION lives on Home now, so this tab points at it instead of
+        printing the same paragraph a second time."""
         self._held(db, depends_on="INV-0042")
-        ctx = build_context([])
-        html = render_app(ctx, tab="ok")
+        html = render_app(_ctx(), tab="ok")
         assert "Held — and not waiting on you" in html
-        assert "INV-0042" in html
+        assert "Why it is held" in html
+        assert 'href="/app?tab=home#held-' in html
 
     def test_a_payable_over_the_limit_without_an_object_id_awaits_approval(self, db):
         """Over the auto-pay limit and not yet sent => needs a human.
@@ -1515,6 +1565,8 @@ class TestAmountsAllReadTheSameWay:
     """'GBP 3,200.00', never '3200 GBP'. Both shapes were on screen at once."""
 
     def test_the_hold_reason_is_currency_first(self, db):
+        """Asserted where the reason now LIVES, and linked from where it does
+        not. Pass 2 states it once on Home instead of on all three tabs."""
         from app.db import session_scope
         from app.models import Customer, InvoicePayable, InvoiceReceivable
         from app.models import PayStatus, PayoutMethod, RecStatus, Supplier
@@ -1535,11 +1587,13 @@ class TestAmountsAllReadTheSameWay:
                                  currency="USD", amount_minor=700_000,
                                  status=PayStatus.HELD, criticality=3,
                                  depends_on_receivable_id=rec.id))
-        ctx = build_context([])
-        for tab in ("home", "money-out", "ok"):
-            html = render_app(ctx, tab=tab)
-            assert "GBP 3,200.00" in html, tab
-            assert "3200 GBP" not in html, tab
+        home = render_app(_ctx(), tab="home")
+        assert "GBP 3,200.00" in home
+        assert "3200 GBP" not in home
+        for tab in ("money-out", "ok"):
+            html = render_app(_ctx(), tab=tab)
+            assert "GBP 3,200.00" not in html, tab
+            assert "held-PO-7505" in html, f"{tab} must link to the reason"
 
     def test_the_budget_limits_read_as_money(self, db):
         ctx = build_context([])

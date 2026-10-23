@@ -70,6 +70,27 @@ def provider_failure(error: object) -> tuple[str, str]:
     return MODEL_UNAVAILABLE, detail
 
 
+def render(text: object) -> tuple[str, str]:
+    """(what to SHOW, the machine's own words or "").
+
+    APPLIED AT RENDER TIME, ON PURPOSE. The first fix translated errors as they
+    were raised, which covers new failures and misses every row already in the
+    database — and the traces are STORED, so an outage that happened yesterday
+    is still printed as `HTTPStatusError ... googleapis ...` today. Sanitising
+    on the way out means the fix reaches rows written before it existed, and it
+    cannot be bypassed by a new caller that forgets to ask.
+
+    A string that is not a recognisable failure is returned unchanged: this is
+    a translator for machine errors, not a filter that eats prose.
+    """
+    s = str(text or "").strip()
+    if not s:
+        return "", ""
+    if _looks_like_provider_error(s):
+        return MODEL_UNAVAILABLE, s
+    return s, ""
+
+
 def one_line(text: object, limit: int = 140) -> str:
     """Collapse a blob to a single readable line for a pill or a table cell."""
     s = re.sub(r"\s+", " ", str(text or "")).strip()
@@ -77,4 +98,4 @@ def one_line(text: object, limit: int = 140) -> str:
 
 
 __all__ = ["MODEL_UNAVAILABLE", "NOT_REACHED", "SETTLE_REFUSED", "one_line",
-           "provider_failure", "settle_failure"]
+           "provider_failure", "render", "settle_failure"]

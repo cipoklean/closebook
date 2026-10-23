@@ -1268,9 +1268,23 @@ async def workspace_reset(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 def landing() -> str:
-    """The landing page. Illustrative copy only — no live figures."""
+    """The landing page, with ONE live proof taken from this instance's book.
+
+    It used to be "illustrative copy only — no live figures", which is how it
+    ended up carrying an invented testimonial and a decorative "0.96". A page
+    that claims things about a product's results should be able to show them,
+    so the figures are counted from the same tables the app renders.
+    """
+    from .dashboard import landing_stats
     from .ui import render_landing
-    return render_landing()
+
+    stats = None
+    try:
+        with _database().session() as s:
+            stats = landing_stats(s)
+    except Exception:
+        log.warning("could not read the landing figures")
+    return render_landing(stats)
 
 
 @app.get("/app", response_class=HTMLResponse)
@@ -1288,6 +1302,13 @@ def app_page(background: BackgroundTasks, tab: str = "home",
     """
     from .dashboard import build_context
     from .ui import render_app
+    # The deposit form needs the account list to render at all, so it is
+    # refreshed BEFORE the context is built.
+    if tab == "money-in":
+        from .domain.intake import accounts_stale, refresh_accounts
+        if accounts_stale():
+            refresh_accounts(_database())
+
     try:
         ctx = build_context(INCIDENTS)
     except Exception as exc:
@@ -1331,7 +1352,14 @@ def app_page(background: BackgroundTasks, tab: str = "home",
         # The global-account list is fetched the same way and for the same
         # reason: it is what made a COLD first render wait on a token fetch.
         from .domain.intake import accounts_stale, refresh_accounts
-        if accounts_stale():
+        # HOME RENDERS IMMEDIATELY; THE DEPOSIT FORM WAITS. The accounts list is
+        # fetched in the background so a slow sandbox can never hold up a page.
+        # For the deposform that is not good enough: it leaves the picker EMPTY
+        # on the first view after a restart, which reads as "you have no
+        # accounts". A form is a deliberate action, so it may wait for the list
+        # it needs -- but the refresh must happen BEFORE the context is built,
+        # or the render gets the empty list anyway.
+        if accounts_stale() and tab != "money-in":
             background.add_task(refresh_accounts, _database())
     except Exception:
         log.warning("could not schedule the live-status refresh")
