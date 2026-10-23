@@ -136,6 +136,20 @@ def approval_waiting_steps(plan: Plan) -> list[Step]:
             if s.action in MONEY_ACTIONS and s.needs_approval and not s.blockers]
 
 
+def already_approved_steps(plan: Plan) -> list[Step]:
+    """Money steps a person has approved that are blocked by something else.
+
+    Still no CARD -- a floor breach or a dependency is not a human decision, so
+    the strict rule above stands. But the row has to be written, because the
+    approval is attached to an AMOUNT and the amount lives on that row. Leave it
+    unwritten and the stored approval keeps describing whatever the figure was
+    the day it was signed, which is how an approval silently becomes an approval
+    for the wrong sum.
+    """
+    return [s for s in plan.steps
+            if s.action in MONEY_ACTIONS and s.has_valid_approval and s.blockers]
+
+
 def held_steps(plan: Plan) -> list[tuple[Step, str]]:
     """Every payable whose money is NOT moving, with the reason why.
 
@@ -313,7 +327,8 @@ def on_event(db: DB, *, source: str, dry_run: bool = True,
         # WRITTEN so a human has something to approve. Persisting only `clear`
         # left an over-limit bill unapprovable forever.
         waiting = approval_waiting_steps(plan)
-        rows, skipped = persist_plan(s, run_id, clear + waiting)
+        carried = already_approved_steps(plan)
+        rows, skipped = persist_plan(s, run_id, clear + waiting + carried)
         row_ids = {_key(step): row.id for step, row in zip(clear, rows)}
         skipped_keys = {_key(step) for step in skipped}
 

@@ -289,7 +289,8 @@ def _start_of_today():
 
 
 # ------------------------------------------------------- steps: problems
-def _is_approvable(step: PlanStep, payload: dict) -> bool:
+def _is_approvable(step: PlanStep, payload: dict,
+                   approved_step_ids: Optional[set] = None) -> bool:
     """May a human meaningfully approve this step?
 
     A step is NOT approvable when it is terminal (it already moved, or it
@@ -305,6 +306,12 @@ def _is_approvable(step: PlanStep, payload: dict) -> bool:
     if step.airwallex_object_id:
         return False
     if not (payload.get("amount_minor") or payload.get("sell_amount_minor")):
+        return False
+    # A PERSON ALREADY SAID YES. Showing the card again re-asks a question that
+    # has been answered, and inviting a second approval for one payment is how
+    # an operator comes to believe the first one did nothing. The step moves to
+    # the held list (with whatever still blocks it) instead.
+    if approved_step_ids and step.id in approved_step_ids:
         return False
     return True
 
@@ -415,6 +422,35 @@ def steps_block(s) -> dict:
     list of three dead payments, and a payable read as both SUBMITTED and failed.
     """
     steps = s.query(PlanStep).order_by(PlanStep.id.desc()).limit(200).all()
+
+    # WHICH STEPS A PERSON HAS ALREADY APPROVED. Read once here rather than per
+    # row, and read from the STORED approval, so a step approved in an earlier
+    # request is still recognised as approved in this one — which is the whole
+    # point: the decision outlives the press.
+    from .models import Approval, ApprovalStatus
+
+    def _still_covers(row: PlanStep, ap) -> bool:
+        """Does this approval still describe THIS payment?
+
+        An approval is a person agreeing to an amount, a currency and a
+        counterparty. Edit the amount on the bill afterwards and the approval is
+        about something that no longer exists, so it must stop suppressing the
+        card -- otherwise the operator is told a payment is settled business
+        when the figure they agreed to has been changed underneath them.
+        """
+        payload = json.loads(row.payload_json or "{}")
+        here = (payload.get("amount_minor") or payload.get("sell_amount_minor") or 0)
+        return (int(ap.amount_minor or 0) == int(here or 0)
+                and (ap.currency or "").upper()
+                == (payload.get("currency") or payload.get("sell_currency")
+                    or ap.currency or "").upper())
+
+    _approved_step_ids = set()
+    for row in s.query(Approval).filter(
+            Approval.status == ApprovalStatus.APPROVED).all():
+        step_row = s.get(PlanStep, row.plan_step_id) if row.plan_step_id else None
+        if step_row is not None and _still_covers(step_row, row):
+            _approved_step_ids.add(row.plan_step_id)
     latest_run = _latest_run_id(s)
 
     payable_state: dict[str, dict] = {}
@@ -449,7 +485,7 @@ def steps_block(s) -> dict:
                     "airwallex_object_id": st.airwallex_object_id,
                 }
 
-        if _is_approvable(st, pl):
+        if _is_approvable(st, pl, _approved_step_ids):
             row = s.query(Approval).filter_by(plan_step_id=st.id).first()
             approvable.append({
                 "step_id": st.id,

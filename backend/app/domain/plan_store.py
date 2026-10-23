@@ -17,6 +17,7 @@ import json
 import uuid
 from typing import Iterable, Optional
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..models import PlanStep, StepStatus, StepType
@@ -81,6 +82,54 @@ def find_step(db: Session, step: Step) -> Optional[PlanStep]:
         if _matches(row, step) and row.status not in RETIRED_STATUSES:
             return row
     return None
+
+
+def valid_approval(db: Session, *, payable_number: str, action: str,
+                   amount_minor: int, currency: str, counterparty: str):
+    """An APPROVED approval for this step whose terms STILL MATCH, or None.
+
+    THE APPROVAL HAS TO BE CONSULTED, OR IT IS ONLY A NOTE. Approving an
+    over-limit bill wrote an APPROVED row and nothing read it: the planner
+    recomputed `needs_approval` from the limit every cycle, so the step was
+    never clear and no transfer was ever created. The operator approved a
+    payment that could not be paid, and the screen said the decision was
+    recorded.
+
+    MATCHING IS THE POINT. An approval is a human agreeing to an AMOUNT, a
+    CURRENCY and a COUNTERPARTY. Change any of those and the approval is about
+    something else, so it is not honoured and the card comes back.
+    """
+    from ..models import Approval, ApprovalStatus
+
+    if not payable_number:
+        return None
+    for row in (db.query(PlanStep).order_by(PlanStep.id.desc()).limit(500).all()):
+        payload = _loads(row.payload_json) or {}
+        if (payload.get("payable_number") != payable_number
+                or payload.get("action") != action):
+            continue
+        if row.status in RETIRED_STATUSES:
+            continue
+        ap = (db.query(Approval).filter_by(plan_step_id=row.id)
+              .order_by(Approval.id.desc()).first())
+        if ap is None or ap.status != ApprovalStatus.APPROVED:
+            continue
+        if int(ap.amount_minor or 0) != int(amount_minor or 0):
+            continue
+        if (ap.currency or "").upper() != (currency or "").upper():
+            continue
+        if (ap.counterparty or "") != (counterparty or ""):
+            continue
+        return ap
+    return None
+
+
+def _loads(raw):
+    import json
+    try:
+        return json.loads(raw or "{}")
+    except Exception:                              # noqa: BLE001
+        return {}
 
 
 def find_step_by_request_id(db: Session, request_id: str) -> Optional[PlanStep]:
@@ -173,19 +222,55 @@ def persist_plan(db: Session, run_id: str,
         row = PlanStep(
             run_id=run_id,
             type=_TYPE_FOR_ACTION[step.action],
+            step_key=_key_for(step),
             payload_json=_payload_for(step),
             reason=step.reason,
             status=StepStatus.PROPOSED,
         )
         db.add(row)
         rows.append(row)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # ANOTHER CYCLE INSERTED THE SAME STEP WHILE WE WERE BUILDING IT. The
+        # unique index on `step_key` caught it, which is what it is for: the
+        # alternative is two rows, two request ids and two transfers for one
+        # approved payment. Roll back, take THEIR row, and carry on -- the
+        # winner's row is the one that owns the payment.
+        db.rollback()
+        rows, skipped = [], []
+        for step in steps:
+            if step.action not in _TYPE_FOR_ACTION:
+                continue
+            existing = find_step(db, step)
+            if existing is None:
+                continue
+            if existing.airwallex_object_id:
+                skipped.append(step)
+                continue
+            existing.payload_json = _payload_for(step)
+            existing.reason = step.reason
+            rows.append(existing)
+        db.commit()
     return rows, skipped
+
+
+def _key_for(step: Step) -> Optional[str]:
+    """The step's identity, as the database stores it: (payable, action).
+
+    NEVER the payable alone: one bill legitimately has BOTH an FX step and a
+    PAY step, and conflating them let a PAY step adopt the FX row's object id
+    and report ALREADY_DONE while the supplier was never paid.
+    """
+    if not step.payable_number:
+        return None
+    return f"{step.action}:{step.payable_number}"
 
 
 def new_run_id() -> str:
     return f"run_{uuid.uuid4().hex[:12]}"
 
 
-__all__ = ["RETIRED_STATUSES", "find_step", "has_retired_attempt",
+__all__ = ["RETIRED_STATUSES", "find_step", "find_step_by_request_id",
+           "has_retired_attempt", "valid_approval",
            "is_already_paid", "new_run_id", "persist_plan", "retire_step"]

@@ -241,12 +241,28 @@ def _reserve_request_id(db_session, plan_step) -> str:
         return AirwallexClient.new_request_id()
 
     if not plan_step.request_id:
+        # CLAIM IT CONDITIONALLY, THEN RE-READ. Two cycles can both find the
+        # column empty and both mint a key; only one UPDATE can win, because
+        # `request_id IS NULL` is part of the WHERE. The loser then re-reads the
+        # winner's value instead of carrying its own, so both cycles leave with
+        # the SAME key -- and the same key is what makes Airwallex (and our own
+        # lookup) treat the second attempt as the first one. Minting
+        # unconditionally meant two transfers for one approval.
         rid = AirwallexClient.new_request_id()
-        db_session.execute(
-            update(type(plan_step)).where(type(plan_step).id == plan_step.id).values(request_id=rid)
+        result = db_session.execute(
+            update(type(plan_step))
+            .where(type(plan_step).id == plan_step.id,
+                   type(plan_step).request_id.is_(None))
+            .values(request_id=rid)
         )
         db_session.flush()
-        plan_step.request_id = rid
+        if result.rowcount:
+            plan_step.request_id = rid
+        else:
+            # Somebody else claimed it between our read and our write. Take
+            # theirs: the pointer on the row is the single source of truth.
+            db_session.expire(plan_step, ["request_id"])
+            db_session.refresh(plan_step)
     return plan_step.request_id
 
 

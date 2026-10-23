@@ -607,11 +607,16 @@ async def approve(step_id: int, request: Request) -> dict:
     amount = money_str(int(res.get("amount_minor") or 0),
                        str(res.get("currency") or "USD"))
     who = res.get("counterparty") or "the supplier"
-    return _action_body(
-        "ok",
-        f"Approved {amount} to {who}. The decision is recorded — the payment "
-        f"still has to pass the executor's own checks before anything moves.",
-        "")
+
+    # RUN A CYCLE NOW, not at the next unrelated event. Approving used to
+    # record the decision and stop, so the payment waited for a deposit or a
+    # manual re-plan that nobody knew to press. The approval is what makes the
+    # step clear, so the send belongs to the same press. `_run_loop` is the
+    # same path every other event uses, so an approval cannot take a route no
+    # other decision does.
+    tail = _run_loop("approve", budget_s=20.0)
+
+    return _action_body("ok", f"Approved {amount} to {who}.{tail}", "")
 
 
 @app.post("/approvals/{step_id}/reject")

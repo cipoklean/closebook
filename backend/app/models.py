@@ -224,12 +224,24 @@ class PlanStep(Base):
     request_id: Mapped[Optional[str]] = mapped_column(
         String(64), unique=True, nullable=True
     )  # persisted BEFORE the call; UNIQUE = idempotency spine
+    #: `"<action>:<payable_number>"` — the step's IDENTITY, in a real column so
+    #: the database enforces it rather than a SELECT-then-INSERT that two
+    #: concurrent cycles can both lose. Without this, two cycles that re-planned
+    #: at the same moment each found no row, each inserted one, and one approved
+    #: payment produced TWO transfers. The unique index is the guarantee; the
+    #: lookup in `persist_plan` is only the fast path.
+    step_key: Mapped[Optional[str]] = mapped_column(
+        String(200), unique=True, nullable=True
+    )
     status: Mapped[StepStatus] = mapped_column(Enum(StepStatus), default=StepStatus.PROPOSED)
     airwallex_object_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
-    __table_args__ = (UniqueConstraint("request_id", name="uq_plan_step_request_id"),)
+    __table_args__ = (
+        UniqueConstraint("request_id", name="uq_plan_step_request_id"),
+        UniqueConstraint("step_key", name="uq_plan_step_step_key"),
+    )
 
 
 class AgentTrace(Base):

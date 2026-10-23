@@ -71,6 +71,12 @@ class Payable:
     #: promised a payment the conductor would refuse, and the two disagreed on
     #: screen.
     previous_attempt_failed: bool = False
+    #: A person has ALREADY approved this exact payment (amount, currency and
+    #: counterparty all still match). It clears the auto-pay LIMIT check and
+    #: nothing else -- the floor, the cash, the dependency and the sanctions
+    #: fence are all still applied below. Set from the stored approval row, so
+    #: the planner itself stays a pure function.
+    has_valid_approval: bool = False
     # Dependency state, resolved by the caller from the ledger:
     dependency_met: bool = True
     dependency_open_minor: int = 0
@@ -161,6 +167,12 @@ class Step:
     # governance
     needs_approval: bool = False
     approval_reason: str = ""
+    #: A person has already approved this exact payment. Carried so that a step
+    #: blocked by something an approval CANNOT lift (cash, the floor, a
+    #: dependency) is still written down: the approval has to stay attached to
+    #: the current amount, or the thing we are holding is a decision about a
+    #: figure that no longer exists.
+    has_valid_approval: bool = False
     policy_reason: str = ""
     # EVERY reason this step is not happening, not just the first. A held
     # payment that names one blocker invites the reader to clear it, expect
@@ -618,6 +630,20 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
             move_minor, p.currency, pos.rates,
             auto_limit_usd=budget.auto_pay_limit_usd)
 
+        # A STORED APPROVAL CLEARS THE LIMIT CHECK, AND ONLY THE LIMIT CHECK.
+        # Approving recorded a decision that nothing read, so an over-limit bill
+        # could be approved and never paid. Clearing it here rather than
+        # skipping the step entirely is what keeps the other gates honest: this
+        # payable still has to pass the dependency gate, the currency gate, the
+        # floor and the capacity checks below, and if one of them blocks it, it
+        # is Held with THAT reason and the approval stays on file rather than
+        # being re-asked for.
+        if needs_approval and p.has_valid_approval:
+            if why and "limit" in why.lower():
+                needs_approval = False
+                why = ("within the auto-pay limit, because a person already "
+                       "approved this exact payment")
+
         working[p.currency.upper()] = working.get(p.currency.upper(), 0) - move_minor
 
         # A REPLACEMENT NEEDS A HUMAN. An earlier attempt at this bill was
@@ -637,6 +663,7 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
             amount_minor=move_minor, currency=p.currency.upper(),
             payout_method=p.payout_method,
             needs_approval=needs_approval,
+                        has_valid_approval=p.has_valid_approval,
             approval_reason=why,
             reason=(f"{p.number} to {p.supplier}: {money_str(move_minor, p.currency)}"
                     f"{fee_txt} by {p.payout_method} — {why}"),

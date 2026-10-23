@@ -48,7 +48,7 @@ def _attempt_failed(session, number: str) -> bool:
     conductor cannot disagree about whether a payment may go out on its own.
     """
     from .planner import ACT_PAY, Step
-    from .plan_store import has_retired_attempt
+    from .plan_store import valid_approval, has_retired_attempt
 
     return has_retired_attempt(session, Step(action=ACT_PAY, reason="",
                                              payable_number=number))
@@ -79,7 +79,15 @@ def payables_from_db(session) -> list[Payable]:
                 dep_open = max(0, r.amount_minor - r.amount_paid_minor)
                 dep_ccy = r.currency
                 dep_met = (r.status == RecStatus.PAID)
+        # THE STORED APPROVAL, resolved here because the planner is a PURE
+        # function: it gets the world handed to it, never a session.
+        from .plan_store import valid_approval
+        _ap = valid_approval(
+            session, payable_number=p.number, action="PAY",
+            amount_minor=p.amount_minor, currency=p.currency,
+            counterparty=(p.supplier.name if p.supplier else ""))
         out.append(Payable(
+            has_valid_approval=_ap is not None,
             previous_attempt_failed=_attempt_failed(session, p.number),
             number=p.number,
             supplier=p.supplier.name if p.supplier else "",
