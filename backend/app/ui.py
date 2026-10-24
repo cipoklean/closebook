@@ -2398,7 +2398,7 @@ def _ai(c: dict) -> str:
             "inflow itself. Deterministic tiers run first; the model is only "
             "asked when they stop short.")
     items = []
-    for t in c["agent_trace"][:24]:
+    for t in c["agent_trace"]:
         ins = t["inputs"]
         outs = t["outputs"]
         prop = outs.get("model_proposed")
@@ -2570,14 +2570,32 @@ def _ai(c: dict) -> str:
             + (it.get("receipt") or "")
             + '</li>')
 
+    total = len(items)
+
+    # THE COUNT IS THE STORE; THE LIST IS A WINDOW OF IT. Showing 24 rows
+
+    # and calling that the number made a run of 26 read as 24, which is the
+
+    # same class of lie as saying zero.
+
+    shown = items[:24]
+
+    feed = feed[:24]
+
     body = "".join(feed) if feed else '<p class="x-empty">No model calls yet.</p>'
+
+    if total > len(shown):
+
+        body += (f'<p class="x-help" data-testid="ai-more">Showing the latest '
+
+                 f'{len(shown)} of {total}.</p>')
 
     return matches + _card(span="x-span-12", inner=(
         '<div class="x-cardhead"><div><h3>What the model said, and what the rules did</h3>'
         '<p class="x-help">Straight from <span class="x-mono">agent_trace</span>. '
         'Nothing here is a decision: every row is one the code already made.</p></div>'
         '<span class="x-pill x-pill--accent" data-testid="ai-count">'
-        + str(len(items)) + (" call" if len(items) == 1 else " calls")
+        + str(total) + (" call" if total == 1 else " calls")
         + '</span></div>'
         f'<ul class="x-feed">{body}</ul>'
     )) + _card(inner=(

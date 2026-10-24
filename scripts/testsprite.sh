@@ -116,10 +116,14 @@ echo "  a11y     : this instance is SEPARATE from the operator's workspace"
 echo
 
 cd "${ROOT}/backend"
-# TWO WORKERS. Every route here does blocking SQLite and some do blocking HTTP,
-# so a single event loop serialises the whole product: one slow cycle stalls
-# every other request behind it and Cloudflare answers with a 502 before the app
-# ever replies. A second worker means a stalled loop costs half the throughput
-# instead of all of it. WAL (already on) makes concurrent readers safe.
+# ONE WORKER, DELIBERATELY. Two workers would give a stalled event loop less
+# reach, but this app runs background work INSIDE its own process: the cycle
+# scheduler, the live-status refresh and the watchdogs. Every additional worker
+# runs all of them again, so the cost is not throughput, it is the same job
+# performed twice against one sandbox and one ledger. The 502s that made two
+# workers look attractive were a DDL race in `get_default_db()`, which is fixed
+# at its root (a lock plus a race-tolerant create_all), so the reason is gone.
+# If a second worker is ever wanted, the background loops must first take a row
+# in the database that names the runner.
 exec "${PY}" -m uvicorn app.main:app --host 0.0.0.0 --port "${PORT}" \
-    --workers 2 --log-level warning
+    --log-level warning

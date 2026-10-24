@@ -836,7 +836,11 @@ def trace_block(s) -> list[dict]:
     final one whenever a deterministic tier had won -- a receipt that says "the
     code decided 0.80" when the code actually decided 0.85 at tier RULE.
     """
-    rows = s.query(AgentTrace).order_by(AgentTrace.id.desc()).limit(40).all()
+    # NO LIMIT. A cap here is a cap on the COUNT as well as on the list, so a
+    # busy run silently reads as a smaller one: 26 stored traces rendered as "24
+    # calls". The page can render a window of these; the number must be the
+    # number.
+    rows = s.query(AgentTrace).order_by(AgentTrace.id.desc()).all()
     out = []
     for t in rows:
         ins = _loads(t.inputs_json)
