@@ -231,8 +231,8 @@ class TestAHeldBillSaysWhatHoldsIt:
         joined = " ".join(step.blockers).lower()
         assert any(ch.isdigit() for ch in joined), \
             f"the blocker names no number: {step.blockers}"
-        assert ("cash" in joined or "balance" in joined or "account" in joined
-                or "floor" in joined), step.blockers
+        assert (("cash" in joined or "balance" in joined or "account" in joined
+                or "floor" in joined or "holds" in joined)), step.blockers
 
     def test_the_reserve_floor_names_the_floor(self):
         # 5,400 cash, a 4,000 bill, a 5,000 floor: the bill breaches the floor

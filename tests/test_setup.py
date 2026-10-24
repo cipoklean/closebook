@@ -391,7 +391,7 @@ class TestBeneficiaryFormErrors:
             "country": "US", "currency": "USD", "payout_method": "LOCAL",
             "account_number": "000123456789", "routing_value": "021000021",
             "bank_name": "First National", "city": "Atlanta", "state": "GA",
-            "postcode": "30309",
+            "postcode": "30309", "street_address": "1 Peachtree St",
         })
         assert body["payment_methods"] == ["LOCAL"]
         assert "payment_methods" not in body["beneficiary"]
@@ -407,6 +407,9 @@ class TestBeneficiaryFormErrors:
             "country": "GB", "currency": "GBP", "payout_method": "LOCAL",
             "account_number": "12345678", "routing_value": "040004",
             "bank_name": "Barclays",
+            # The address block is required by Airwallex for every corridor we
+            # have tested (US LOCAL, GB LOCAL, NL SWIFT): see beneficiary_form.
+            "street_address": "1 High St", "city": "London", "postcode": "EC1A 1BB",
         })
         assert body["beneficiary"]["bank_details"]["account_routing_type1"] == "sort_code"
 
@@ -416,6 +419,7 @@ class TestBeneficiaryFormErrors:
             "name": "Rotterdam Freight BV", "entity_type": "COMPANY",
             "country": "NL", "currency": "EUR", "payout_method": "SWIFT",
             "account_number": "NL08INGB0000001234", "swift_code": "INGBNL2A",
+            "street_address": "1 Damrak", "city": "Amsterdam", "postcode": "1011AA",
         })
         bd = body["beneficiary"]["bank_details"]
         assert bd["iban"] == "NL08INGB0000001234"
@@ -425,7 +429,9 @@ class TestBeneficiaryFormErrors:
         from app.domain.beneficiary_form import build_payload
         with pytest.raises(W.WorkspaceRefused) as exc:
             build_payload({"name": "X", "country": "NL", "currency": "EUR",
-                           "payout_method": "SWIFT", "account_number": "NL08INGB0"})
+                           "payout_method": "SWIFT", "account_number": "NL08INGB0",
+                           "street_address": "1 Damrak", "city": "Amsterdam",
+                           "postcode": "1011AA"})
         assert "SWIFT" in str(exc.value)
 
     def test_a_local_payment_with_a_routing_type_but_no_number_is_refused(self):
@@ -450,7 +456,9 @@ class TestBeneficiaryFormErrors:
             build_payload({"name": "X", "country": "US", "currency": "USD",
                            "payout_method": "LOCAL", "account_number": "1",
                            "routing_value": "021000021",
-                           "bank_account_category": "checking"})
+                           "bank_account_category": "checking",
+                           "street_address": "1 Peachtree St", "city": "Atlanta",
+                           "state": "GA", "postcode": "30303"})
         assert "016" in str(exc.value)
 
 

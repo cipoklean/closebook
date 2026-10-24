@@ -1840,6 +1840,14 @@ def _money_in(c: dict) -> str:
         paid_label = (f'{r["currency"]} {money(r["paid_minor"])} of '
                       f'{money(r["amount_minor"])}' if r["paid_minor"]
                       else "Nothing paid yet")
+        # WHAT IS STILL OWED, in words. A part-paid invoice showed as
+        # "USD 800.00 of 1,200.00 · 66%", so the reader had to do the
+        # subtraction to find the USD 400.00 they are chasing — on the tab whose
+        # whole job is what came in and what it was for.
+        owed = r.get("open_minor") or 0
+        owed_line = (f'<div class="x-help" data-testid="still-to-collect">'
+                     f'{r["currency"]} {money(owed)} still to collect</div>'
+                     if (not done and r["paid_minor"] and owed > 0) else "")
         rows.append(
             '<div class="x-inv">'
             f'<div class="x-inv-who"><b>{e(r["number"])}</b>'
@@ -1848,7 +1856,8 @@ def _money_in(c: dict) -> str:
             f'<span>{paid_label}</span>'
             f'<b>{r["pct"]}%</b></div>'
             f'<div class="x-bar{_flag(done, "x-bar--done")}">'
-            f'<span style="width:{max(2, r["pct"])}%"></span></div></div>'
+            f'<span style="width:{max(2, r["pct"])}%"></span></div>'
+            f'{owed_line}</div>'
             f'<span class="x-pill x-pill--'
             f'{"good" if done else ("warn" if r["status"] == "PARTIAL" else "info")}">'
             f'{e(r["status"])}</span></div>')
@@ -1949,7 +1958,9 @@ def _money_in(c: dict) -> str:
     note = ('<div class="x-note" style="margin-top:16px">'
             f'{_I["info"]}<span>Applying a held payment to an invoice needs a '
             'person: it is on <b>Needs your OK</b>, where you can match it, '
-            'record a refund owed, or release it as income.</span></div>')
+            'record a refund owed, or release it as income. Until one of those '
+            'is done this cash <b>is not spendable</b>: it is in the bank, and a '
+            'bill in this book cannot be paid from it.</span></div>')
     empty_un = ('<p class="x-empty">Nothing is held. Every deposit that landed '
                 'was matched with certainty.</p>')
     side = _card(span="x-span-4", inner=(
@@ -2663,7 +2674,11 @@ def _ai(c: dict) -> str:
 
     feed = feed[:24]
 
-    body = "".join(feed) if feed else '<p class="x-empty">No model calls yet.</p>'
+    body = "".join(feed) if feed else (
+        '<p class="x-empty" data-testid="ai-empty">No model calls yet. '
+        'Record an inflow in <b>Money in</b> (simulate a customer payment, or '
+        'poll Airwallex for one that landed) and the model\'s proposal and the '
+        'code\'s verdict on it appear here side by side.</p>')
 
     if total > len(shown):
 
@@ -2692,6 +2707,25 @@ def _ai(c: dict) -> str:
 # only through planner -> policy -> executor, and the way to keep that true is
 # to give the UI nothing to call.
 _CURRENCY_HINT = "3-letter code, e.g. USD"
+
+
+def _known_good_helper() -> str:
+    """The one beneficiary input we have PROVED works, on the form.
+
+    Rendered from `beneficiary_form.KNOWN_GOOD_BENEFICIARY` rather than typed
+    into the template, so the example and the value that was verified against
+    the sandbox cannot drift apart.
+    """
+    from .domain.beneficiary_form import KNOWN_GOOD_BENEFICIARY as K
+
+    return ('<div class="x-note" data-testid="beneficiary-example">'
+            f'{_I["info"]}<span><b>A beneficiary input that works</b> (US, LOCAL, '
+            f'USD): entity COMPANY, account {e(K["account_number"])}, routing '
+            f'{e(K["routing_value"])} (aba), category {e(K["bank_account_category"])}, '
+            f'and the FULL address: {e(K["street_address"])}, {e(K["city"])}, '
+            f'{e(K["state"])}, {e(K["postcode"])}. Airwallex refuses a partial '
+            f'address, so fill Street address, City, Postcode and State.</span>'
+            f'</div>')
 
 
 def _field(name: str, label: str, *, span: str = "x-span-3", kind: str = "text",
@@ -2914,6 +2948,13 @@ def _setup(c: dict) -> str:
         _cardhead("Suppliers", "A supplier is only payable once Airwallex has "
                                "given it a beneficiary. Validation runs first, "
                                "and any refusal is shown in Airwallex's own words.")
+        # ONE KNOWN-GOOD INPUT, on the form a tester fills. This is not
+        # decoration: a beneficiary is refused without the FULL address (Airwallex
+        # answers with a schema dump naming beneficiary.address.postcode and
+        # friends), and an operator with nothing to copy is stuck. The values come
+        # from `beneficiary_form.KNOWN_GOOD_BENEFICIARY`, which is the input that
+        # was verified by CREATING a real sandbox beneficiary.
+        + _known_good_helper()
         + '<form class="x-form" method="post" action="/setup/suppliers">'
         + _field("name", "Supplier name", span="x-span-3",
                  placeholder="Atlanta Packaging", required=True)

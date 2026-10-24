@@ -895,12 +895,28 @@ async def approve_inflow_route(inflow_id: int, request: Request):
             matches = approve_inflow(s, inflow, approved_by=by)
         except LedgerError as exc:
             return _back(request, tab="ok", err=str(exc))
-        applied = ", ".join(str(m.invoice_receivable_id) for m in matches)
+        applied = ", ".join(sorted({
+            (s.get(InvoiceReceivable, m.invoice_receivable_id).number
+             if s.get(InvoiceReceivable, m.invoice_receivable_id) is not None
+             else str(m.invoice_receivable_id)) for m in matches}))
+        # WHAT IS STILL OWED, in the same sentence that reports the payment. The
+        # operator reads this line first, and "USD 800.00 has been applied" on a
+        # USD 1,200.00 invoice is only half the answer.
+        outstanding = []
+        for inv_id in {m.invoice_receivable_id for m in matches}:
+            inv = s.get(InvoiceReceivable, inv_id)
+            if inv is None:
+                continue
+            left = max(0, inv.amount_minor - inv.amount_paid_minor)
+            if left > 0:
+                outstanding.append(f"{money_str(left, inv.currency)} is still to "
+                                   f"collect on {inv.number}")
         amount = inflow.amount_minor
         ccy = inflow.currency
+    tail = (". " + "; ".join(outstanding)) if outstanding else ""
     return _back(request, tab="ok", ok=(
         f"Approved. {money_str(amount, ccy)} has been applied to invoice "
-        f"id(s) {applied}; the invoice and the ledger have both moved."
+        f"{applied}; the invoice and the ledger have both moved{tail}"
         + _run_loop("approval")))
 
 

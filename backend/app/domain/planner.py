@@ -267,7 +267,9 @@ def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: i
                     currency: str, floor_minor: int, forecast, what: str,
                     conversion: bool = False,
                     prefer_inflow: Optional[str] = None,
-                    fund_currency: Optional[str] = None) -> tuple[str, str]:
+                    fund_currency: Optional[str] = None,
+                    book_held_minor: Optional[int] = None,
+                    unattributed_minor: int = 0) -> tuple[str, str]:
     """(reason, code) for a payment that does not fit, or ("", "") if it does.
 
     ONE basis: `available_after` already has the floor taken off, and it was
@@ -276,14 +278,26 @@ def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: i
     position two different ways.
 
     The three outcomes are different problems with different fixes:
-      * not enough money in the account at all  -> insufficient_balance
+      * not enough money free to spend          -> insufficient_balance
       * fits only once an invoiced payment lands -> waits_for_inflow, named
       * cannot fit and no expected inflow covers it -> reserve_floor
+
+    TWO NUMBERS, NEVER ONE. `currency_held` is what is SPENDABLE (cash minus in
+    flight, suspense and refunds) and it is what decides. `book_held_minor` is
+    what the book actually HOLDS, and `unattributed_minor` is how much of that
+    is not attributed to an invoice yet. Saying only the first printed "the
+    account holds USD 0.00" for a book holding USD 2,000.00 in a deposit nobody
+    had resolved — a false statement about the account that sends the operator
+    looking for money that is on their own screen, in Money in, waiting for one
+    decision.
     """
     spends_budget = currency == "USD"
     enough_cash = currency_held >= needed_minor
     if enough_cash and (not spends_budget or available_after >= 0):
         return "", ""
+
+    book_held = int(currency_held if book_held_minor is None else book_held_minor)
+    unattr = max(int(unattributed_minor or 0), 0)
 
     # How much MORE real cash would have to be here for this to fit. Two ways to
     # be short: the account does not hold the money at all, or it holds it but
@@ -308,23 +322,35 @@ def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: i
             if enough_cash:
                 return (f"waits for {who} to land: paying it now would leave cash "
                         f"{left_txt}, below the {floor_txt} floor"), "waits_for_inflow"
-            return (f"waits for {who} to land: the account holds "
-                    f"{money_str(max(currency_held, 0), currency)} and this needs "
+            return (f"waits for {who} to land: the book holds "
+                    f"{money_str(max(book_held, 0), currency)} and this needs "
                     f"{money_str(needed_minor, currency)}"), "waits_for_inflow"
 
     if not enough_cash:
+        if unattr:
+            # THE HONEST SENTENCE. Somebody has to resolve the deposit before
+            # this can be paid, and that is the only useful thing to say.
+            return (f"{what}: needs {money_str(needed_minor, currency)} but "
+                    f"nothing is free to spend: the book holds "
+                    f"{money_str(max(book_held, 0), currency)} and "
+                    f"{money_str(unattr, currency)} of it is waiting on a match "
+                    f"in Money in"), "insufficient_balance"
         return (f"{what}: needs {money_str(needed_minor, currency)} "
-                f"but the account holds "
-                f"{money_str(max(currency_held, 0), currency)}"), \
+                f"but the book holds "
+                f"{money_str(max(book_held, 0), currency)}"), \
                "insufficient_balance"
 
+    if unattr:
+        return (f"{what}: paying it now would leave cash {left_txt}, below the "
+                f"{floor_txt} floor, and {money_str(unattr, currency)} of the "
+                f"cash is waiting on a match in Money in"), "reserve_floor"
     return (f"{what}: paying it now would leave cash {left_txt}, below the "
             f"{floor_txt} floor"), "reserve_floor"
 
 
 
 def _restate_deferrals(plan, deferred_ctx, *, available, holdings, floor_minor,
-                       forecast) -> None:
+                       forecast, book_holdings=None, unattributed=None) -> None:
     """Re-say every deferral against the position the WHOLE run leaves behind.
 
     A blocked payable is costed at its turn in the loop, before the payments
@@ -348,11 +374,15 @@ def _restate_deferrals(plan, deferred_ctx, *, available, holdings, floor_minor,
         if needed <= 0:
             continue
         f_ccy = d["fund_ccy"] or st.currency
+        book_holdings = book_holdings or {}
+        unattributed = unattributed or {}
         bs, bc = _blocked_reason(
             needed_minor=needed, available_after=available(needed),
             currency_held=int(holdings.get(f_ccy, 0)),
             currency=f_ccy, floor_minor=floor_minor, forecast=forecast,
-            what=d["what"], prefer_inflow=d["prefer"], fund_currency=f_ccy)
+            what=d["what"], prefer_inflow=d["prefer"], fund_currency=f_ccy,
+            book_held_minor=int(book_holdings.get(f_ccy, 0)),
+            unattributed_minor=int(unattributed.get(f_ccy, 0)))
         if not bs:
             continue
         # Restate the cash half ONLY. A dependency blocker is not affected by
@@ -547,7 +577,9 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
                 floor_minor=floor_minor, forecast=pos.forecast,
                 what=f"buy {money_str(move_minor, p.currency)} for {p.number}",
                 conversion=True, prefer_inflow=p.depends_on_receivable,
-                fund_currency=bccy)
+                fund_currency=bccy,
+                book_held_minor=pos.balances.get(bccy, 0),
+                unattributed_minor=pos.suspense.get(bccy, 0))
             if bs:
                 blockers.append(bs)
                 codes.append(bc)
@@ -585,7 +617,9 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
             currency=p.currency.upper(), floor_minor=floor_minor,
             forecast=pos.forecast,
             what=f"pay {p.number} ({money_str(move_minor, p.currency)})",
-            prefer_inflow=p.depends_on_receivable, fund_currency=bccy)
+            prefer_inflow=p.depends_on_receivable, fund_currency=bccy,
+            book_held_minor=pos.balances.get(p.currency.upper(), 0),
+            unattributed_minor=pos.suspense.get(p.currency.upper(), 0))
         if bs:
             blockers.append(bs)
             codes.append(bc)
@@ -675,6 +709,7 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
 
     _restate_deferrals(plan, deferred_ctx, available=_available,
                        holdings=working, floor_minor=floor_minor,
-                       forecast=pos.forecast)
+                       forecast=pos.forecast,
+                       book_holdings=pos.balances, unattributed=pos.suspense)
 
     return plan

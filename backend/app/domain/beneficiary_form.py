@@ -40,6 +40,76 @@ class BeneficiaryOutcome:
     raw: dict = field(default_factory=dict)
 
 
+#: The beneficiary's address block, as Airwallex actually requires it.
+#:
+#: VERIFIED LIVE (2026-10-24) for three corridors: a US LOCAL, a GB LOCAL and
+#: an NL SWIFT beneficiary are ALL refused without it, and the refusal names
+#: `beneficiary.address.postcode`, `beneficiary.address.street_address`,
+#: `beneficiary.address.city` and, for the US, `beneficiary.address.state`:
+#
+#     "The request failed our schema validation. Refer to the errors object for
+#      erroneous fields, codes and parameters., beneficiary.address.postcode
+#      (code 001); beneficiary.address.street_address (code 001); ..."
+#
+# That sentence is where a tester stopped: it reads as a required-field prompt
+# and says nothing about what to type. Supplying the whole block creates the
+# beneficiary (verified live: US LOCAL `d8cf2535-...`, GB LOCAL `03972045-...`,
+# NL SWIFT `eb801366-...`).
+ADDRESS_REQUIRED = ("street_address", "city", "postcode")
+#: A US corridor wants the state as well.
+ADDRESS_STATE_COUNTRIES = {"US"}
+
+#: ONE KNOWN-GOOD INPUT, shown on the Setup form and quoted in the refusal. Both
+#: discovered by creating real beneficiaries in the sandbox, not by reading a
+#: schema: a tester needs something to copy, not a description.
+KNOWN_GOOD_BENEFICIARY = {
+    "name": "Acme Packaging", "country": "US", "currency": "USD",
+    "payout_method": "LOCAL", "entity_type": "COMPANY",
+    "account_name": "Acme Packaging", "account_number": "1234567890",
+    "routing_value": "021000021", "bank_account_category": "Checking",
+    "street_address": "1 Peachtree St", "city": "Atlanta", "state": "GA",
+    "postcode": "30303",
+}
+
+_FIELD_LABEL = {"street_address": "Street address", "city": "City",
+                "postcode": "Postcode", "state": "State"}
+
+
+def missing_address_fields(f: dict) -> list[str]:
+    """Which of the address fields Airwallex requires are absent.
+
+    Empty when the block is complete. The list is what the refusal NAMES, so an
+    operator learns exactly which box is empty instead of re-reading a schema
+    error. `state` is asked for only on a US corridor, because a non-US
+    beneficiary that supplied one was accepted with the rest of the block.
+    """
+    country = (f.get("country") or "").strip().upper()
+    required: list[str] = list(ADDRESS_REQUIRED)
+    if country in ADDRESS_STATE_COUNTRIES:
+        required.append("state")
+    return [name for name in required if not (f.get(name) or "").strip()]
+
+
+def _require_address(f: dict) -> None:
+    """Refuse a beneficiary whose address is incomplete, in plain words."""
+    missing = missing_address_fields(f)
+    if not missing:
+        return
+    labels = ", ".join(_FIELD_LABEL[m] for m in missing)
+    example = KNOWN_GOOD_BENEFICIARY
+    raise WorkspaceRefused(
+        f"Airwallex needs the beneficiary's full address. Missing: {labels}. "
+        f"Fill in Street address, City, Postcode"
+        + (f" and State (a US corridor needs the state)"
+           if (f.get("country") or "").strip().upper() in ADDRESS_STATE_COUNTRIES
+           else "")
+        + f", or the beneficiary is refused with a schema validation error "
+        f"naming those fields. One input that works: Street address "
+        f"{example['street_address']}, City {example['city']}, "
+        f"State {example['state']}, Postcode {example['postcode']}."
+    )
+
+
 def build_payload(f: dict) -> dict:
     """Form fields -> the exact body `POST /beneficiaries/create` wants.
 
@@ -73,6 +143,10 @@ def build_payload(f: dict) -> dict:
         raise WorkspaceRefused(
             "The account number is required. For a SWIFT corridor in an IBAN "
             "country, this is the IBAN itself.")
+    # THE ADDRESS IS REQUIRED, and asking for it here means the refusal says so
+    # in words instead of arriving as "The request failed our schema
+    # validation." with a dotted field list after it.
+    _require_address(f)
 
     address = {}
     for key in ("street_address", "city", "state", "postcode"):
@@ -184,11 +258,34 @@ def plain_error(exc: Exception) -> str:
         message = None
 
     head = str(message or code or exc)
+    # AIRWALLEX'S BOILERPLATE IS NOT A MESSAGE. A schema failure leads with "The
+    # request failed our schema validation. Refer to the errors object for
+    # erroneous fields, codes and parameters." and only then names the fields,
+    # which a tester read as a required-field prompt with no field to fill.
+    head = head.replace(
+        "The request failed our schema validation. Refer to the errors object "
+        "for erroneous fields, codes and parameters.", "needs these fields").strip(" ,")
+    details = [_translate_field(d) for d in details]
     if details:
         return f"Airwallex refused: {head}, {'; '.join(details)}."
     if status is not None:
         return f"Airwallex refused (HTTP {status}): {head}."
     return f"Airwallex refused: {head}."
+
+
+def _translate_field(detail: str) -> str:
+    """`beneficiary.address.postcode (code 001)` -> `Postcode, e.g. 30303 (code 001)`.
+
+    The dotted path is Airwallex's name for a box on OUR form, and the trailing
+    code is the vendor's, which is worth keeping for whoever has to quote it.
+    """
+    out = detail
+    for key, label in _FIELD_LABEL.items():
+        if f"address.{key}" in out:
+            example = (f", e.g. {KNOWN_GOOD_BENEFICIARY[key]}"
+                       if key in ("state", "postcode") else "")
+            out = out.replace(f"beneficiary.address.{key}", f"{label}{example}")
+    return out.replace("beneficiary.", "").replace("bank_details.", "")
 
 
 def validate_and_create(db_session, f: dict, *, beneficiaries, request_id=None):

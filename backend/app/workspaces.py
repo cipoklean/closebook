@@ -99,13 +99,45 @@ def book(suffix: str):
         handle = _books.get(suffix)
         if handle is None:
             path = root() / f"{suffix}.sqlite3"
+            fresh = not path.exists()
             handle = DB(f"sqlite:///{path}")
+            if fresh:
+                _stamp_a_new_book(suffix, handle)
             _books[suffix] = handle
         return handle
 
 
 def current():
     return _current.get()
+
+
+def _stamp_a_new_book(suffix: str, handle) -> None:
+    """A new book's history starts NOW, once, and stays put.
+
+    WHY THIS IS A WRITE. `poll_deposits` skips deposits older than the book's
+    `settings.deposits_from`, and for a book that has never saved Settings that
+    value came from a TRANSIENT default row recomputed on every read: the cutoff
+    was *the moment of the read*, so every deposit in the sandbox was older than
+    it and a fresh book's "Check Airwallex for new deposits" answered "no new
+    deposits since the last one" for ever. Writing the row when the FILE is
+    created makes the cutoff stable and true: what arrived before this book
+    existed is history, not this book's money.
+
+    Book CREATION is a write path by definition, so this does not put a write on
+    a read: reading a page still never touches the database.
+    """
+    try:
+        from .domain.settings_store import get_or_create
+
+        with handle.session_scope() as s:
+            get_or_create(s)
+    except Exception:                              # noqa: BLE001
+        # A book that cannot be stamped still works: it just filters deposits by
+        # a cutoff computed at read time, which is the behaviour this replaces.
+        import logging
+
+        logging.getLogger("closebook.workspaces").exception(
+            "could not stamp a new book %s", suffix)
 
 
 def current_suffix() -> str:
