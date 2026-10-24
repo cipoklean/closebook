@@ -27,3 +27,24 @@ os.environ.setdefault("CLOSEBOOK_HMAC_SECRET", "test-only-not-a-real-secret")
 # LLM_API_KEY makes the matcher honestly unavailable, which is also the state
 # the offline tests assert about.
 os.environ["LLM_API_KEY"] = ""
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """A red run names its failures where anyone can read them.
+
+    The CI job log needs repository access, so a failure that only says
+    "Process completed with exit code 2" costs a round trip through somebody who
+    can sign in. GitHub parses `::error` lines out of ANY step's stdout into run
+    annotations, which are readable without access, so the failing test ids are
+    re-emitted here. On a green run this prints nothing, and outside CI the same
+    lines are just text.
+    """
+    failed = [r.nodeid for r in terminalreporter.stats.get("failed", [])]
+    errors = [r.nodeid for r in terminalreporter.stats.get("error", [])]
+    for nodeid in (failed + errors)[:15]:
+        print(f"::error title=pytest failure::{nodeid}")
+    if failed or errors:
+        print(f"::error title=pytest summary::"
+              f"{len(failed)} failed, {len(errors)} errors, "
+              f"{len(terminalreporter.stats.get('passed', []))} passed")
+
