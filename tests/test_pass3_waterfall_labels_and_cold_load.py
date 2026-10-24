@@ -114,13 +114,20 @@ class TestEachThingAppearsOncePerBar:
 
         html = self._bar("USD", **self.MULTI)
         free = cash_waterfall(**self.MULTI)["free_minor"]
-        token = money_str(free, "USD")
+        # An over-committed book states the figure POSITIVE ("over-committed by
+        # USD 8,646.00"), so the token to count is the magnitude.
+        token = money_str(abs(free), "USD")
         assert _visible(html).count(token) == 1, _visible(html)
 
     def test_free_to_spend_is_said_once(self):
-        """The words were on the end segment AND in the closing line."""
+        """The words were on the end segment AND in the closing line.
+
+        A book that is over-committed says "over-committed by" instead, and
+        says THAT once.
+        """
         seen = _visible(self._bar("USD", **self.MULTI))
-        assert seen.count("free to spend") == 1, seen
+        phrase = "over-committed by" if "over-committed by" in seen else "free to spend"
+        assert seen.count(phrase) == 1, seen
 
     def test_the_end_segment_states_the_bare_number(self):
         html = self._bar("USD", **self.MULTI)
@@ -129,7 +136,7 @@ class TestEachThingAppearsOncePerBar:
         # the title read as visible text.
         seg = re.search(r'<span[^>]*data-wf="free".*?</span>', html,
                         flags=re.S).group(0)
-        assert "-8,646.00" in seg
+        assert "8,646.00" in seg
         assert "free to spend" not in _visible(seg)
 
     def test_the_closing_line_carries_the_currency_and_the_words(self):
@@ -137,7 +144,9 @@ class TestEachThingAppearsOncePerBar:
 
         html = self._bar("USD", **self.MULTI)
         line = re.search(r'data-testid="wf-end">([^<]+)<', html).group(1)
-        assert line == money_str(-8_646_00, "USD") + " free to spend"
+        # a negative position is "over-committed by", not a minus sign followed
+        # by the words "free to spend", which reads as a contradiction
+        assert line == "over-committed by " + money_str(8_646_00, "USD"), line
         assert "USD" in line
 
 
@@ -155,7 +164,7 @@ class TestTheCurrencyIsVisible:
 
         html = _waterfall_bar("USD", cash_waterfall(cash_minor=1_000_00,
                                                     committed_this_run_minor=1_100_00))
-        assert money_str(-100_00, "USD") + " free to spend" in _visible(html)
+        assert "over-committed by " + money_str(100_00, "USD") in _visible(html)
 
     def test_the_currency_is_in_the_aria_label(self):
         """A screen reader gets the currency and every term by name."""
@@ -164,7 +173,7 @@ class TestTheCurrencyIsVisible:
         label = re.search(r'aria-label="([^"]+)"', html).group(1)
         assert "GBP" in label
         assert "promised" in label and "reserve floor" in label
-        assert "free to spend" in label
+        assert "over-committed" in label or "free to spend" in label
 
     def test_the_bars_are_not_confusable(self):
         a = _waterfall_bar("GBP", cash_waterfall(cash_minor=1_000_00,

@@ -359,6 +359,63 @@ async def dev_transfer_transition(transfer_id: str, request: Request):
         f"{_run_loop('dev ' + what)}"))
 
 
+@app.middleware("http")
+async def _workspace(request, call_next):
+    """Pick the book this request works in, from `?ws=`.
+
+    TESTER ONLY. Without `CLOSEBOOK_WORKSPACES=1` a `?ws=` query string is
+    refused rather than ignored: silently serving the operator's book to a
+    caller who asked for another one is exactly the confusion this prevents.
+    """
+    from . import workspaces
+
+    suffix = (request.query_params.get("ws") or "").strip()
+    if not suffix:
+        return await call_next(request)
+
+    if not workspaces.enabled():
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            {"ok": False, "message": "This instance does not offer per-test "
+                                     "workspaces."}, status_code=404)
+    if not workspaces.valid(suffix):
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            {"ok": False, "message": "A workspace name may use letters, digits, "
+                                     "dashes and underscores, up to 40 characters."},
+            status_code=400)
+
+    token = workspaces.set_current(workspaces.book(suffix))
+    try:
+        response = await call_next(request)
+    finally:
+        workspaces.reset(token)
+    # So a tester can see WHICH book it is looking at without opening the URL.
+    response.headers["x-closebook-workspace"] = suffix
+    return response
+
+
+@app.post("/workspaces/new")
+async def workspaces_new(request: Request):
+    """Mint a fresh, empty book and go to it. The Setup button posts here."""
+    from . import workspaces
+
+    if not workspaces.enabled():
+        return _back(request, tab="setup",
+                     err="This instance does not offer per-test workspaces.")
+    suffix = workspaces.new_suffix()
+    workspaces.book(suffix)                 # created empty, on purpose
+    if "application/json" in (request.headers.get("accept") or ""):
+        return {"ok": True, "workspace": suffix,
+                "url": f"/app?tab=setup&ws={suffix}",
+                "message": f"Started a fresh book: {suffix}."}
+    from fastapi.responses import RedirectResponse
+
+    return RedirectResponse(f"/app?tab=setup&ws={suffix}", status_code=303)
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {

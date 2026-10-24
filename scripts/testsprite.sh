@@ -94,6 +94,13 @@ export OPERATOR_NAME="${OPERATOR_NAME:-testsprite}"
 # it; CLOSEBOOK_INGEST_UNCLAIMED=0 additionally stops this instance sweeping up
 # the OPERATOR's deposits, or any genuine arrival, as if it were a test.
 export CLOSEBOOK_INSTANCE="${CLOSEBOOK_INSTANCE:-testsprite}"
+
+# PER-TEST BOOKS. Each `?ws=<suffix>` gets its own SQLite file, so 63 tests do
+# not share one set of commitments, bill numbers and approvals. Gated on this
+# variable, which only this script sets: on the operator's instance a `?ws=`
+# request is refused rather than served from someone else's book.
+export CLOSEBOOK_WORKSPACES=1
+export CLOSEBOOK_WORKSPACE_ROOT="${ROOT}/data/workspaces"
 export CLOSEBOOK_INGEST_UNCLAIMED=0
 # ONE PIN CONCEPT. The gate reads DEMO_APPROVER_PIN and knows nothing about
 # which instance it is in; the VALUE is what differs. Keeping the name in .env

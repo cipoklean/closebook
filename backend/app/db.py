@@ -174,6 +174,19 @@ def get_default_db() -> DB:
     built its own engine and ran its own DDL. A guard that is only correct when
     nobody is looking is not a guard.
     """
+    # A REQUEST'S WORKSPACE WINS. Resolved here rather than threaded through
+    # every caller, so `session_scope()`, the routes, the dashboard and the
+    # planner all follow `?ws=` without knowing it exists. A thread with no
+    # workspace (a background job, a script) keeps getting the default book.
+    try:
+        from .workspaces import current
+
+        chosen = current()
+        if chosen is not None:
+            return chosen
+    except Exception:                      # noqa: BLE001
+        pass
+
     global _default_db
     if _default_db is None:
         with _DEFAULT_DB_LOCK:

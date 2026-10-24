@@ -50,12 +50,24 @@ def blockers_html(p: dict) -> str:
     capacity) and the dashboard appends the cash-basis floor reason computed by
     the same code the tiles use.
     """
-    items = [x for x in (p.get("plan_blockers") or []) if x]
+    # DEDUPED. The planner can record the same sentence twice (cash and the
+    # floor describe the same shortfall in the same words), and two identical
+    # paragraphs on a card read as two problems.
+    items = []
+    for _x in (p.get("plan_blockers") or []):
+        if _x and _x not in items:
+            items.append(_x)
     if not items:
         fallback = p.get("plan_reason") or p.get("step_reason")
         items = [fallback] if fallback else []
     if not items:
-        return '<p>Held by policy. Open Money out for the full rule.</p>'
+        # A BARE "HELD BY POLICY" IS NOT A REASON. Run 5 had three bills showing
+        # exactly that, and an operator cannot act on it. If the planner stored
+        # no blocker, say what IS known and where the rule lives, rather than
+        # asserting a policy nobody can see.
+        return ('<p data-testid="blocker-unknown">Held. The plan did not record a '
+                'reason for this one, so treat the figures on Money out as the '
+                'evidence and re-plan before acting.</p>')
     if len(items) == 1:
         return f'<p>{e(items[0])}</p>'
     return ('<ul class="x-blockers">'
@@ -181,7 +193,15 @@ def _waterfall_bar(ccy: str, w: dict) -> str:
     red where it happens rather than only at the end.
     """
     free = w["free_minor"]
-    closing = f'{money_str(free, ccy)} free to spend'
+    # A NEGATIVE FREE FIGURE IS NOT "MINUS 4,880 FREE". It is a business that
+    # has committed more than it holds, which is a different sentence and a
+    # different decision. Name it, so the operator reads the situation rather
+    # than a minus sign.
+    if free < 0:
+        closing = f'over-committed by {money_str(-free, ccy)}'
+    else:
+        closing = f'{money_str(free, ccy)} free to spend'
+
     start = w["start_minor"] or 1
 
     # keep the start (cash) and any subtraction that actually takes something
@@ -630,18 +650,31 @@ _JS = """
           return;
         }
         if (tries < 20) { window.setTimeout(ask, 1000); }
-        else {
-          var dead = document.querySelector("[data-testid='accounts-loading']");
-          if (dead) {
-            dead.textContent =
-              "Could not reach Airwallex for the account list. Reload to try again.";
-          }
-        }
+        else { giveUp(); }
       })
-      .catch(function () { if (tries < 20) window.setTimeout(ask, 1000); });
+      .catch(function () {
+        // A FAILED FETCH MUST SETTLE TOO. This branch retried and then did
+        // NOTHING on the last try, so a request that never succeeded left the
+        // control disabled with "Loading accounts..." beside it for ever: a
+        // spinner that cannot finish, which is what hung a Setup test.
+        if (tries < 20) { window.setTimeout(ask, 1000); } else { giveUp(); }
+      });
   }
+
+
+  function giveUp() {
+    sel.removeAttribute("data-loading");
+    var dead = document.querySelector("[data-testid='accounts-loading']");
+    if (dead) {
+      dead.setAttribute("data-settled", "1");
+      dead.textContent =
+        "Could not reach Airwallex for the account list. The rest of this "
+        + "page still works; reload to try the list again.";
+    }
+  }
+
   ask();
-}());
+  }());
 
 /* --- jump to a payment's row inside the fenced sandbox panel ----------------
    A plain anchor cannot open a collapsed <details>, so the link would land on
@@ -1994,12 +2027,15 @@ def _money_out(c: dict) -> str:
         # "Held" on its own tells a reader nothing they can act on. ALL the
         # rules, not the first.
         if p.get("plan_blockers"):
-            # The rules are stated ONCE, on Home, next to the plan they
-            # explain. Here the reader gets the verdict and a way to the why.
+            # THE BLOCKER GOES ON THE CARD. It used to say "Held by policy" and
+            # link away, so three bills in run 5 showed a verdict and no reason
+            # at all. A person looking at a held payment needs the sentence with
+            # the numbers in it, here, and the link is a bonus rather than the
+            # whole answer.
             note = (f'<div class="x-callnote" style="margin-top:20px">'
-                    f'{_I["info"]}<div><p>Held by policy. '
-                    f'<a href="/app?tab=home#held-{e(p["number"])}">'
-                    f'Why it is held</a></p></div></div>')
+                    f'{_I["info"]}<div>{blockers_html(p)}'
+                    f'<p><a href="/app?tab=home#held-{e(p["number"])}">'
+                    f'See it with the rest of the plan</a></p></div></div>')
         else:
             reason = (p.get("step_reason") or "").strip()
             if not reason:

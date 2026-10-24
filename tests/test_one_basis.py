@@ -352,11 +352,14 @@ class TestThePageShowsIt:
         _payable("PO-X", "USD", 300_000)
         _receivable("INV-BIG", "USD", 1_200_000)
         ctx = build_context([])
-        for tab, expect_text in (("home", True), ("money-out", False), ("ok", False)):
+        for tab, expect_text in (("home", True), ("money-out", True), ("ok", False)):
             html = render_app(ctx, tab=tab)
             if expect_text:
+                # RUN 5: the card now carries its blocker. A held payment whose
+                # row says only "Held by policy" gave an operator nothing to act
+                # on, so money-out states the sentence and still links to Home.
                 assert "waits for INV-BIG to land" in html, tab
-                assert 'id="held-PO-X"' in html, "Home must own the anchor"
+                assert "held-PO-X" in html, f"{tab} must link to Home"
             else:
                 assert "waits for INV-BIG to land" not in html, tab
                 assert "held-PO-X" in html, f"{tab} must link to it"

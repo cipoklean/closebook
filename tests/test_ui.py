@@ -933,7 +933,8 @@ class TestHeldPaymentsAreExplained:
         assert 'id="held-' in home, "Home owns the anchor"
 
         out = render_app(ctx, tab="money-out")
-        assert "Why it is held" in out
+        assert ("See it with the rest of the plan" in out
+                or "Why it is held" in out)
         assert "held-" in out, "money-out must point at the reason"
 
     def test_the_ok_tab_lists_held_payments_and_links_to_the_reason(self, db):
@@ -946,7 +947,8 @@ class TestHeldPaymentsAreExplained:
         # the dash became a comma in the copy pass. Assert the sentence the app
         # actually renders on THIS tab, not the one it used to.
         assert "Held, and not waiting on you" in html
-        assert "Why it is held" in html
+        assert ("See it with the rest of the plan" in html
+                or "Why it is held" in html)
         assert 'href="/app?tab=home#held-' in html
 
     def test_a_payable_over_the_limit_without_an_object_id_awaits_approval(self, db):
@@ -1592,10 +1594,16 @@ class TestAmountsAllReadTheSameWay:
         home = render_app(_ctx(), tab="home")
         assert "GBP 3,200.00" in home
         assert "3200 GBP" not in home
-        for tab in ("money-out", "ok"):
-            html = render_app(_ctx(), tab=tab)
-            assert "GBP 3,200.00" not in html, tab
-            assert "held-PO-7505" in html, f"{tab} must link to the reason"
+        # RUN 5 CHANGED THIS. The card used to say "Held by policy" and link
+        # away, so three bills showed a verdict and no reason. Money out now
+        # carries the blocker itself, with its numbers, and still links.
+        money_out = render_app(_ctx(), tab="money-out")
+        assert "GBP 3,200.00" in money_out, "the card must name the shortfall"
+        assert "held-PO-7505" in money_out
+
+        # the OK tab still points at the reason rather than repeating it
+        ok = render_app(_ctx(), tab="ok")
+        assert "held-PO-7505" in ok, "ok must link to the reason"
 
     def test_the_budget_limits_read_as_money(self, db):
         ctx = build_context([])

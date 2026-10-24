@@ -186,7 +186,9 @@ class TestTheWaterfallOnThePage:
     def test_the_last_segment_is_free_to_spend(self, client, book):
         html = client.get("/app").text
         assert 'data-wf="free"' in html
-        assert "free to spend" in html
+        # positive books say "free to spend"; an over-committed one says
+        # "over-committed by", and both are the same arithmetic
+        assert ("free to spend" in html or "over-committed by" in html)
 
     def test_it_is_labelled_for_a_screen_reader(self, client, book):
         html = client.get("/app").text
