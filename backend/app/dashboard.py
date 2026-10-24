@@ -440,10 +440,26 @@ def steps_block(s) -> dict:
         """
         payload = json.loads(row.payload_json or "{}")
         here = (payload.get("amount_minor") or payload.get("sell_amount_minor") or 0)
-        return (int(ap.amount_minor or 0) == int(here or 0)
+        if not (int(ap.amount_minor or 0) == int(here or 0)
                 and (ap.currency or "").upper()
                 == (payload.get("currency") or payload.get("sell_currency")
-                    or ap.currency or "").upper())
+                    or ap.currency or "").upper()):
+            return False
+        # AND THE BENEFICIARY. A card is suppressed because a person already said
+        # yes to THIS payment; if the payee has changed, they said yes to a
+        # different one, so the question is open again. The executor refuses the
+        # old approval either way; this stops the screen hiding the fact that
+        # nobody has been asked.
+        if ap.beneficiary_id:
+            from .models import InvoicePayable, Supplier
+            number = payload.get("payable_number")
+            payable = (s.query(InvoicePayable)
+                       .filter(InvoicePayable.number == number).first())
+            supplier = (s.get(Supplier, payable.supplier_id) if payable else None)
+            now = supplier.airwallex_beneficiary_id if supplier else None
+            if (now or "") != (ap.beneficiary_id or ""):
+                return False
+        return True
 
     _approved_step_ids = set()
     for row in s.query(Approval).filter(

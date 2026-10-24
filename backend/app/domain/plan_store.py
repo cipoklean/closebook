@@ -84,44 +84,45 @@ def find_step(db: Session, step: Step) -> Optional[PlanStep]:
     return None
 
 
-def valid_approval(db: Session, *, payable_number: str, action: str,
-                   amount_minor: int, currency: str, counterparty: str):
-    """An APPROVED approval for this step whose terms STILL MATCH, or None.
+def valid_approval(db: Session, *, step_key: str, amount_minor: int,
+                   currency: str, counterparty: str,
+                   beneficiary_id: Optional[str] = None):
+    """The APPROVED approval issued for THIS step, if its terms still match.
 
-    THE APPROVAL HAS TO BE CONSULTED, OR IT IS ONLY A NOTE. Approving an
-    over-limit bill wrote an APPROVED row and nothing read it: the planner
-    recomputed `needs_approval` from the limit every cycle, so the step was
-    never clear and no transfer was ever created. The operator approved a
-    payment that could not be paid, and the screen said the decision was
-    recorded.
+    ONE STEP, BY ITS KEY. The previous version searched every step for the same
+    payable number and took the first approval whose amount, currency and
+    counterparty happened to match. Two attempts at one bill have identical
+    amounts, identical currency and identical supplier, so an approval a person
+    gave for the FIRST attempt silently authorised the second. `step_key` is the
+    identity the rest of the system already uses, and it is unique in the
+    database precisely so one payment cannot be mistaken for another.
 
-    MATCHING IS THE POINT. An approval is a human agreeing to an AMOUNT, a
-    CURRENCY and a COUNTERPARTY. Change any of those and the approval is about
-    something else, so it is not honoured and the card comes back.
+    THE BENEFICIARY IS PART OF THE DEAL. An approval says "send this to this
+    person". Change the beneficiary and it is a different payment, whatever the
+    amount says.
+
+    An approval whose terms have moved is NOT honoured, and its card comes back.
     """
     from ..models import Approval, ApprovalStatus
 
-    if not payable_number:
+    if not step_key:
         return None
-    for row in (db.query(PlanStep).order_by(PlanStep.id.desc()).limit(500).all()):
-        payload = _loads(row.payload_json) or {}
-        if (payload.get("payable_number") != payable_number
-                or payload.get("action") != action):
-            continue
-        if row.status in RETIRED_STATUSES:
-            continue
-        ap = (db.query(Approval).filter_by(plan_step_id=row.id)
-              .order_by(Approval.id.desc()).first())
-        if ap is None or ap.status != ApprovalStatus.APPROVED:
-            continue
-        if int(ap.amount_minor or 0) != int(amount_minor or 0):
-            continue
-        if (ap.currency or "").upper() != (currency or "").upper():
-            continue
-        if (ap.counterparty or "") != (counterparty or ""):
-            continue
-        return ap
-    return None
+    row = db.query(PlanStep).filter(PlanStep.step_key == step_key).first()
+    if row is None or row.status in RETIRED_STATUSES:
+        return None
+    ap = (db.query(Approval).filter_by(plan_step_id=row.id)
+          .order_by(Approval.id.desc()).first())
+    if ap is None or ap.status != ApprovalStatus.APPROVED:
+        return None
+    if int(ap.amount_minor or 0) != int(amount_minor or 0):
+        return None
+    if (ap.currency or "").upper() != (currency or "").upper():
+        return None
+    if (ap.counterparty or "") != (counterparty or ""):
+        return None
+    if beneficiary_id and (ap.beneficiary_id or "") != beneficiary_id:
+        return None
+    return ap
 
 
 def _loads(raw):

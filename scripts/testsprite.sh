@@ -116,4 +116,10 @@ echo "  a11y     : this instance is SEPARATE from the operator's workspace"
 echo
 
 cd "${ROOT}/backend"
-exec "${PY}" -m uvicorn app.main:app --host 0.0.0.0 --port "${PORT}" --log-level warning
+# TWO WORKERS. Every route here does blocking SQLite and some do blocking HTTP,
+# so a single event loop serialises the whole product: one slow cycle stalls
+# every other request behind it and Cloudflare answers with a 502 before the app
+# ever replies. A second worker means a stalled loop costs half the throughput
+# instead of all of it. WAL (already on) makes concurrent readers safe.
+exec "${PY}" -m uvicorn app.main:app --host 0.0.0.0 --port "${PORT}" \
+    --workers 2 --log-level warning

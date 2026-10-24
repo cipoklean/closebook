@@ -83,9 +83,11 @@ def payables_from_db(session) -> list[Payable]:
         # function: it gets the world handed to it, never a session.
         from .plan_store import valid_approval
         _ap = valid_approval(
-            session, payable_number=p.number, action="PAY",
+            session, step_key=f"PAY:{p.number}",
             amount_minor=p.amount_minor, currency=p.currency,
-            counterparty=(p.supplier.name if p.supplier else ""))
+            counterparty=(p.supplier.name if p.supplier else ""),
+            beneficiary_id=(p.supplier.airwallex_beneficiary_id
+                            if p.supplier else None))
         out.append(Payable(
             has_valid_approval=_ap is not None,
             previous_attempt_failed=_attempt_failed(session, p.number),

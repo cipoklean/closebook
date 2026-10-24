@@ -98,6 +98,27 @@ def describe_for_ui(approval: Approval, step: Optional[PlanStep]) -> dict:
     }
 
 
+def _beneficiary_for(session, step) -> Optional[str]:
+    """The beneficiary the supplier is paid through, at the moment of approval."""
+    import json
+
+    from ..models import InvoicePayable, Supplier
+
+    try:
+        payload = json.loads(step.payload_json or "{}")
+        number = payload.get("payable_number")
+        if not number:
+            return None
+        payable = (session.query(InvoicePayable)
+                   .filter(InvoicePayable.number == number).first())
+        if payable is None:
+            return None
+        supplier = session.get(Supplier, payable.supplier_id)
+        return supplier.airwallex_beneficiary_id if supplier else None
+    except Exception:                              # noqa: BLE001
+        return None
+
+
 def approve_step(db, step_id: int, *, pin: str, approved_by: str,
                  configured_pin: str) -> dict:
     """Issue an HMAC-bound approval for a plan step."""
@@ -132,6 +153,9 @@ def approve_step(db, step_id: int, *, pin: str, approved_by: str,
             bound_hash=bound_hash(terms),
             amount_minor=terms.amount_minor,
             currency=terms.currency,
+            # WHO this pays, recorded with the decision. Without it an approval
+            # survives a change of beneficiary, which is a different payment.
+            beneficiary_id=_beneficiary_for(s, step),
             counterparty=terms.counterparty,
             status=ApprovalStatus.APPROVED,
             decided_by=approved_by,
@@ -139,6 +163,7 @@ def approve_step(db, step_id: int, *, pin: str, approved_by: str,
         )
         s.add(row)
     else:
+        existing.beneficiary_id = _beneficiary_for(s, step)
         existing.bound_hash = bound_hash(terms)
         existing.amount_minor = terms.amount_minor
         existing.currency = terms.currency

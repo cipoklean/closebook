@@ -174,7 +174,22 @@ def _dev_controls_are_offered(status: Optional[str]) -> bool:
     transition is an HTTP 500, and an UNKNOWN status must not produce a button
     that cannot work — a control that fails is worse than no control.
     """
-    return (status or "").strip().upper() in IN_FLIGHT_TRANSFER_STATES
+    asked = (status or "").strip().upper()
+    # AN UNKNOWN STATUS IS NOT A TERMINAL ONE. A transfer whose status has not
+    # been read yet renders as UNCHECKED, and requiring a KNOWN in-flight state
+    # meant the sandbox controls vanished for exactly the payments a tester most
+    # wants to drive. Anything that is not terminal gets a row; the transition
+    # itself refreshes the status before acting.
+    if not asked:
+        # NO STATUS AT ALL, which is not a transfer we can act on.
+        return False
+    if asked in ("UNCHECKED", "UNKNOWN"):
+        # We simply have not looked yet. That is not a reason to withhold the
+        # controls from a transfer that plainly exists.
+        return True
+    if asked in TERMINAL_TRANSFER_STATES:
+        return False
+    return True
 
 
 # ------------------------------------------------------- the planning loop
@@ -621,7 +636,13 @@ async def approve(step_id: int, request: Request) -> dict:
     # step clear, so the send belongs to the same press. `_run_loop` is the
     # same path every other event uses, so an approval cannot take a route no
     # other decision does.
-    tail = _run_loop("approve", budget_s=20.0)
+    # OFF THE EVENT LOOP. A cycle plans, calls Airwallex and posts to the
+    # ledger; run inline on the loop it blocks every other request for the
+    # length of a bank round trip, which is exactly how a parallel run gets a
+    # 502 from the edge.
+    from starlette.concurrency import run_in_threadpool
+
+    tail = await run_in_threadpool(_run_loop, "approve", 20.0)
 
     return _action_body("ok", f"Approved {amount} to {who}.{tail}", "")
 

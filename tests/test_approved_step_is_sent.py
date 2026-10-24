@@ -427,18 +427,23 @@ class TestTheApprovalIsVoidWhenTheTermsChange:
         _approve(_step_for(db).id)
 
         s = db.session()
-        assert valid_approval(s, payable_number="QA-OVL-1", action="PAY",
-                              amount_minor=3_500_00, currency="USD",
+        # the approval now binds to ONE step, by its unique key
+        key = "PAY:QA-OVL-1"
+        assert valid_approval(s, step_key=key, amount_minor=3_500_00,
+                              currency="USD",
                               counterparty="Atlanta Packaging") is not None
-        assert valid_approval(s, payable_number="QA-OVL-1", action="PAY",
-                              amount_minor=3_500_00, currency="EUR",
+        assert valid_approval(s, step_key=key, amount_minor=3_500_00,
+                              currency="EUR",
                               counterparty="Atlanta Packaging") is None
-        assert valid_approval(s, payable_number="QA-OVL-1", action="PAY",
-                              amount_minor=3_900_00, currency="USD",
+        assert valid_approval(s, step_key=key, amount_minor=3_900_00,
+                              currency="USD",
                               counterparty="Atlanta Packaging") is None
-        assert valid_approval(s, payable_number="QA-OVL-1", action="PAY",
-                              amount_minor=3_500_00, currency="USD",
+        assert valid_approval(s, step_key=key, amount_minor=3_500_00,
+                              currency="USD",
                               counterparty="Someone Else Ltd") is None
+        assert valid_approval(s, step_key="PAY:SOME-OTHER-BILL",
+                              amount_minor=3_500_00, currency="USD",
+                              counterparty="Atlanta Packaging") is None
 
     def test_the_approval_is_matched_to_the_payable(self):
         """Two bills, one approved: only that one is released."""

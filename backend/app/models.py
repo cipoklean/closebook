@@ -273,6 +273,10 @@ class Approval(Base):
     bound_hash: Mapped[str] = mapped_column(String(128))  # sha256 of the bound terms
     amount_minor: Mapped[int] = mapped_column(BigInteger)
     currency: Mapped[str] = mapped_column(String(3))
+    #: WHICH BENEFICIARY this approval authorises paying. An approval is a human
+    #: agreeing to send a sum to a particular person; change the beneficiary and
+    #: it is a different payment, whatever the amount says.
+    beneficiary_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     counterparty: Mapped[str] = mapped_column(String(120))
     status: Mapped[ApprovalStatus] = mapped_column(Enum(ApprovalStatus), default=ApprovalStatus.PENDING)
     decided_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)

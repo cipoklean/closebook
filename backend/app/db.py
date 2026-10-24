@@ -6,12 +6,15 @@ DATABASE_URL is the only production change. Tables are created idempotently
 """
 from __future__ import annotations
 
+import threading
+
 import os
 from contextlib import contextmanager
 from typing import Optional
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import NullPool, StaticPool
 
@@ -82,7 +85,17 @@ class DB:
 
     def __init__(self, database_url: str | None = None):
         self.engine = make_engine(database_url)
-        Base.metadata.create_all(self.engine)
+        # CREATE_ALL IS NOT SAFE TO RACE. Two threads that both find no cached
+        # DB will both build one and both issue CREATE TABLE; the loser's DDL
+        # fails with "table customer already exists" and its request 500s. That
+        # is what produced the 502s under parallel load: the table was always
+        # there, and the request still failed. `checkfirst` does not close it,
+        # because the check and the create are two separate statements.
+        try:
+            Base.metadata.create_all(self.engine)
+        except OperationalError as exc:
+            if "already exists" not in str(exc).lower():
+                raise
         self.SessionLocal = sessionmaker(bind=self.engine, expire_on_commit=False)
 
     def session(self) -> Session:
@@ -150,10 +163,22 @@ def get_db(db: DB):
 _default_db: DB | None = None
 
 
+_DEFAULT_DB_LOCK = threading.Lock()
+
+
 def get_default_db() -> DB:
+    """The process-wide handle, built ONCE.
+
+    The lock is not decoration: twenty parallel requests all read
+    `_default_db is None` before any of them wrote it, so every one of them
+    built its own engine and ran its own DDL. A guard that is only correct when
+    nobody is looking is not a guard.
+    """
     global _default_db
     if _default_db is None:
-        _default_db = DB()
+        with _DEFAULT_DB_LOCK:
+            if _default_db is None:
+                _default_db = DB()
     return _default_db
 
 
