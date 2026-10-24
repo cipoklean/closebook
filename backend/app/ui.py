@@ -733,6 +733,50 @@ def _shell(inner: str, *, app: bool, title: str) -> str:
             '\n<script>' + script + '</script>\n</body>\n</html>\n')
 
 
+# ------------------------------------------------- carrying the book on URLs
+#: Every internal URL a rendered page can navigate or post to. `src=` is
+#: deliberately absent: assets are not book-scoped and must not be rewritten.
+_WS_URL_RE = re.compile(
+    r'(?P<name>href|action|formaction)="'
+    r'(?P<path>/[^"?#]*)(?P<query>\?[^"#]*)?(?P<frag>#[^"]*)?"')
+#: The page's own fetches. `fetch("/state/version")` and friends carried no
+#: workspace at all, so a test's Home figures were patched from the SHARED book
+#: while it was looking at its own.
+_WS_FETCH_RE = re.compile(
+    r'fetch\("(?P<path>/[^"?#]*)(?P<query>\?[^"#]*)?(?P<frag>#[^"]*)?"')
+
+#: URLs that are not book state and must be left exactly as written.
+_WS_SKIP = ("//", "/static")
+
+
+def carry_workspace(html: str, ws: str) -> str:
+    """Name the active book on every internal URL in a rendered page.
+
+    WHY BOTH THIS AND A COOKIE. The cookie makes the book stick for a browser
+    that keeps cookies; this makes it stick for one that does not, and it puts
+    the book where an automated tester can read it off the page. Two independent
+    mechanisms for one fact is deliberate here: the failure they guard against
+    (a test's book silently becoming the shared book) is invisible on screen.
+
+    Pure: same input, same output. `ws` is a validated suffix (letters, digits,
+    dashes and underscores), so nothing needs escaping.
+    """
+    if not ws:
+        return html
+
+    def _add(m: re.Match) -> str:
+        path, query, frag = m.group("path"), m.group("query") or "", m.group("frag") or ""
+        if path.startswith(_WS_SKIP) or "ws=" in query:
+            return m.group(0)
+        name = m.group("name") if "name" in m.groupdict() else "fetch"
+        sep = "&" if query else "?"
+        tail = f'{query}{sep}ws={ws}{frag}"'
+        return f'{name}="{path}{tail}' if name != "fetch" else f'fetch("{path}{tail}'
+
+    out = _WS_URL_RE.sub(_add, html)
+    return _WS_FETCH_RE.sub(_add, out)
+
+
 # ------------------------------------------------------- landing page
 def landing_proof(stats: dict | None) -> dict:
     """Real figures for the landing page's one live proof.
@@ -762,7 +806,7 @@ def landing_proof(stats: dict | None) -> dict:
     }
 
 
-def render_landing(stats: dict | None = None) -> str:
+def render_landing(stats: dict | None = None, ws: str = "") -> str:
     """The marketing page. Short on purpose, and honest about its evidence.
 
     CUT DOWN. It carried six sections of tile grids — a problem list, a
@@ -923,7 +967,8 @@ def render_landing(stats: dict | None = None) -> str:
   </div>
 </footer>''')
 
-    return _shell("".join(L), app=False, title="Closebook: real-time books")
+    return carry_workspace(
+        _shell("".join(L), app=False, title="Closebook: real-time books"), ws)
 
 
 # ---------------------------------------------------------- app pages
@@ -2997,16 +3042,24 @@ def _flash(c: dict) -> str:
     return out
 
 
-def render_app(ctx: dict, tab: str = "home", health: dict | None = None) -> str:
+def render_app(ctx: dict, tab: str = "home", health: dict | None = None,
+               ws: str = "") -> str:
     tab = tab if tab in _TABS else "home"
     n_ok = len(ctx["approvable"])
     screen = _flash(ctx) + _TABS[tab](ctx)
+    # WHICH BOOK AM I IN, said quietly. A per-test book that cannot be named on
+    # the page is a book a test has to infer from row counts, and the whole
+    # failure being fixed here was a test NOT KNOWING it had been moved back to
+    # the shared book. Rendered only when a book is actually active, so prod
+    # shows nothing.
+    book = (f'<span class="x-book" data-testid="active-book">Book: {e(ws)}</span>'
+            if ws else "")
     inner = (
         _sidebar(tab, n_ok)
         + '<div class="x-body">'
         + _top(NAV[[n[0] for n in NAV].index(tab)][1], _SUBS[tab], health)
         + f'<main class="x-main"><div class="x-screen">{screen}</div></main>'
-        + '<footer class="x-foot"><span>Closebook: sandbox only. '
+        + '<footer class="x-foot">' + book + '<span>Closebook: sandbox only. '
         'No real money moves here.</span></footer>'
         + '</div>'
         + _bottom_tabs(tab, n_ok)
@@ -3017,7 +3070,9 @@ def render_app(ctx: dict, tab: str = "home", health: dict | None = None) -> str:
         + 'data-testid="new-activity" type="button">'
         + 'New activity: tap to refresh</button>'
     )
-    return _shell(inner, app=True, title=f"Closebook, {NAV[[n[0] for n in NAV].index(tab)][1]}")
+    return carry_workspace(
+        _shell(inner, app=True,
+               title=f"Closebook, {NAV[[n[0] for n in NAV].index(tab)][1]}"), ws)
 
 
-__all__ = ["render_landing", "render_app", "money", "e"]
+__all__ = ["carry_workspace", "render_landing", "render_app", "money", "e"]

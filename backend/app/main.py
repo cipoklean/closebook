@@ -361,25 +361,35 @@ async def dev_transfer_transition(transfer_id: str, request: Request):
 
 @app.middleware("http")
 async def _workspace(request, call_next):
-    """Pick the book this request works in, from `?ws=`.
+    """Pick the book this request works in: `?ws=` first, then the cookie.
 
     TESTER ONLY. Without `CLOSEBOOK_WORKSPACES=1` a `?ws=` query string is
-    refused rather than ignored: silently serving the operator's book to a
-    caller who asked for another one is exactly the confusion this prevents.
+    refused rather than ignored, and a cookie is ignored outright: silently
+    serving the operator's book to a caller who asked for another one is exactly
+    the confusion this prevents, and prod has no books to select.
+
+    STICKY, NOT PER-REQUEST. Resolving the suffix from the query string alone
+    gave a test its own book for exactly one request: the tab it clicked, the
+    form it submitted, the redirect that answered and every poll after that
+    arrived with no `?ws=` and landed in the SHARED book. So opening a book sets
+    a session cookie, and every later request resolves from the cookie. The
+    query param still wins when both are present.
     """
     from . import workspaces
 
-    suffix = (request.query_params.get("ws") or "").strip()
-    if not suffix:
-        return await call_next(request)
+    asked = (request.query_params.get("ws") or "").strip()
+    carried = (request.cookies.get(workspaces.COOKIE) or "").strip()
 
     if not workspaces.enabled():
-        from fastapi.responses import JSONResponse
+        if asked:
+            from fastapi.responses import JSONResponse
 
-        return JSONResponse(
-            {"ok": False, "message": "This instance does not offer per-test "
-                                     "workspaces."}, status_code=404)
-    if not workspaces.valid(suffix):
+            return JSONResponse(
+                {"ok": False, "message": "This instance does not offer per-test "
+                                         "workspaces."}, status_code=404)
+        return await call_next(request)
+
+    if asked and not workspaces.valid(asked):
         from fastapi.responses import JSONResponse
 
         return JSONResponse(
@@ -387,13 +397,22 @@ async def _workspace(request, call_next):
                                      "dashes and underscores, up to 40 characters."},
             status_code=400)
 
-    token = workspaces.set_current(workspaces.book(suffix))
+    suffix = workspaces.resolve(query=asked, cookie=carried)
+    if not suffix:
+        return await call_next(request)
+
+    token = workspaces.set_current(workspaces.book(suffix), suffix)
     try:
         response = await call_next(request)
     finally:
         workspaces.reset(token)
     # So a tester can see WHICH book it is looking at without opening the URL.
     response.headers["x-closebook-workspace"] = suffix
+    # AND SO IT STAYS. Session cookie, path-wide, refreshed only when it does
+    # not already say this: a page that carries `ws` in its own URLs does not
+    # need a Set-Cookie on every response.
+    if carried != suffix:
+        response.headers.append("set-cookie", workspaces.cookie_header(suffix))
     return response
 
 
@@ -407,13 +426,21 @@ async def workspaces_new(request: Request):
                      err="This instance does not offer per-test workspaces.")
     suffix = workspaces.new_suffix()
     workspaces.book(suffix)                 # created empty, on purpose
-    if "application/json" in (request.headers.get("accept") or ""):
-        return {"ok": True, "workspace": suffix,
-                "url": f"/app?tab=setup&ws={suffix}",
-                "message": f"Started a fresh book: {suffix}."}
+    cookie = workspaces.cookie_header(suffix)
     from fastapi.responses import RedirectResponse
 
-    return RedirectResponse(f"/app?tab=setup&ws={suffix}", status_code=303)
+    if "application/json" in (request.headers.get("accept") or ""):
+        from fastapi.responses import JSONResponse
+
+        res = JSONResponse({"ok": True, "workspace": suffix,
+                            "url": f"/app?tab=setup&ws={suffix}",
+                            "message": f"Started a fresh book: {suffix}."})
+    else:
+        res = RedirectResponse(f"/app?tab=setup&ws={suffix}", status_code=303)
+    # The new book is the one this client is now in, whether it asked for JSON
+    # or for the page.
+    res.headers.append("set-cookie", cookie)
+    return res
 
 
 @app.get("/healthz")
@@ -1239,7 +1266,16 @@ def _back(request: Request, tab: str = "setup", ok: str = "", err: str = ""):
 
     if "application/json" in (request.headers.get("accept") or ""):
         return JSONResponse(_action_body(tab, ok, err))
+    from . import workspaces
+
     q = {"tab": tab}
+    # THE REDIRECT CARRIES THE BOOK TOO. A form POST that arrives with no `?ws=`
+    # (a fetch, or a page whose action lost it) still has to land back on the
+    # same book, and the Location is the one place that can say so out loud
+    # rather than relying on the cookie being honoured.
+    ws = workspaces.current_suffix()
+    if ws:
+        q["ws"] = ws
     if ok:
         q["ok"] = ok
     if err:
@@ -1430,6 +1466,7 @@ def landing() -> str:
     so the figures are counted from the same tables the app renders.
     """
     from .dashboard import landing_stats
+    from . import workspaces
     from .ui import render_landing
 
     stats = None
@@ -1438,7 +1475,10 @@ def landing() -> str:
             stats = landing_stats(s)
     except Exception:
         log.warning("could not read the landing figures")
-    return render_landing(stats)
+    # The book follows the reader onto the marketing page and back: without
+    # this, "Launch app" sent a test that had opened `?ws=a` straight into the
+    # shared book, and every later click stayed there.
+    return render_landing(stats, ws=workspaces.current_suffix())
 
 
 @app.get("/app", response_class=HTMLResponse)
@@ -1510,7 +1550,15 @@ def app_page(background: BackgroundTasks, tab: str = "home",
     except Exception:
         log.warning("could not schedule the live-status refresh")
 
-    return render_app(ctx, tab=tab, health=health)
+    return render_app(ctx, tab=tab, health=health,
+                      ws=_active_workspace())
+
+
+def _active_workspace() -> str:
+    """The book this request is in, or "" for the shared one."""
+    from . import workspaces
+
+    return workspaces.current_suffix()
 
 
 if __name__ == "__main__":

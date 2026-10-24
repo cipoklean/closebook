@@ -26,6 +26,15 @@ def _run(args, **kw):
     return subprocess.run(args, capture_output=True, text=True, cwd=ROOT, **kw)
 
 
+def _free_port() -> int:
+    """A port nothing is listening on, so a started instance cannot collide."""
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
 # ---- the reset tool -------------------------------------------------------
 class TestTheResetToolRefusesTheWrongFile:
     def test_it_refuses_anything_not_named_testsprite(self, tmp_path):
@@ -94,19 +103,42 @@ class TestTheLauncherRefusesToRunUnseparated:
         assert "DEMO book" in r.stderr
 
     def test_it_refuses_to_start_without_its_own_pin(self, tmp_path):
-        """An unset PIN must STOP it, not quietly fall back to the operator's."""
+        """An unset PIN must STOP it, not quietly fall back to the operator's.
+
+        BOUNDED, because the ALLOWED outcome is that `.env` supplies the PIN and
+        the instance genuinely STARTS. An unbounded `subprocess.run` then never
+        returns: on this box that hung `make test` for as long as the caller's
+        timeout allowed, which turns a green suite into an unverifiable one. So
+        it gets its own free port and a deadline, and a process still alive at
+        the deadline IS the "it started from .env" answer.
+        """
+        port = _free_port()
         env = {k: v for k, v in os.environ.items() if k != "TESTSPRITE_PIN"}
         env["TESTSPRITE_DB"] = str(tmp_path / "testsprite.sqlite3")
+        env["TESTSPRITE_PORT"] = str(port)
         # .env on this box does define TESTSPRITE_PIN, so point HOME-relative
         # reads at a directory with no .env by running from a copy-free cwd.
-        r = subprocess.run(["bash", str(LAUNCHER)], capture_output=True, text=True,
-                           cwd=str(ROOT), env=env)
-        combined = r.stdout + r.stderr
+        proc = subprocess.Popen(["bash", str(LAUNCHER)], cwd=str(ROOT), env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True)
+        try:
+            out, _ = proc.communicate(timeout=12)
+            started = False
+        except subprocess.TimeoutExpired:
+            started = True                     # it is up, which is allowed
+            proc.terminate()
+            try:
+                out, _ = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, _ = proc.communicate(timeout=10)
+        combined = out or ""
         # Either it refused because the variable was missing, or it started
         # because .env supplied it — which is the documented way to set it.
         # What must never happen is starting with the OPERATOR's PIN.
         assert ("TESTSPRITE_PIN is not set" in combined
                 or "PIN      : set" in combined), combined
+        assert not (started and "TESTSPRITE_PIN is not set" in combined), combined
 
     def test_it_never_prints_the_pin(self, tmp_path):
         r = _run(["bash", str(LAUNCHER)],

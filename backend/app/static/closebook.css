@@ -140,6 +140,11 @@ a { color: inherit; }
 .x-title p { color: var(--x-muted); margin-top: 4px; }
 .x-foot { padding: 0 48px 32px; max-width: var(--x-max); width: 100%; margin: 0 auto; font-size: 13px; color: var(--x-faint); }
 
+/* WHICH BOOK. A per-test book names itself in the footer, so a test never has
+   to infer from row counts whether it is still in the book it opened. Quiet:
+   a label, not a headline, and nothing at all when no book is active. */
+.x-book { display: inline-block; margin-right: 12px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--x-line-2); background: var(--x-card); font-family: var(--x-mono); font-size: 12px; color: var(--x-muted); }
+
 .x-stat { display: flex; flex-direction: column; gap: 8px; }
 .x-stat-ico { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--x-bg); color: var(--x-muted); margin-bottom: 8px; }
 .x-statnote { font-size: 13px; color: var(--x-muted); }
