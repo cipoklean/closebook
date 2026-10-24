@@ -24,6 +24,7 @@ there is no cookie, no `Book:` line, and `?ws=` is still a 404.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 import pytest
@@ -269,6 +270,19 @@ class TestThePageCarriesTheBook:
         for tab in TABS:
             r = session().get(url(f"/app?tab={tab}", "qa-7f31"))
             assert "Book: qa-7f31" in r.text, f"{tab} did not name its book"
+
+    def test_the_book_is_named_exactly_once_on_a_page(self, workspaces):
+        """One fact, one place on screen.
+
+        A label that renders twice is the defect an owner notices in a
+        screenshot, and it survives every unit test that only asks whether the
+        string is present. Tags are stripped first: a count over raw HTML also
+        counts attributes and the title, so a single visible mention can read as
+        several.
+        """
+        html = session().get(url("/app?tab=home", "qa-7f31")).text
+        visible = " ".join(re.sub(r"<[^>]+>", " ", html).split())
+        assert visible.count("Book: qa-7f31") == 1, visible.count("Book: qa-7f31")
 
     def test_the_footer_is_absent_without_a_book(self, workspaces):
         assert "Book:" not in session().get("/app?tab=home").text
