@@ -227,3 +227,86 @@ class TestTheCaptionSurvivesARestart:
             "the caption is gone after a restart: " + text[:800])
         assert "account closed" in text, text[:800]
         assert oid  # the id the event names
+
+
+# ---------------- the narrow rule: only the invoice the MATCHER chose counts
+PAID_INV = "INV-R12-1001"
+OPEN_INV = "INV-R12-1002"
+
+
+class TestANarrowDuplicateRule:
+    """Credit only when the invoice the matcher actually chose is settled.
+
+    The absolute rule was too wide: a reference can quote the bill a customer is
+    paying AND the one already settled, and refusing the open invoice as a
+    "duplicate" held money that had an obvious home.
+    """
+
+    def _book(self) -> None:
+        from app.models import Customer, InvoiceReceivable, RecStatus
+
+        def write(s):
+            c = Customer(name="Brightline Retail")
+            s.add(c)
+            s.flush()
+            # status is DERIVED from the amounts, so a settled fixture states it
+            # too (a lying fixture produced a red about the wrong thing).
+            s.add(InvoiceReceivable(number=PAID_INV, customer_id=c.id,
+                                    currency="USD", amount_minor=120_000,
+                                    amount_paid_minor=120_000,
+                                    status=RecStatus.PAID))
+            s.add(InvoiceReceivable(number=OPEN_INV, customer_id=c.id,
+                                    currency="USD", amount_minor=80_000,
+                                    amount_paid_minor=0))
+            s.flush()
+        in_book("aaa", write)
+
+    def _state(self) -> dict:
+        from app.models import InvoiceReceivable
+
+        def read(s):
+            return {r.number: (int(r.amount_paid_minor or 0), r.status.value)
+                    for r in s.query(InvoiceReceivable).all()}
+        return in_book("aaa", read)
+
+    def test_only_the_paid_invoice_named_is_credit(self, books):
+        self._book()
+        inflow = deposit("aaa", minor=50_000, reference=f"payment for {PAID_INV}")
+        seen = inflow_state("aaa", inflow)
+        assert seen["status"] != "MATCHED", seen
+        before = self._state()
+        _ctx, html = home_page("aaa", tab="money-in")
+        text = visible(html)
+        assert (f"{PAID_INV} is already paid; USD 500.00 held as credit, "
+                f"nothing applied.") in text, text[:700]
+        assert self._state() == before, "the settled invoice moved"
+
+    def test_both_named_matches_the_open_one_and_mentions_the_paid_one(self, books):
+        self._book()
+        inflow = deposit("aaa", minor=80_000,
+                         reference=f"{PAID_INV} and {OPEN_INV}")
+        state = self._state()
+        assert state[OPEN_INV] == (80_000, "PAID"), (
+            f"the open invoice was not paid: {state}")
+        assert state[PAID_INV] == (120_000, "PAID"), state
+        seen = inflow_state("aaa", inflow)
+        assert seen["status"] == "MATCHED", seen
+        _ctx, html = home_page("aaa", tab="money-in")
+        text = visible(html)
+        assert f"{PAID_INV} is already paid, so it was ignored" in text, (
+            "the row does not say the paid invoice was set aside: " + text[:700])
+        assert OPEN_INV in text, text[:700]
+
+    def test_an_amount_over_the_open_balance_credits_the_rest(self, books):
+        self._book()
+        inflow = deposit("aaa", minor=100_000,
+                         reference=f"{PAID_INV} and {OPEN_INV}")
+        state = self._state()
+        assert state[OPEN_INV] == (80_000, "PAID"), (
+            f"the open invoice took more than it owed: {state}")
+        assert state[PAID_INV] == (120_000, "PAID"), state
+        _ctx, html = home_page("aaa", tab="money-in")
+        text = visible(html)
+        # USD 200.00 is left over: it is credit, and the row says so.
+        assert ("held as credit, nothing applied." in text
+                or "USD 200.00 held as credit" in text), text[:700]

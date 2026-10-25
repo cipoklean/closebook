@@ -92,6 +92,33 @@ def candidates_from_db(session) -> list:
     return out
 
 
+def _reference_invoices(session, reference: str, currency: str):
+    """Invoices the reference NAMES, split into (settled, open).
+
+    Same word-safe containment rule as the matcher, applied to every invoice,
+    so a reference quoting two bills is read as naming two bills. The narrow
+    duplicate rule needs both sides: what the money COULD have been for, and
+    which of those is already closed.
+    """
+    from .matching import normalise, normalise_invoice
+
+    ref_norm = normalise(reference or "")
+    if not ref_norm:
+        return [], []
+    paid, open_ = [], []
+    for inv in session.query(InvoiceReceivable).all():
+        if currency and inv.currency and inv.currency.upper() != currency.upper():
+            continue
+        num = normalise_invoice(inv.number)
+        if len(num) < 3 or num not in ref_norm:
+            continue
+        if inv.status in (RecStatus.PAID, RecStatus.OVERPAID):
+            paid.append(inv)
+        elif inv.status in (RecStatus.OPEN, RecStatus.PARTIAL):
+            open_.append(inv)
+    return paid, open_
+
+
 def _closed_invoice_note(session, reference: str, currency: str):
     """A sentence for a payment that names an invoice which is ALREADY SETTLED.
 
@@ -304,30 +331,74 @@ def record_and_match(session, *, deposit_id: str, currency: str,
         log.exception("could not record the model trace for inflow %s",
                       inflow.id)
 
-    # A REFERENCE THAT NAMES A SETTLED INVOICE IS NEVER A MATCH. This used to
-    # run only when the reading was already unresolved, on the theory that a
-    # confident match needs no explanation -- so a second payment quoting a bill
-    # that was already PAID read as "matched to INV-K7P2", applied nothing (the
-    # balance was settled), and told the operator nothing at all. The money went
-    # nowhere and the screen said it had arrived. Run 11's exact case.
+    # THE NARROW DUPLICATE RULE. An invoice that is already settled is not a
+    # place money can be applied, but a reference can name it ALONGSIDE the bill
+    # the customer is actually paying -- "INV-1001 and INV-1002" -- and treating
+    # that as a duplicate held money that had an obvious home.
     #
-    # Checked before the match is used, whatever its confidence: the settled
-    # invoice is the fact, and a match against a bill that owes nothing is not a
-    # decision anybody can act on.
+    # So: only the invoice the MATCHER actually chose can make this a duplicate.
+    # If it chose an open invoice, that match stands and the settled one is
+    # named as ignored; if it chose nothing while the reference names an open
+    # bill, that bill is matched deterministically; and anything left over is
+    # credit, said out loud. Run 11's case -- a reference naming ONLY the settled
+    # bill -- still lands as credit, unchanged.
     from ..money import money_str
-    from .policy import MATCH_CONFIDENCE_AUTO
 
-    dup = _closed_invoice_note(session, reference, currency)
-    if dup:
-        _old, evidence = dup
-        number = str(evidence.get("invoice_number") or "that invoice")
-        held = money_str(inflow.amount_minor, inflow.currency)
-        result = replace(
-            result, status="AMBIGUOUS", confidence=0.0, method="DUPLICATE",
-            allocations=[], credit_minor=0, shortfall_minor=0,
-            reason=(f"{number} is already paid; {held} held as credit, "
-                    f"nothing applied."),
-            evidence=evidence)
+    paid_named, open_named = _reference_invoices(session, reference, currency)
+    # NOTHING HERE RUNS UNLESS A SETTLED BILL IS NAMED. This is a rule about
+    # duplicates, not about matching: an ordinary deposit is left exactly as the
+    # matcher scored it, including the deliberate below-band part-payments.
+    if paid_named:
+        from .ledger import _Alloc      # the ledger's own allocation shape
+        from .policy import MATCH_CONFIDENCE_AUTO as _AUTO
+
+        def _credit_sentence(amount_minor: int) -> str:
+            return (f"{paid_named[0].number} is already paid; "
+                    f"{money_str(amount_minor, inflow.currency)} held as "
+                    f"credit, nothing applied.")
+
+        ignored = f"{paid_named[0].number} is already paid, so it was ignored."
+        chosen_ids = [a.invoice_id for a in (result.allocations or [])]
+        will_apply = (bool(chosen_ids)
+                      and float(getattr(result, "confidence", 0) or 0) >= _AUTO
+                      and result.status in ("MATCHED", "PARTIAL", "OVERPAID"))
+
+        if not open_named:
+            # CASE (a): ONLY A SETTLED BILL IS NAMED. Nothing can be applied to
+            # it, whatever the matcher guessed (settled bills are not candidates,
+            # so a part-payment tier latches onto some other open invoice).
+            result = replace(
+                result, status="AMBIGUOUS", confidence=0.0, method="DUPLICATE",
+                allocations=[], credit_minor=0, shortfall_minor=0,
+                reason=_credit_sentence(inflow.amount_minor),
+                evidence={"rule": "reference names only a settled invoice",
+                          "invoice_number": paid_named[0].number,
+                          "invoice_status": paid_named[0].status.value,
+                          "invoice_id": paid_named[0].id})
+        else:
+            notes = [ignored]
+            if will_apply:
+                # CASE (b): THE MATCHER ALREADY CHOSE THE OPEN BILL. Its match
+                # stands untouched; the settled one is named as set aside.
+                applied = sum(a.amount_minor for a in result.allocations)
+            else:
+                # THE REFERENCE NAMES AN OPEN BILL and the matcher's answer
+                # would apply nothing (no allocation, or a below-band guess such
+                # as an overpayment). Apply what that bill owes, never more.
+                target = open_named[0]
+                open_minor = max(0, target.amount_minor - target.amount_paid_minor)
+                take = min(inflow.amount_minor, open_minor)
+                applied = take
+                result = replace(
+                    result, allocations=[_Alloc(target.id, take)], confidence=1.0,
+                    method="RULE",
+                    status=("MATCHED" if take == open_minor else "PARTIAL"))
+            leftover = inflow.amount_minor - applied
+            if leftover > 0:
+                # CASE (c): what is left over is credit, in the same sentence.
+                notes.append(_credit_sentence(leftover))
+            result = replace(result, reason=(
+                f"{result.reason} " + " ".join(n for n in notes if n)).strip())
 
     # The ledger re-checks confidence and posts the cash. It is the ONLY writer
     # of a receivable's paid amount and status.
