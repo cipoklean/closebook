@@ -946,7 +946,10 @@ class TestHeldPaymentsAreExplained:
         html = render_app(_ctx(), tab="ok")
         # the dash became a comma in the copy pass. Assert the sentence the app
         # actually renders on THIS tab, not the one it used to.
-        assert "Held, and not waiting on you" in html
+        # RUN 9: the heading claimed nobody was waiting while an APPROVED
+        # payment sat under it waiting for cash -- the one thing a person had
+        # already done. The held section says what is true of everything in it.
+        assert "Held, and nothing to send yet" in html
         assert ("See it with the rest of the plan" in html
                 or "Why it is held" in html)
         assert 'href="/app?tab=home#held-' in html

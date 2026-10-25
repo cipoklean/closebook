@@ -159,7 +159,22 @@ def forms_to_check(page) -> list[dict]:
       document.querySelectorAll('form').forEach((f, fi) => {
         const r = f.getBoundingClientRect();
         if (r.width < 2 && r.height < 2) return;              // not rendered
-        if (f.closest('details:not([open])')) return;          // behind a summary
+        const folded = f.closest('details:not([open])');
+        if (folded) {
+          /* A FORM THAT PERFORMS A DECISION MUST NOT BE INSIDE A CLOSED
+             DISCLOSURE. This used to skip every such form as "behind a
+             summary", which is exactly how run 9's five blocked tests survived
+             a sweep that looked like it covered the page: the resolve form sat
+             inside a collapsed deposit row on Money in, so its fields had no
+             size at all and were still skipped rather than reported. A folded
+             UTILITY panel is fine -- a folded DECISION is not. */
+          if (f.hasAttribute('data-action')) {
+            out.push({action: f.getAttribute('action') || '(none)', hidden: false,
+                      hidden: true, fields: [],
+                      folded_id: folded.id || folded.className});
+          }
+          return;
+        }
         const fields = [];
         f.querySelectorAll('input:not([type=hidden]), select, textarea').forEach(el => {
           const b = el.getBoundingClientRect();
@@ -172,7 +187,7 @@ def forms_to_check(page) -> list[dict]:
                        inViewport: b.width > 0 && b.height > 0});
         });
         if (!fields.length) return;
-        out.push({action: f.getAttribute('action') || '(none)',
+        out.push({action: f.getAttribute('action') || '(none)', hidden: false,
                   id: f.id || '', fields});
       });
       return out;
@@ -193,6 +208,12 @@ class TestEveryFormIsUsable:
             page.goto(f"{tester['base']}/app?tab={tab}&ws={BOOK}", wait_until="load")
             page.wait_for_timeout(900)
             for form in forms_to_check(page):
+                if form.get("hidden"):
+                    bad_width.append(
+                        f"{tab} {form['action']}: a decision form inside the "
+                        f"CLOSED disclosure {form.get('folded_id')!r}, so its "
+                        f"fields cannot be reached at all")
+                    continue
                 for field in form["fields"]:
                     label = (f"{tab} {form['action']} [{field['name']}] "
                              f"{field['w']}x{field['h']}")

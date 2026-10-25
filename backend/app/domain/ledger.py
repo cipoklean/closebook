@@ -226,9 +226,22 @@ def _apply_allocations(db_session, inflow, allocations, *, confidence, method,
             inv.status = RecStatus.PAID
         else:
             inv.status = RecStatus.OVERPAID
+        # A CREDIT IS NOT A PAYMENT OF THIS INVOICE. This added the overpayment
+        # to the invoice's paid amount, so a USD 1,200.00 invoice paid by a
+        # USD 120,000.00 deposit read as having had the WHOLE 120,000.00 applied
+        # to it: run 9's confirmation said "USD 1,200.00 has been applied" and
+        # Setup showed 120,000.00 paid on the same invoice, a 100x money bug, on
+        # every currency and on the automatic, manual and PIN paths alike.
+        #
+        # amount_paid_minor answers ONE question -- how much of this invoice has
+        # been paid -- and the ledger's clearing leg answers the same question in
+        # the same unit. The credit stays where it already is: the cash sits in
+        # `unapplied_cash`, the inflow reports it as still unresolved, and the
+        # Match carries it, so the invoice is not the place it gets stored.
+        credit_to_note = 0
         if credit_minor:
-            inv.amount_paid_minor += credit_minor
             inv.status = RecStatus.OVERPAID
+            credit_to_note = credit_minor
             credit_minor = 0
 
         m = Match(
@@ -237,7 +250,9 @@ def _apply_allocations(db_session, inflow, allocations, *, confidence, method,
             confidence=confidence,
             method=(MatchMethod[method] if method in MatchMethod.__members__
                     else MatchMethod.RULE),
-            evidence_json=json.dumps(evidence, default=str)[:2000],
+            evidence_json=json.dumps(
+                {**(evidence or {}), "credit_minor": credit_to_note},
+                default=str)[:2000],
         )
         db_session.add(m)
         created.append(m)
@@ -336,6 +351,39 @@ def suspense_for(db_session, inflow) -> int:
             # A CREDIT to unapplied_cash is money we are holding unapplied.
             total += e.credit_minor - e.debit_minor
     return total
+
+
+def refunded_for(db_session, inflow) -> int:
+    """How much of THIS inflow has become a refund obligation.
+
+    Read off the LEDGER for the same reason `suspense_for` is: after a refund is
+    recorded the cash has moved from `unapplied_cash` to `refunds_owed`, so an
+    inflow can hold GBP 100.00 that a person is still waiting on while sitting in
+    zero suspense. Reading only the suspense made the unmatched-money tile say
+    "Nothing waiting" directly beside "1 payment waiting on you" (run 9).
+    """
+    from ..models import LedgerEntry
+
+    prefix = f"inflow:{inflow.id}"
+    total = 0
+    for e in db_session.query(LedgerEntry).all():
+        if e.account != REFUNDS_OWED:
+            continue
+        t = e.txn_id or ""
+        if t == prefix or t.startswith(prefix + ":"):
+            total += e.credit_minor - e.debit_minor
+    return total
+
+
+def waiting_minor_for(db_session, inflow) -> int:
+    """EVERY PENNY of this payment a person is still waiting on.
+
+    One formula, because two screens ask this question and they disagreed when
+    each did its own arithmetic: suspense is money nobody has decided about, and
+    refunds_owed is money we have decided to give back but have not paid. Both
+    are waiting on a person, so both count here.
+    """
+    return suspense_for(db_session, inflow) + refunded_for(db_session, inflow)
 
 
 def _resolvable_amount(db_session, inflow) -> int:

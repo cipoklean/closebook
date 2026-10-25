@@ -1220,8 +1220,21 @@ def _home(c: dict) -> str:
            if m["lines"] else '<p class="x-statnote">Nothing outstanding.</p>')
     )))
 
-    n_unmatched = len(c["unmatched"])
-    susp_str = tt["unmatched"]
+    # ONE LIST, BOTH NUMBERS. The figure came from the book's SUSPENSE and the
+    # count from the list of unmatched payments, so after a refund was recorded
+    # the tile read "Nothing waiting" and "1 payment waiting on you" in the same
+    # breath -- while Home also showed the GBP 100.00 under Refunds owed. Both
+    # numbers are now taken from the payments that are genuinely still waiting,
+    # and the money for a payment is suspense PLUS what we have recorded as owed
+    # back, so the tile and Refunds owed cannot disagree either.
+    waiting_rows = [a for a in c["unmatched"]
+                    if int(a.get("waiting_minor") or 0) > 0]
+    n_unmatched = len(waiting_rows)
+    by_ccy: dict[str, int] = {}
+    for a in waiting_rows:
+        ccy = str(a.get("currency") or "USD")
+        by_ccy[ccy] = by_ccy.get(ccy, 0) + int(a.get("waiting_minor") or 0)
+    susp_str = " + ".join(money_str(v, k) for k, v in sorted(by_ccy.items()))
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["in"]}</span>'
         '<div class="x-label">Unmatched money: not spendable</div>'
@@ -1459,7 +1472,7 @@ def _home(c: dict) -> str:
                 # other mention links here rather than saying it again.
                 f'{blockers_html(p)}</div>'
                 f'<span class="x-pill x-pill--warn">'
-                f'{e(p.get("plan_policy_reason") or "held")}</span></li>'
+                f'{e(policy_words(p.get("plan_policy_reason")))}</span></li>'
                 for p in c["waiting"])
             + '</ul>'))
 
@@ -2354,7 +2367,7 @@ def _ok(c: dict) -> str:
     waits = c.get("waiting") or []
     if waits:
         held = _card(inner=(
-            '<div class="x-cardhead" id="held"><div><h3>Held, and not '
+            '<div class="x-cardhead" id="held"><div><h3>Held, and nothing to send yet, and not '
             'waiting on you</h3>'
             '<p class="x-help">No approval can release these. They are waiting on '
             'something outside your control, and Closebook will re-plan '
@@ -2367,7 +2380,7 @@ def _ok(c: dict) -> str:
                 f'<p class="x-help"><a href="/app?tab=home#held-{e(p["number"])}">'
                 f'Why it is held</a></p></div>'
                 f'<span class="x-pill x-pill--warn">'
-                f'{e(p.get("plan_policy_reason") or "held")}</span></li>'
+                f'{e(policy_words(p.get("plan_policy_reason")))}</span></li>'
                 for p in waits)
             + '</ul>'))
 
@@ -2465,6 +2478,34 @@ def _deposit_state(a: dict) -> str:
     return str(a.get("match_status") or "")
 
 
+#: What a plan step's reason CODE means, in words. A code is a machine value:
+#: `insufficient_balance` beside a payment told an operator nothing, and run 9
+#: read it as the only explanation on a payment that was already approved and
+#: was merely waiting for cash. The code stays in the payload for anyone reading
+#: the raw state; the page says the thing a person needs to know.
+_POLICY_WORDS = {
+    "insufficient_balance": "waiting on cash",
+    "reserve_floor": "waiting on the reserve floor",
+    "dependency_not_met": "waiting on a customer to pay",
+    "no_rate": "no rate for this currency yet",
+    "unsupported_currency": "currency not supported yet",
+    "needs_approval": "needs your OK",
+    "over_auto_limit": "over the automatic limit",
+    "budget_currency": "waiting on cash",
+    "waits_for_inflow": "waiting on cash",
+}
+
+
+def policy_words(code) -> str:
+    """The human words for a plan reason code, never the raw token."""
+    value = str(code or "").strip()
+    if not value:
+        return "held"
+    if value in _POLICY_WORDS:
+        return _POLICY_WORDS[value]
+    return value.replace("_", " ")
+
+
 def _timeline_row(a: dict, *, needs_human: bool) -> str:
     """ONE deposit, collapsed, expanding into its receipt and its resolution.
 
@@ -2538,7 +2579,16 @@ def _timeline(c: dict, *, only_needing_human: bool = False,
         f'deposit{"s" if len(rows) != 1 else ""}</span></div>')
     return _card(span=span, inner=(
         head + '<div class="x-timeline" data-testid="money-timeline">'
-        + "".join(_timeline_row(a, needs_human=only_needing_human) for a in rows)
+        # A ROW THAT HOLDS A DECISION OPENS ITSELF. `needs_human` used to be
+        # `only_needing_human`, so on Money in every row was collapsed and the
+        # resolve form was rendered INSIDE the closed body: the select and both
+        # fields were in the DOM and unreachable, five tester tests timed out on
+        # actionability, and a person saw a row with no hint that a decision was
+        # waiting inside it. Needs your OK opened its rows, which is why the same
+        # card worked there and why an empty-book sweep saw nothing.
+        + "".join(_timeline_row(a, needs_human=(only_needing_human
+                                               or bool(a.get("resolvable"))))
+                  for a in rows)
         + '</div>'))
 
 

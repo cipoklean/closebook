@@ -372,7 +372,7 @@ def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: i
 
 
 def _approved_waiting_note(has_approval: bool, available_after: int,
-                           currency: str) -> list[str]:
+                           currency: str, floor_minor: int = 0) -> list[str]:
     """The sentence for a payment a person approved that is still waiting.
 
     Run 7's report: the card has to say the money is the only thing outstanding,
@@ -385,7 +385,14 @@ def _approved_waiting_note(has_approval: bool, available_after: int,
     short = -min(int(available_after), 0)
     if short <= 0:
         return []
-    return [f"Approved. Sends once {money_str(short, currency)} is free to spend"]
+    # AND WHAT THE FLOOR IS. Run 9 asked for the figure; the floor it has to
+    # clear is the other half of "when", and without it "USD 8,200.00 free to
+    # spend" reads as an arbitrary number rather than the reserve being kept.
+    note = f"Approved. Sends once {money_str(short, currency)} is free to spend"
+    if floor_minor:
+        note += (f" (reserve floor {money_str(int(floor_minor), currency)}, "
+                 f"which stays put)")
+    return [note]
 
 
 def _restate_deferrals(plan, deferred_ctx, *, available, holdings, floor_minor,
@@ -433,7 +440,8 @@ def _restate_deferrals(plan, deferred_ctx, *, available, holdings, floor_minor,
         keep = [(b, c) for b, c in zip(st.blockers, st.blocker_codes)
                 if c in ("dependency_not_met", "no_rate", "unsupported_currency")]
         lead = _approved_waiting_note(bool(getattr(st, "has_valid_approval", False)),
-                                      available(needed), f_ccy)
+                                      available(needed), f_ccy,
+                                      floor_minor=int(floor_minor or 0))
         st.blockers = [b for b, _ in keep] + lead + [bs]
         st.blocker_codes = [c for _, c in keep] + [bc]
         st.reason = "; ".join(st.blockers)

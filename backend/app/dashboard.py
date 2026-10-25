@@ -695,7 +695,7 @@ def arrivals_block(s) -> list[dict]:
             "applied_minor": m.amount_applied_minor,
             "currency": inv.currency if inv else "",
         })
-    from .domain.ledger import suspense_for
+    from .domain.ledger import waiting_minor_for, suspense_for
 
     out = []
     for i in rows:
@@ -749,6 +749,11 @@ def arrivals_block(s) -> list[dict]:
             # HOW MUCH of this payment is still unresolved, read from the
             # ledger so a part-allocated inflow shows only its remainder.
             "suspense_minor": left,
+            # EVERY PENNY A PERSON IS STILL WAITING ON, however it is held: in
+            # suspense, or recorded as a refund we owe. The unmatched-money tile
+            # counts from the same list this feeds, so the figure and the count
+            # cannot disagree about whether anything is waiting.
+            "waiting_minor": waiting_minor_for(s, i),
             "resolvable": bool(left > 0),
             # MODEL SAID / CODE DECIDED, read from the stored proposal and the
             # stored trace. Built here so the AI activity screen and the money-in
@@ -888,10 +893,15 @@ def unmatched_block(s) -> list[dict]:
     """Ambiguous/unmatched inflows with the model's proposal AND the reason code
     actually recorded, so 'why is this held?' is answered by the deterministic
     decision rather than recomputed by the view."""
+    from .domain.ledger import waiting_minor_for
+
     inflows = [i for i in s.query(Inflow).all()
                if i.match_status in (MatchStatus.AMBIGUOUS, MatchStatus.UNMATCHED)]
     out = []
     for i in inflows:
+        # The money still waiting on a person, from the ONE helper that answers
+        # that, so this list and the arrivals list cannot disagree.
+        waiting_minor = waiting_minor_for(s, i)
         trace = s.query(AgentTrace).filter(
             AgentTrace.inputs_json.like(f'%"inflow_id": {i.id}%')
         ).order_by(AgentTrace.id.desc()).all()
@@ -909,6 +919,7 @@ def unmatched_block(s) -> list[dict]:
             if t.tool == "propose_match":
                 proposed = outs.get("model_proposed") or proposed
         out.append({
+            "waiting_minor": waiting_minor,
             "inflow_id": i.id,
             "amount_minor": i.amount_minor,
             "currency": i.currency,
