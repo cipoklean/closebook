@@ -304,18 +304,30 @@ def record_and_match(session, *, deposit_id: str, currency: str,
         log.exception("could not record the model trace for inflow %s",
                       inflow.id)
 
-    # A REFERENCE THAT NAMES A SETTLED INVOICE IS NOT AN UNKNOWN ONE. Only when
-    # the reading is already unresolved: a confident match needs no explanation,
-    # and a duplicate sentence must never overwrite one.
+    # A REFERENCE THAT NAMES A SETTLED INVOICE IS NEVER A MATCH. This used to
+    # run only when the reading was already unresolved, on the theory that a
+    # confident match needs no explanation -- so a second payment quoting a bill
+    # that was already PAID read as "matched to INV-K7P2", applied nothing (the
+    # balance was settled), and told the operator nothing at all. The money went
+    # nowhere and the screen said it had arrived. Run 11's exact case.
+    #
+    # Checked before the match is used, whatever its confidence: the settled
+    # invoice is the fact, and a match against a bill that owes nothing is not a
+    # decision anybody can act on.
+    from ..money import money_str
     from .policy import MATCH_CONFIDENCE_AUTO
 
-    if result.status == "AMBIGUOUS" or result.confidence < MATCH_CONFIDENCE_AUTO:
-        dup = _closed_invoice_note(session, reference, currency)
-        if dup:
-            text, evidence = dup
-            result = replace(result, status="AMBIGUOUS", confidence=0.0,
-                             method="DUPLICATE", allocations=[], reason=text,
-                             evidence=evidence)
+    dup = _closed_invoice_note(session, reference, currency)
+    if dup:
+        _old, evidence = dup
+        number = str(evidence.get("invoice_number") or "that invoice")
+        held = money_str(inflow.amount_minor, inflow.currency)
+        result = replace(
+            result, status="AMBIGUOUS", confidence=0.0, method="DUPLICATE",
+            allocations=[], credit_minor=0, shortfall_minor=0,
+            reason=(f"{number} is already paid; {held} held as credit, "
+                    f"nothing applied."),
+            evidence=evidence)
 
     # The ledger re-checks confidence and posts the cash. It is the ONLY writer
     # of a receivable's paid amount and status.

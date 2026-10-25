@@ -2141,8 +2141,12 @@ def _money_out(c: dict) -> str:
         # badly, or we do not know yet and our own last word was a bad one.
         back_why = (p.get("failure_reason") or p.get("return_reason")
                     or p.get("failure_type") or "")
-        if back_why and live not in ("", None) and \
-                live not in ("CANCELLED", "FAILED", "RETURNED"):
+        # ONLY A KNOWN-GOOD ANSWER BURIES A REASON. This used to clear it for
+        # any non-terminal live status, including the placeholders: after a
+        # restart the cache is empty, the card reads "Checking with the bank…",
+        # and the reason the operator had already read disappeared with it.
+        # "We do not know yet" is not evidence that the payment succeeded.
+        if back_why and live in ("PAID", "COMPLETED", "SUCCESS"):
             back_why = ""
         # A CONCLUSION ABOUT A DIFFERENT ATTEMPT. When the current row has no
         # transfer of its own, the reason on file belongs to the attempt the
@@ -2165,6 +2169,13 @@ def _money_out(c: dict) -> str:
             badge = (f'<span class="x-pill x-pill--info" '
                      f'data-testid="{"checking-with-bank" if waiting else "bank-unreachable"}">'
                      f'{"Checking with the bank…" if waiting else "Could not reach the bank"}</span>')
+            # AND THE REASON WE ALREADY HAVE. After a restart the live-status
+            # cache is empty, so every card reads "Checking with the bank…" --
+            # and the caption a person had already read vanished behind it.
+            # What the bank said is a stored fact, not a status.
+            if back_why:
+                badge += (f'<span class="x-why" data-testid="return-reason">'
+                          f'{e(_shown(back_why))}</span>')
         elif live and live in ("CANCELLED", "FAILED", "RETURNED"):
             # THE REASON HAS TO SURVIVE THE BANK'S ANSWER. This used to be the
             # `elif live:` branch, so the moment the live status arrived the card
@@ -2646,7 +2657,7 @@ def _timeline(c: dict, *, only_needing_human: bool = False,
         + '</div>'))
 
 
-def _arrivals_card(c: dict, *, span: str = "x-span-12", detail: bool = False,
+def _arrivals_card(c: dict, *, span: str = "x-span-12", detail: bool = True,
                    limit: int = 6, title: str = "What arrived",
                    sub: str = "") -> str:
     arr = (c.get("arrivals") or [])[:limit]

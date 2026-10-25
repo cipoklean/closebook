@@ -1241,6 +1241,30 @@ def landing_stats(s) -> dict:
     }
 
 
+def stored_incidents(session, *, limit: int = 50) -> list:
+    """The incidents the DATABASE kept, rebuilt the way the webhook built them.
+
+    `main.INCIDENTS` is a list in memory, so every caption a person had already
+    read -- "Returned: the beneficiary bank sent the money back" -- vanished when
+    the process restarted, even though the event row was still there. The rows
+    are the durable record; this turns them back into the objects the page
+    reads, through the same builder the webhook uses.
+    """
+    from .domain.incidents import handle_event, parse_payload
+    from .models import WebhookEvent
+
+    out = []
+    rows = (session.query(WebhookEvent)
+            .order_by(WebhookEvent.id.desc()).limit(limit).all())
+    for row in rows:
+        try:
+            payload = parse_payload(row.payload)
+            out.append(handle_event(row.name, payload))
+        except Exception:                              # noqa: BLE001
+            continue
+    return out
+
+
 def build_context(incidents: list | None = None) -> dict[str, Any]:
     from .db import get_default_db
     from .domain.ledger import reconcile
@@ -1250,6 +1274,23 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
         # ONE RENDER, ONE CONNECTION. Passing our session down stops the
         # helpers opening their own, which both leaks connections and splits a
         # render across several inconsistent snapshots of the book.
+        # THE STORED EVENTS TOO, deduped by event id: a caption has to survive
+        # the process that read it.
+        try:
+            _merged = list(incidents or []) + stored_incidents(s)
+        except Exception:                              # noqa: BLE001
+            _merged = list(incidents or [])
+        _seen_events: set = set()
+        incidents = []
+        for _inc in _merged:
+            _key = getattr(_inc, "event_id", None) or (
+                _inc.get("event_id") if isinstance(_inc, dict) else None)
+            if _key and _key in _seen_events:
+                continue
+            if _key:
+                _seen_events.add(_key)
+            incidents.append(_inc)
+
         budget = budget_block(s)
 
         receivables = []

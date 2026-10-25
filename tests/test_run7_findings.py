@@ -302,7 +302,12 @@ class TestAPaymentAgainstAPaidInvoiceIsNamed:
                          payer="Brightline Retail", reference="INV-R7-1")
         assert INVOICE in second["reason"], second
         assert "already paid" in second["reason"].lower(), second
-        assert "duplicate" in second["reason"].lower(), second
+        # RUN 11 restated this sentence to say what happened to the MONEY, not
+        # what the payment resembles: "looks like a duplicate" left an operator
+        # holding cash with no idea whether it had been applied.
+        assert "already paid" in second["reason"].lower(), second
+        assert "held as credit" in second["reason"].lower(), second
+        assert "nothing applied" in second["reason"].lower(), second
         assert "unknown invoice" not in second["reason"].lower(), second
 
         text = page_text("aaa", "money-in")
