@@ -269,7 +269,8 @@ def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: i
                     prefer_inflow: Optional[str] = None,
                     fund_currency: Optional[str] = None,
                     book_held_minor: Optional[int] = None,
-                    unattributed_minor: int = 0) -> tuple[str, str]:
+                    unattributed_minor: int = 0,
+                    auto_limit_minor: Optional[int] = None) -> tuple[str, str]:
     """(reason, code) for a payment that does not fit, or ("", "") if it does.
 
     ONE basis: `available_after` already has the floor taken off, and it was
@@ -298,11 +299,13 @@ def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: i
 
     book_held = int(currency_held if book_held_minor is None else book_held_minor)
     unattr = max(int(unattributed_minor or 0), 0)
+    spendable = max(int(currency_held), 0)
+    held_txt = money_str(max(book_held, 0), currency)
 
     # How much MORE real cash would have to be here for this to fit. Two ways to
     # be short: the account does not hold the money at all, or it holds it but
     # spending it would breach the floor.
-    gap = (needed_minor - max(currency_held, 0)) if not enough_cash else -available_after
+    gap = (needed_minor - spendable) if not enough_cash else -available_after
 
     floor_txt = money_str(floor_minor, currency)
     left_txt = money_str(available_after + floor_minor, currency)
@@ -326,31 +329,51 @@ def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: i
                     f"{money_str(max(book_held, 0), currency)} and this needs "
                     f"{money_str(needed_minor, currency)}"), "waits_for_inflow"
 
+    # EVERY BLOCKER THAT APPLIES, EACH WITH ITS NUMBER.
+    #
+    # This used to return the FIRST sentence that fit. A run-7 bill was held by
+    # the reserve floor AND by a deposit nobody had matched, and it was told
+    # about the match only: the tester resolved the deposit, believed the card,
+    # and was still held. Two blockers need two sentences, and each sentence
+    # needs the figure it is about — a clause without a number is a verdict, not
+    # a reason. Same for the automatic limit: a payment that is over it needs a
+    # person even once the cash is there, and that is invisible in a sentence
+    # about cash.
+    clauses: list[str] = []
+    if unattr and unattr >= max(book_held, 0):
+        clauses.append(f"the book holds {held_txt} and all of it is waiting on a "
+                       f"match in Money in")
+    elif unattr:
+        clauses.append(f"the book holds {held_txt} and {money_str(unattr, currency)} "
+                       f"of it is waiting on a match in Money in")
+    else:
+        clauses.append(f"the book holds {held_txt}")
     if not enough_cash:
-        if unattr:
-            # THE HONEST SENTENCE. Somebody has to resolve the deposit before
-            # this can be paid, and that is the only useful thing to say.
-            return (f"{what}: needs {money_str(needed_minor, currency)} but "
-                    f"nothing is free to spend: the book holds "
-                    f"{money_str(max(book_held, 0), currency)} and "
-                    f"{money_str(unattr, currency)} of it is waiting on a match "
-                    f"in Money in"), "insufficient_balance"
-        return (f"{what}: needs {money_str(needed_minor, currency)} "
-                f"but the book holds "
-                f"{money_str(max(book_held, 0), currency)}"), \
-               "insufficient_balance"
+        clauses.append("nothing is free to spend" if spendable == 0 else
+                       f"only {money_str(spendable, currency)} is free to spend")
 
-    if unattr:
-        return (f"{what}: paying it now would leave cash {left_txt}, below the "
-                f"{floor_txt} floor, and {money_str(unattr, currency)} of the "
-                f"cash is waiting on a match in Money in"), "reserve_floor"
-    return (f"{what}: paying it now would leave cash {left_txt}, below the "
-            f"{floor_txt} floor"), "reserve_floor"
+    # The policy window, counting unmatched cash as though the fix above had
+    # already happened: if paying this would still leave less than the floor,
+    # then the FLOOR is a blocker in its own right and has to be said out loud.
+    window = spendable + unattr
+    floor_binds = floor_minor > 0 and (window - needed_minor) < floor_minor
+    if floor_binds:
+        clauses.append(f"paying it would leave cash "
+                       f"{money_str(max(window - needed_minor, 0), currency)}, "
+                       f"below the {floor_txt} floor")
+    if auto_limit_minor and needed_minor > auto_limit_minor:
+        clauses.append(f"it is also over the "
+                       f"{money_str(auto_limit_minor, currency)} automatic limit, so "
+                       f"it needs your OK even once the cash is there")
+
+    code = "insufficient_balance" if not enough_cash else "reserve_floor"
+    return f"{what}: " + "; ".join(clauses), code
 
 
 
 def _restate_deferrals(plan, deferred_ctx, *, available, holdings, floor_minor,
-                       forecast, book_holdings=None, unattributed=None) -> None:
+                       forecast, book_holdings=None, unattributed=None,
+                       auto_limit_minor=None) -> None:
     """Re-say every deferral against the position the WHOLE run leaves behind.
 
     A blocked payable is costed at its turn in the loop, before the payments
@@ -382,18 +405,18 @@ def _restate_deferrals(plan, deferred_ctx, *, available, holdings, floor_minor,
             currency=f_ccy, floor_minor=floor_minor, forecast=forecast,
             what=d["what"], prefer_inflow=d["prefer"], fund_currency=f_ccy,
             book_held_minor=int(book_holdings.get(f_ccy, 0)),
-            unattributed_minor=int(unattributed.get(f_ccy, 0)))
+            unattributed_minor=int(unattributed.get(f_ccy, 0)),
+            auto_limit_minor=auto_limit_minor)
         if not bs:
             continue
-        # Restate the cash half ONLY. A dependency blocker is not affected by
-        # the arithmetic of the rest of the run, so it stays first.
-        keep = [b for b in st.blockers if "waits for" not in b
-                and "would leave cash" not in b]
-        keep.append(bs)
-        st.blockers = keep
-        st.blocker_codes = [c for c in st.blocker_codes
-                            if c in ("dependency_not_met", "no_rate",
-                                     "unsupported_currency")] + [bc]
+        # Restate the cash half ONLY, and pair each clause with its own code
+        # rather than re-deriving which clauses were cash arithmetic from their
+        # TEXT: a wording change silently stopped the old filter from matching,
+        # which would have left a stale sentence AND the new one on the card.
+        keep = [(b, c) for b, c in zip(st.blockers, st.blocker_codes)
+                if c in ("dependency_not_met", "no_rate", "unsupported_currency")]
+        st.blockers = [b for b, _ in keep] + [bs]
+        st.blocker_codes = [c for _, c in keep] + [bc]
         st.reason = "; ".join(st.blockers)
         st.policy_reason = st.blocker_codes[0] if st.blocker_codes else st.policy_reason
 
@@ -414,6 +437,10 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
 
     bccy = budget.currency.upper()
     floor_minor = int(budget.reserve_floor_usd * minor_for(bccy))
+    # The automatic limit, in the currency the floor is measured in: a payment
+    # over it needs a person, and that has to be named wherever the payment is
+    # described — including on a card that is already held for cash.
+    limit_minor = int(budget.auto_pay_limit_usd * minor_for(bccy))
 
     # Running capacity per currency: ledger cash MINUS what is already in
     # flight MINUS what is unattributed. This is the only capacity number the
@@ -619,7 +646,8 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
             what=f"pay {p.number} ({money_str(move_minor, p.currency)})",
             prefer_inflow=p.depends_on_receivable, fund_currency=bccy,
             book_held_minor=pos.balances.get(p.currency.upper(), 0),
-            unattributed_minor=pos.suspense.get(p.currency.upper(), 0))
+            unattributed_minor=pos.suspense.get(p.currency.upper(), 0),
+            auto_limit_minor=limit_minor)
         if bs:
             blockers.append(bs)
             codes.append(bc)
@@ -710,6 +738,7 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
     _restate_deferrals(plan, deferred_ctx, available=_available,
                        holdings=working, floor_minor=floor_minor,
                        forecast=pos.forecast,
-                       book_holdings=pos.balances, unattributed=pos.suspense)
+                       book_holdings=pos.balances, unattributed=pos.suspense,
+                       auto_limit_minor=limit_minor)
 
     return plan

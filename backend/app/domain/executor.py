@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Callable, Optional
@@ -46,6 +47,12 @@ SUBMITTABLE = {StepStatus.PROPOSED, StepStatus.APPROVED}
 # it must be resolved by lookup, not refused — refusing here would strand every
 # payment that was in flight when the process died.
 IN_FLIGHT = {StepStatus.SUBMITTED}
+
+
+#: Serialises the send path in this process (see `run_step`).
+#: Money-moving steps are few and sequential; the cost of the lock is
+#: nothing next to a second transfer for one approval.
+_SEND_LOCK = threading.Lock()
 
 
 class ExecutionRefused(Exception):
@@ -169,10 +176,20 @@ class Executor:
         return out
 
     def run_step(self, step: Step) -> StepResult:
-        if step.action == ACT_PAY:
-            return self._pay(step)
-        if step.action == ACT_FX:
-            return self._convert(step)
+        # ONE MONEY MOVEMENT AT A TIME, IN THIS PROCESS.
+        #
+        # The request_id is claimed with a conditional UPDATE, so two cycles can
+        # never mint two keys -- but `already_done` and the in-flight check are
+        # READS, and a read followed by a send is a window. Two cycles racing one
+        # approved step both read "no object id yet" and both went on to create a
+        # transfer: run 7's suite caught it (two request ids, one row) and it was
+        # reproducible at about one run in six. The app runs a single worker by
+        # design, so an in-process lock closes the window completely, and the
+        # conditional UPDATE still covers a second process.
+        if step.action in (ACT_PAY, ACT_FX):
+            with _SEND_LOCK:
+                return (self._pay(step) if step.action == ACT_PAY
+                        else self._convert(step))
         # DEFER / CHASE / ESCALATE move no money; record why, touch no API.
         return StepResult(step=step, attempted=False,
                           status="NO_ACTION", detail=step.reason)
@@ -249,6 +266,7 @@ class Executor:
             row.airwallex_object_id = oid
             row.status = StepStatus.SUBMITTED
             self.db.commit()
+        _note_what_the_bank_said(oid, obj)
         return StepResult(step, True, oid, "SUBMITTED", "transfer created")
 
     # -- FX ----------------------------------------------------------------
@@ -353,6 +371,33 @@ def _error_detail(exc: ApiError) -> str:
     if payload.get("message"):
         parts.append(str(payload["message"]))
     return " | ".join(parts)
+
+
+def _note_what_the_bank_said(oid: str, obj) -> None:
+    """Record the status the CREATE call just returned, so the page can show it.
+
+    `transfers/create` answers with the transfer's own status, and the pill on
+    Money out reads a cache that used to be filled ONLY by a background refresh.
+    So the first view after a send read "UNCHECKED" for a payment we had already
+    been told about: run 7 saw "Sent" beside "UNCHECKED" and could not tell
+    whether the money had moved. The answer is in this function's hand, held
+    nowhere else, so it is written down here.
+
+    The dashboard is imported inside the call on purpose: it reads the domain,
+    never the other way round, and a module-level import would close that loop.
+    A failure is logged and swallowed: the books are already written and a
+    display label is not worth failing a payment over.
+    """
+    status = ""
+    if isinstance(obj, dict):
+        status = str(obj.get("status") or "").strip().upper()
+    if not (oid and status):
+        return
+    try:
+        from ..dashboard import note_live_status
+        note_live_status(str(oid), status)
+    except Exception:                                  # noqa: BLE001
+        log.exception("could not record the live status for %s", oid)
 
 
 def _object_id(obj: Any) -> Optional[str]:

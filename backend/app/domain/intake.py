@@ -26,6 +26,8 @@ Two rules this module exists to keep:
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
@@ -88,6 +90,52 @@ def candidates_from_db(session) -> list:
             amount_original_minor=inv.amount_minor,
         ))
     return out
+
+
+def _closed_invoice_note(session, reference: str, currency: str):
+    """A sentence for a payment that names an invoice which is ALREADY SETTLED.
+
+    `candidates_from_db` only ever offers OPEN or PARTIAL invoices, so a second
+    payment quoting a settled one matched NOTHING and landed as "no confident
+    match; a human decides" — a sentence that hides the two facts which decide
+    what to do with the money: that it is a duplicate, and of WHICH bill. Run 7
+    saw exactly that, with the invoice number sitting in the reference. The cash
+    is still real and still needs a person; the sentence has to say what the
+    person is deciding about.
+
+    Returns (sentence, evidence) or None. The containment rule is the matcher's
+    own (the invoice number appears in the reference, word-safe, with at least
+    three digits), so this can never claim a match `try_exact` would refuse.
+    """
+    from .matching import normalise, normalise_invoice
+
+    ref_norm = normalise(reference or "")
+    if not ref_norm:
+        return None
+    for inv in session.query(InvoiceReceivable).all():
+        if inv.status not in (RecStatus.PAID, RecStatus.OVERPAID):
+            continue
+        # A "duplicate" in another currency is not evidence of anything: the
+        # same number against a settled bill in a different currency is a
+        # coincidence, not a repeat payment.
+        if currency and inv.currency and inv.currency.upper() != currency.upper():
+            continue
+        num = normalise_invoice(inv.number)
+        # The WHOLE number, word-safe, is required — not a loose digit run. The
+        # matcher's ">= 3 digits" guard exists to stop a SHORT digit run matching
+        # anything; here the evidence is the entire invoice number appearing in
+        # the reference, and a real one can be short (the tester's own
+        # INV-DP7KQ2 carries two digits). Length of the NUMBER is the honest
+        # guard: "invd" alone must not count as a duplicate.
+        if len(num) < 3 or num not in ref_norm:
+            continue
+        return (f"{inv.number} is already paid; this looks like a duplicate, "
+                f"refund or hold",
+                {"rule": "reference names a settled invoice",
+                 "invoice_number": inv.number,
+                 "invoice_status": inv.status.value,
+                 "invoice_id": inv.id})
+    return None
 
 
 # --------------------------------------------------------------------- intake
@@ -255,6 +303,19 @@ def record_and_match(session, *, deposit_id: str, currency: str,
     except Exception:
         log.exception("could not record the model trace for inflow %s",
                       inflow.id)
+
+    # A REFERENCE THAT NAMES A SETTLED INVOICE IS NOT AN UNKNOWN ONE. Only when
+    # the reading is already unresolved: a confident match needs no explanation,
+    # and a duplicate sentence must never overwrite one.
+    from .policy import MATCH_CONFIDENCE_AUTO
+
+    if result.status == "AMBIGUOUS" or result.confidence < MATCH_CONFIDENCE_AUTO:
+        dup = _closed_invoice_note(session, reference, currency)
+        if dup:
+            text, evidence = dup
+            result = replace(result, status="AMBIGUOUS", confidence=0.0,
+                             method="DUPLICATE", allocations=[], reason=text,
+                             evidence=evidence)
 
     # The ledger re-checks confidence and posts the cash. It is the ONLY writer
     # of a receivable's paid amount and status.

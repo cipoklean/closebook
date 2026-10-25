@@ -1463,7 +1463,7 @@ def _home(c: dict) -> str:
     if inc:
         rows = "".join(
             f'<li><span class="x-todo-ico is-warn">{_I["warn"]}</span>'
-            f'<div><b>{e(g["live_status"] or "unknown")}</b>'
+            f'<div><b>{e(bank_words(g.get("live_status"))[0])}</b>'
             f'<p>{len(g["events"])} event'
             f'{"s" if len(g["events"]) != 1 else ""} · '
             f'{e(g["recovery"] or "no recovery decided")}</p></div></li>'
@@ -1546,14 +1546,46 @@ def _sandbox_panel(simulate: str = "", devs: str = "") -> str:
     body = (simulate or "") + (devs or "")
     if not body.strip():
         return ""
-    return ('<details class="x-sandbox" id="sandbox-controls" '
-            'data-testid="sandbox-controls">'
+    # OPEN WHEN IT HOLDS THE DEPOSIT FORM. The fence exists to keep demo
+    # machinery out of the operator's view, and the terminal-state buttons can
+    # stay behind a summary line. The deposit form cannot: it is the one control
+    # a tester (and the live demo) has to reach, and inside a COLLAPSED <details>
+    # its fields are never rendered, so a real browser reports them as invisible
+    # and types into nothing. Collapsed-by-default is what cost run 7 every
+    # deposit test; `open` when there is something to type into, collapsed when
+    # it only holds buttons that move a transfer to its end state.
+    opened = " open" if simulate.strip() else ""
+    return (f'<details class="x-sandbox x-span-12" id="sandbox-controls" '
+            f'data-testid="sandbox-controls"{opened}>'
             '<summary><span class="x-sandbox-tag">sandbox only</span>'
             '<b>Sandbox controls</b>'
             '<span class="x-hint">Not part of the product. These move sandbox '
             'money so the demo can reach the interesting states.</span>'
             '</summary>'
             f'<div class="x-sandbox-body">{body}</div></details>')
+
+
+def bank_words(live) -> tuple[str, str]:
+    """(words, tone) for what the BANK says, with the placeholders spelled out.
+
+    `live_status` is a machine value: "UNCHECKED" before a lookup lands, and
+    "UNKNOWN" when one failed. Both were rendered verbatim next to "Sent" on a
+    payment that had just been approved, so run 7 read a payment that was moving
+    as one whose state nobody knew. One function, so every screen that shows a
+    bank status says the same human thing, and no screen can print the token.
+    """
+    value = str(live or "").strip().upper()
+    # ONLY the placeholders are re-worded. A real status is the BANK'S OWN WORD
+    # and is passed through exactly as Airwallex reports it -- re-casing it here
+    # would put "Processing" on a card where every other screen says PROCESSING.
+    if value in ("UNCHECKED", ""):
+        return "Checking with the bank…", "info"
+    if value == "UNKNOWN":
+        return "Could not reach the bank", "warn"
+    tone = ("good" if value in ("PAID", "COMPLETED", "SUCCESS")
+            else "bad" if value in ("CANCELLED", "FAILED", "RETURNED")
+            else "info")
+    return value, tone
 
 
 def _dev_controls(transfer_id: str, live: str, label: str = "") -> str:
@@ -2058,6 +2090,16 @@ def _money_out(c: dict) -> str:
         # and in this project every transfer is sandbox money.
         if live in ("PAID", "COMPLETED", "SUCCESS"):
             badge = '<span class="x-pill x-pill--good">Paid</span>'
+        elif live in ("UNCHECKED", "UNKNOWN"):
+            # NEVER SHOW THE MACHINE'S PLACEHOLDER. `live_status` is "UNCHECKED"
+            # until a lookup lands and "UNKNOWN" when one failed, and both were
+            # printed verbatim on a SENT payment: run 7 read "UNCHECKED" beside
+            # "Sent" and could not tell whether the money had moved. A person
+            # needs to know the app is still finding out, or that it could not.
+            waiting = live == "UNCHECKED"
+            badge = (f'<span class="x-pill x-pill--info" '
+                     f'data-testid="{"checking-with-bank" if waiting else "bank-unreachable"}">'
+                     f'{"Checking with the bank…" if waiting else "Could not reach the bank"}</span>')
         elif live:
             badge = f'<span class="x-pill x-pill--info">{e(live)}</span>'
         elif st in ("CANCELLED", "FAILED"):
@@ -2106,7 +2148,8 @@ def _money_out(c: dict) -> str:
         # that money moved, and never render it as "paid".
         ref = ""
         if obj:
-            live = p.get("live_status") or "UNKNOWN"
+            live = p.get("live_status")
+            live_txt, live_tone = bank_words(live)
             # The bank's own identifier is a 36-character UUID and the
             # environment is the same word on every card. Both are needed when
             # something goes wrong and neither is worth a line on every row, so
@@ -2114,9 +2157,8 @@ def _money_out(c: dict) -> str:
             # the environment fold away behind it.
             ref = (f'<details class="x-hist x-hist--bank" data-testid="bank-ref">'
                    f'<summary><span class="x-label">On the bank</span>'
-                   f'<span class="x-pill x-pill--'
-                   f'{"good" if live in ("PAID", "COMPLETED", "SUCCESS") else ("warn" if live in ("PROCESSING", "PENDING", "SUBMITTED") else "info")}"'
-                   f'>{e(live)}</span></summary>'
+                   f'<span class="x-pill x-pill--{live_tone}"'
+                   f'>{e(live_txt)}</span></summary>'
                    f'<div class="x-meta"><span class="x-label">Reference</span>'
                    f'<span class="x-tag x-mono">{e(str(obj))}</span></div>'
                    f'<div class="x-meta"><span class="x-label">Environment</span>'
@@ -2809,6 +2851,11 @@ def _live_bill_state(p: dict | None, stored: str) -> tuple[str, str, str]:
     action = (p.get("plan_action") or "").upper()
     note = p.get("step_reason") or ""
 
+    if live in ("UNCHECKED", "UNKNOWN"):
+        # A machine placeholder is not a state a person can act on, and printed
+        # beside "Sent" it reads as a payment whose fate is unknown.
+        words, tone = bank_words(live)
+        return words, tone, (note or "Airwallex is being asked about this transfer.")
     if live:
         return live, ("bad" if live in ("FAILED", "CANCELLED", "RETURNED")
                       else "info"), (note or f"Airwallex reports {live}")

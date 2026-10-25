@@ -200,15 +200,38 @@ class TestTheSandboxIsFenced:
         assert 'data-testid="sandbox-controls"' in \
             client.get("/app?tab=money-in").text
 
-    def test_it_is_collapsed_by_default(self, client, book):
+    def _opening_tag(self, html: str) -> str:
         """From the OPENING tag: the panel gained an `id` beside its testid, so
         a fixed look-back window no longer reaches `<details`."""
-        html = client.get("/app?tab=money-in").text
         tag = html[:html.find('data-testid="sandbox-controls"')].rfind("<details")
         assert tag > 0
         opening = html[tag:html.find(">", tag) + 1]
         assert opening.startswith("<details")
-        assert " open" not in opening
+        return opening
+
+    def test_it_is_open_when_it_holds_the_deposit_form(self, client, book):
+        """THE ONE CONTROL A TESTER MUST REACH CANNOT BE BEHIND A COLLAPSED BOX.
+
+        Inside a closed <details> the fields are not rendered at all: a real
+        browser reports them as invisible, types into nothing, and the tester saw
+        exactly that -- a blank amount, nothing created, "No deposits yet". The
+        deposit form is therefore open; the buttons that move a transfer to its
+        end state stay behind the summary line, which is what the next test
+        pins.
+        """
+        opening = self._opening_tag(client.get("/app?tab=money-in").text)
+        assert " open" in opening, (
+            "the deposit form is inside a collapsed panel, so no browser can "
+            "type into it: " + opening)
+
+    def test_it_stays_collapsed_when_it_holds_only_the_dev_buttons(self):
+        """The fence still fences: buttons alone do not open the panel."""
+        from app.ui import _dev_controls  # noqa: F401  (shape check below)
+        from app.ui import _sandbox_panel
+
+        panel = _sandbox_panel(simulate="", devs='<button id="x">Settle</button>')
+        opening = panel[:panel.find(">") + 1]
+        assert " open" not in opening, opening
 
     def test_it_is_labelled_sandbox_only(self, client, book):
         html = client.get("/app?tab=money-in").text
