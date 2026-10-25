@@ -217,7 +217,10 @@ def _bank_reason(client, transfer_id: str) -> str:
         body = Transfers(client).get(transfer_id) or {}
     except Exception:                                  # noqa: BLE001
         return ""
-    for key in ("failure_reason", "reason", "failure_type"):
+    # NEVER `reason`: that is the description WE sent with the transfer, so it
+    # reads back as the bill's own number and the card then says "Failed:
+    # PO-R11-FAIL-1" -- true, unhelpful, and not what the bank said (run 11).
+    for key in ("failure_reason", "failure_type"):
         val = body.get(key)
         if isinstance(val, str) and val.strip():
             return val.strip()

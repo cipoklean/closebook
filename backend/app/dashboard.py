@@ -470,6 +470,13 @@ def steps_block(s) -> dict:
     latest_run = _latest_run_id(s)
 
     payable_state: dict[str, dict] = {}
+    #: payable number -> the newest attempt that ACTUALLY WENT TO THE BANK and
+    #: is over. The current row can be a replacement with no transfer at all, and
+    #: then the only transfer id on the card is the dead one's -- which is where
+    #: the bank's reason lives. Kept apart from `payable_state` because "what is
+    #: happening now" and "what the bank said about the last attempt" are two
+    #: different facts and must not overwrite each other.
+    bank_attempt: dict[str, dict] = {}
     approvable: list[dict] = []
     problems: list[dict] = []
 
@@ -480,6 +487,14 @@ def steps_block(s) -> dict:
         reason = (st.reason or "").strip()
 
         if payable:
+            from .domain.plan_store import RETIRED_STATUSES
+
+            if (st.airwallex_object_id and st.status in RETIRED_STATUSES
+                    and payable not in bank_attempt):
+                bank_attempt[payable] = {
+                    "id": st.airwallex_object_id,
+                    "status": st.status.value,
+                }
             existing = payable_state.get(payable)
             # Rows arrive NEWEST FIRST, so the first entry for a payable is its
             # current state. The one exception is a preference for the money-
@@ -610,6 +625,7 @@ def steps_block(s) -> dict:
         "problems": _dedupe(current_problems),
         "past_attempts": _dedupe(past_attempts),
         "payable_state": payable_state,
+        "bank_attempt": bank_attempt,
     }
 
 
@@ -1294,6 +1310,7 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
         for p in s.query(InvoicePayable).order_by(InvoicePayable.number).all():
             sup = suppliers.get(p.supplier_id)
             state = steps["payable_state"].get(p.number, {})
+            bank = (steps.get("bank_attempt") or {}).get(p.number) or {}
             step = plan_steps.get(p.number)
             payables.append({
                 "number": p.number,
@@ -1309,6 +1326,13 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
                 "stored_status": p.status.value,
                 "step_reason": state.get("reason"),
                 "airwallex_object_id": state.get("airwallex_object_id"),
+                # WHICH ATTEMPT THE BANK ACTUALLY SAW. The current row may be a
+                # replacement that has never been sent, so its object id is empty
+                # -- and looking the reason up under "" is why a Fail or a Return
+                # produced no caption at all (run 10).
+                "bank_attempt_id": str(
+                    state.get("airwallex_object_id") or bank.get("id") or ""),
+                "bank_attempt_status": str(bank.get("status") or ""),
                 # What the BANK says, not what we recorded. These differ, and
                 # only one of them is a claim about money.
                 "live_status": live_status.get(
@@ -1316,7 +1340,8 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
                 # THE BANK'S OWN WORDS about a transfer that came back, so
                 # CANCELLED is never shown without its reason.
                 "failure_reason": return_reasons.get(
-                    str(state.get("airwallex_object_id") or ""), ""),
+                    str(state.get("airwallex_object_id")
+                        or bank.get("id") or ""), ""),
                 "step_stored_reason": state.get("reason"),
                 # The planner's own verdict on this payable: action, the exact
                 # reason with its numbers, and whether it needs a human.

@@ -488,3 +488,64 @@ class TestHomeShowsTheMoneyHeldForReview:
         assert "Held for review" in text, text[:500]
         assert "USD 7,000.00" in text, (
             "the held figure is missing or wrong: " + text[:500])
+
+
+class TestTheCardShowsWhyTheAttemptCameBack:
+    """Run 10's one gap, closed in the RENDERED page.
+
+    After a Fail, `payable_state` held the NEWEST transfer row -- the
+    replacement, which has no transfer at all -- so the reason was looked up
+    under an empty transfer id and the caption never rendered, even though the
+    event row was there and named the CANCELLED attempt's transfer.
+    """
+
+    def _cancelled_then_replanned(self, kind: str = "fail"):
+        from app.domain.incidents import record_bank_failure
+        from app.settle import settle_transfer
+
+        oid = _sent_once()
+        with session_scope() as s:
+            settle_transfer(s, oid, "CANCELLED")
+            _said, incident = record_bank_failure(
+                s, transfer_id=oid, kind=kind,
+                failure_type=("BENEFICIARY_BANK_RETURNED" if kind == "return"
+                              else "INVALID_ACCOUNT_NAME_OR_NUMBER"),
+                failure_reason=("account closed" if kind == "return" else ""))
+        _cycle(get_default_db(), FakeTransfers(), execute=True)   # the #2 row
+        return oid, incident
+
+    def test_the_rendered_page_carries_the_failed_caption(self):
+        from app.dashboard import build_context
+        from app.ui import render_app
+
+        oid, incident = self._cancelled_then_replanned("fail")
+        html = render_app(build_context([incident]), tab="money-out")
+        text = " ".join(__import__("re").sub("<[^>]+>", " ", html).split())
+        assert "Failed:" in text, (
+            "the money-out page does not say why the attempt came back: "
+            + text[:600])
+        assert "rejected" in text.lower() or "account" in text.lower(), text[:600]
+
+    def test_the_rendered_page_carries_the_returned_caption(self):
+        from app.dashboard import build_context
+        from app.ui import render_app
+
+        oid, incident = self._cancelled_then_replanned("return")
+        html = render_app(build_context([incident]), tab="money-out")
+        text = " ".join(__import__("re").sub("<[^>]+>", " ", html).split())
+        assert "Returned:" in text, (
+            "the money-out page does not say the money came back: "
+            + text[:600])
+        assert "account closed" in text, text[:600]
+
+    def test_the_reason_follows_the_attempt_that_went_to_the_bank(self):
+        """The card's own figure: it names the attempt the bank refused."""
+        from app.dashboard import build_context
+
+        oid, incident = self._cancelled_then_replanned("return")
+        ctx = build_context([incident])
+        p = next(x for x in ctx["payables"] if x["number"] == "QA-OVL-1")
+        assert p["failure_reason"].startswith("Returned:"), p["failure_reason"]
+        assert p["bank_attempt_id"] == oid, (
+            "the card is not pointed at the attempt that has the transfer: "
+            f"{p.get('bank_attempt_id')!r}")

@@ -2144,6 +2144,13 @@ def _money_out(c: dict) -> str:
         if back_why and live not in ("", None) and \
                 live not in ("CANCELLED", "FAILED", "RETURNED"):
             back_why = ""
+        # A CONCLUSION ABOUT A DIFFERENT ATTEMPT. When the current row has no
+        # transfer of its own, the reason on file belongs to the attempt the
+        # bank refused -- so the card says WHICH attempt it is talking about,
+        # next to the status that is actually current.
+        previous_why = ""
+        if back_why and not p.get("airwallex_object_id"):
+            previous_why, back_why = back_why, ""
         # The badge reports the BANK. A submitted transfer is not a paid one,
         # and in this project every transfer is sandbox money.
         if live in ("PAID", "COMPLETED", "SUCCESS"):
@@ -2241,6 +2248,24 @@ def _money_out(c: dict) -> str:
             # page, rather than rendered here among the operator's own buttons.
             # The label travels with it so the row can name its payment.
             dev_targets.append((str(obj), live, _pay_label(p)))
+
+        if previous_why and not obj:
+            # THE ATTEMPT THAT WENT TO THE BANK, FOLDED AWAY BUT PRESENT. A
+            # replacement has no transfer of its own, so the block above never
+            # runs for it and the trail said nothing at all about a payment the
+            # operator watched come back. The reference is worth keeping too:
+            # it is what a support call asks for.
+            ref = (f'<details class="x-hist x-hist--bank" data-testid="bank-ref">'
+                   f'<summary><span class="x-label">Previous attempt</span>'
+                   f'<span class="x-pill x-pill--bad">'
+                   f'{e(p.get("bank_attempt_status") or "ended")}</span></summary>'
+                   f'<div class="x-meta"><span class="x-label">Reference</span>'
+                   f'<span class="x-tag x-mono">{e(str(p.get("bank_attempt_id") or ""))}'
+                   f'</span></div>'
+                   f'<div class="x-meta"><span class="x-label">The bank says</span>'
+                   f'<span class="x-tag" data-testid="trail-reason">'
+                   f'{e(_shown(previous_why))}</span></div>'
+                   f'</details>')
             # A jump to this payment's row in the panel. Only when the panel will
             # actually have a row for it, or the link goes nowhere.
             if _dev_controls_are_offered_for(live):
@@ -2260,7 +2285,14 @@ def _money_out(c: dict) -> str:
             f'<span class="x-urg x-urg--{urg_cls}"><i></i>{urg_word}</span>'
             f'<span class="x-mono">{e(p["number"])}</span></div></div>'
             f'{badge}</div>'
-            f'<ol class="x-steps">{"".join(steps)}</ol>'
+            # THE PREVIOUS ATTEMPT'S REASON, outside the bank block on purpose:
+            # a replacement has no transfer of its own, so the `if obj` branch
+            # that holds the rest of the bank detail never runs for it -- which
+            # is exactly the card that needs this line.
+            + (f'<div class="x-why" data-testid="previous-reason">'
+               f'{e(_shown(previous_why))} '
+               f'<em>(the previous attempt)</em></div>' if previous_why else "")
+            + f'<ol class="x-steps">{"".join(steps)}</ol>'
             f'{_tracker_legend(stopped)}'
             f'{note}{ref}</div>'
         )))
