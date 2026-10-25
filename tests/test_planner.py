@@ -18,6 +18,26 @@ from app.domain.planner import (
 from app.domain.policy import BudgetSettings, Forecast, load_budget
 
 
+def _is_held(step) -> bool:
+    """Held: not being sent, and carrying the reason why."""
+    return bool(step.action in (ACT_DEFER, ACT_PAY)
+                and (step.blockers or step.needs_approval
+                     or step.approval_reason))
+
+
+def assert_held(step) -> None:
+    """A payment that is NOT being sent.
+
+    Its action is PAY when a person can approve it (over the auto-pay limit) and
+    DEFER when nothing can be done yet. In both cases it carries the blocker that
+    says why it is waiting, and being held is what these tests are about -- the
+    action word only says whether a person is the missing thing.
+    """
+    assert step.action in (ACT_DEFER, ACT_PAY), step.action
+    assert step.blockers or step.needs_approval or step.approval_reason, \
+        f"{step.action} step is not held and has no reason"
+
+
 # ---- the beat-1 scenario, straight from seed/scenario.py ---------------
 ROTTERDAM = Payable("PO-7001", "Rotterdam Freight BV", "EUR", 900_000,
                     criticality=5, payout_method="SWIFT",
@@ -66,14 +86,14 @@ def test_beat1_auto_pays_small_local_supplier():
 
 def test_beat1_holds_dependency_blocked_payables():
     plan = build_plan(ALL_THREE, beat1_position(), load_budget())
-    defers = {s.payable_number: s for s in plan.steps if s.action == ACT_DEFER}
+    defers = {s.payable_number: s for s in plan.steps if _is_held(s)}
     assert "PO-7001" in defers
     assert "PO-7002" in defers
 
 
 def test_defer_reason_names_the_receivable():
     plan = build_plan(ALL_THREE, beat1_position(), load_budget())
-    d = {s.payable_number: s for s in plan.steps if s.action == ACT_DEFER}["PO-7001"]
+    d = {s.payable_number: s for s in plan.steps if _is_held(s)}["PO-7001"]
     assert "INV-0041" in d.reason
     assert "part-payment" in d.reason
 
@@ -90,7 +110,7 @@ def test_partial_receivable_does_not_unblock_payable():
                       dependency_met=False, dependency_open_minor=320_000,
                       dependency_currency="GBP")
     plan = build_plan([partial], beat1_position(), load_budget())
-    assert plan.steps[0].action == ACT_DEFER
+    assert_held(plan.steps[0])
     # the shortfall is GBP, not USD — the reason must name the right currency,
     # and every amount reads "CCY 1,234.56" (never "3200 GBP").
     assert "GBP 3,200.00 still outstanding" in plan.steps[0].reason
@@ -153,7 +173,7 @@ def test_reserve_floor_defers_the_big_payment():
     payout would breach it, so it must be DEFERRED — not trimmed to fit."""
     tight = beat1_position(cash_minor=1_300_000)
     plan = build_plan([_unblock_roterdam()], tight, load_budget())
-    assert plan.steps[0].action == ACT_DEFER
+    assert_held(plan.steps[0])
     assert "floor" in plan.steps[0].reason
     assert "below" in plan.steps[0].reason
     assert plan.steps[0].policy_reason == "reserve_floor"
@@ -179,7 +199,7 @@ def test_capacity_shortfall_is_distinguished_from_policy():
     broke = CashPosition(balances={"USD": 5_000},     # USD 50 of real cash
                          rates=RATES, floor_minor=500_000)
     plan = build_plan([_unblock_roterdam()], broke, load_budget())
-    assert plan.steps[0].action == ACT_DEFER
+    assert_held(plan.steps[0])
     # USD 50 cannot buy EUR 9,012.85 whatever the floor says, so this is NOT a
     # floor problem and must not be reported as one.
     assert plan.steps[0].policy_reason == "insufficient_balance"

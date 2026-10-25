@@ -285,6 +285,14 @@ class TestTheMoneyOutChainInAFreshBook:
         page.goto(f"{base}/app?tab=ok", wait_until="load")
         toast = pin_it(page, 'form[action^="/inflows/"]', {"what": "match"})
         assert "applied" in toast.lower(), toast
+        # AND WHAT IS LEFT. The reply used to name the invoice by its ROW ID and
+        # say nothing about the part still unpaid, on the screen that had just
+        # applied a payment to it.
+        assert "USD 400.00" in toast, (
+            "the reply after a partial does not say what is still to collect: "
+            + toast)
+        assert "INV-R6-1" in toast, (
+            "the reply does not name the invoice by its number: " + toast)
         page.goto(f"{base}/app?tab=money-in", wait_until="load")
         partial = text_of(page)
         assert "still to collect" in partial, partial[:600]

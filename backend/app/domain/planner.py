@@ -371,6 +371,23 @@ def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: i
 
 
 
+def _approved_waiting_note(has_approval: bool, available_after: int,
+                           currency: str) -> list[str]:
+    """The sentence for a payment a person approved that is still waiting.
+
+    Run 7's report: the card has to say the money is the only thing outstanding,
+    with the figure, so nobody approves the same payment twice. It is produced in
+    one place because it is added BOTH when the step is first built and when the
+    reasons are re-stated against the position the whole run leaves behind.
+    """
+    if not has_approval:
+        return []
+    short = -min(int(available_after), 0)
+    if short <= 0:
+        return []
+    return [f"Approved. Sends once {money_str(short, currency)} is free to spend"]
+
+
 def _restate_deferrals(plan, deferred_ctx, *, available, holdings, floor_minor,
                        forecast, book_holdings=None, unattributed=None,
                        auto_limit_minor=None) -> None:
@@ -415,7 +432,9 @@ def _restate_deferrals(plan, deferred_ctx, *, available, holdings, floor_minor,
         # which would have left a stale sentence AND the new one on the card.
         keep = [(b, c) for b, c in zip(st.blockers, st.blocker_codes)
                 if c in ("dependency_not_met", "no_rate", "unsupported_currency")]
-        st.blockers = [b for b, _ in keep] + [bs]
+        lead = _approved_waiting_note(bool(getattr(st, "has_valid_approval", False)),
+                                      available(needed), f_ccy)
+        st.blockers = [b for b, _ in keep] + lead + [bs]
         st.blocker_codes = [c for _, c in keep] + [bc]
         st.reason = "; ".join(st.blockers)
         st.policy_reason = st.blocker_codes[0] if st.blocker_codes else st.policy_reason
@@ -654,11 +673,41 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
 
         # --- 6. anything blocking? one step, every reason ------------------
         if blockers:
+            # A BLOCKED PAYMENT CAN STILL NEED A PERSON. Run 7 held two over-limit
+            # bills as waits_for_inflow and "Needs your OK" said nothing needed
+            # anybody: the card only appears for a step that is PAYABLE, and a
+            # bill that is over the limit and short of cash was neither. So the
+            # operator could not approve the thing they were going to approve
+            # anyway, and the money sat still until the cash arrived and only
+            # then asked. The limit verdict is about the AMOUNT, not about the
+            # cash: ask as soon as the plan knows the amount is over the limit,
+            # and send it when the cash and the floor allow.
+            blocked_needs_approval, blocked_why = requires_approval(
+                move_minor, p.currency, pos.rates,
+                auto_limit_usd=budget.auto_pay_limit_usd)
+            # THE ACTION IS PART OF THE PAYMENT'S IDENTITY. An approved payment
+            # is stored against "PAY:<bill>", so a bill that swings between DEFER
+            # while it is short of cash and PAY once the cash lands would lose
+            # its approval every time the cash moved -- and re-ask a question a
+            # person already answered. A payment over the limit is therefore a
+            # PAY step with blockers: never sent (the conductor refuses a step
+            # with blockers), always identifiable, and approveable now.
+            # ONLY WHEN A PERSON IS THE THING THAT IS MISSING. A payment blocked
+            # by its own dependency or by a currency we cannot price is not
+            # waiting on an approval, and offering one would be a button that
+            # cannot honestly do anything. Cash and the floor are different: the
+            # amount is approveable now and the money is a matter of WHEN.
+            as_pay = blocked_needs_approval and not any(
+                c in ("dependency_not_met", "unsupported_currency", "no_rate")
+                for c in codes)
             plan.steps.append(Step(
-                action=ACT_DEFER,
+                action=(ACT_PAY if as_pay else ACT_DEFER),
                 payable_number=p.number, supplier=p.supplier,
                 amount_minor=move_minor, currency=p.currency,
                 payout_method=p.payout_method,
+                needs_approval=(blocked_needs_approval if as_pay else False),
+                has_valid_approval=p.has_valid_approval,
+                approval_reason=(blocked_why if as_pay else ""),
                 # A step can collect the same sentence twice (the capacity gate
                 # and the floor gate can both fire on one number). Repeating it
                 # in the reason reads as two separate problems when there is one;

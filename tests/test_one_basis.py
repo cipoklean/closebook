@@ -29,6 +29,19 @@ from app.models import (  # noqa: E402
 )
 from app.ui import render_app  # noqa: E402
 
+
+def assert_held(step) -> None:
+    """A payment that is NOT being sent.
+
+    Its action is PAY when a person can approve it (over the auto-pay limit) and
+    DEFER when nothing can be done yet. In both cases it carries the blocker that
+    says why it is waiting, and being held is what these tests are about -- the
+    action word only says whether a person is the missing thing.
+    """
+    assert step.action in (ACT_DEFER, ACT_PAY), step.action
+    assert step.blockers or step.needs_approval or step.approval_reason, \
+        f"{step.action} step is not held and has no reason"
+
 FLOOR = 500_000
 
 
@@ -128,7 +141,7 @@ class TestWaitsForInflow:
 
         plan = current_plan(db)
         step = next(s for s in plan.steps if s.payable_number == "PO-X")
-        assert step.action == ACT_DEFER, "it must NOT be paid on expected money"
+        assert_held(step), "it must NOT be paid on expected money"
         assert step.blocker_codes[0] == "waits_for_inflow"
         assert "waits for INV-BIG to land" in step.blockers[0]
 
@@ -149,7 +162,7 @@ class TestWaitsForInflow:
         _payable("PO-X", "USD", 300_000)
         step = next(s for s in current_plan(db).steps
                     if s.payable_number == "PO-X")
-        assert step.action == ACT_DEFER
+        assert_held(step)
         assert step.blocker_codes[0] == "reserve_floor"
         assert "waits for" not in step.blockers[0]
 
@@ -162,7 +175,7 @@ class TestWaitsForInflow:
         _receivable("INV-SMALL", "USD", 100_000)
         step = next(s for s in current_plan(db).steps
                     if s.payable_number == "PO-X")
-        assert step.action == ACT_DEFER
+        assert_held(step)
         assert "waits for" not in step.blockers[0]
 
     def test_expected_inflows_never_make_a_payment_happen(self, db):
@@ -215,8 +228,8 @@ class TestBeatOneFromTheSeed:
     def test_po7001_waits_for_inv0041_and_po7002_for_inv0042(self, db):
         self._seed()
         steps = {s.payable_number: s for s in current_plan(db).steps}
-        assert steps["PO-7001"].action == ACT_DEFER
-        assert steps["PO-7002"].action == ACT_DEFER
+        assert_held(steps["PO-7001"])
+        assert_held(steps["PO-7002"])
         assert any("waits for INV-0041 to land" in b
                    for b in steps["PO-7001"].blockers)
         # PO-7002 needs USD and the only open invoice behind it is GBP, so it is
@@ -272,7 +285,7 @@ class TestBeatOneFromTheSeed:
             r.status = RecStatus.PAID
         step = next(s for s in current_plan(db).steps
                     if s.payable_number == "PO-7002")
-        assert step.action == ACT_DEFER, "the dependency is met; cash still is not"
+        assert_held(step), "the dependency is met; cash still is not"
         assert step.blocker_codes[0] in ("reserve_floor", "waits_for_inflow")
 
 
@@ -294,7 +307,7 @@ class TestTheFloorBindsOnRealCash:
         _payable("PO-Y", "USD", 44_001)
         step = next(s for s in current_plan(db).steps
                     if s.payable_number == "PO-Y")
-        assert step.action == ACT_DEFER
+        assert_held(step)
         assert "reserve_floor" in step.blocker_codes
 
     def test_the_second_payment_sees_the_first_one_already_spent(self, db):
@@ -305,7 +318,7 @@ class TestTheFloorBindsOnRealCash:
         _payable("PO-SMALL", "USD", 300_000, criticality=2)
         steps = {s.payable_number: s for s in current_plan(db).steps}
         assert steps["PO-BIG"].action == ACT_PAY     # 10,000 - 3,000 = 7,000
-        assert steps["PO-SMALL"].action == ACT_DEFER  # 7,000 - 3,000 = 4,000 < 5,000
+        assert_held(steps["PO-SMALL"])  # 7,000 - 3,000 = 4,000 < 5,000
         assert steps["PO-SMALL"].blocker_codes[0] in ("reserve_floor",
                                                       "waits_for_inflow")
 
@@ -327,7 +340,7 @@ class TestTheFloorBindsOnRealCash:
         step = next(s for s in current_plan(db).steps
                     if s.payable_number == "PO-SMALL")
         assert money["free"]["USD"] < 0
-        assert step.action == ACT_DEFER
+        assert_held(step)
 
 
 # ------------------------------------------------------------- the page says it
@@ -375,7 +388,7 @@ class TestThePageShowsIt:
         _receivable("INV-BIG", "USD", 1_200_000)
         step = next(s for s in current_plan(db).steps
                     if s.payable_number == "PO-X")
-        assert step.action == ACT_DEFER
+        assert_held(step)
         assert len(step.blockers) == 1, f"duplicated: {step.blockers}"
         assert "USD 1,800.00" in step.blockers[0]
         # NOT the drift-inflated number the conversion path produced
@@ -386,7 +399,7 @@ class TestThePageShowsIt:
         _payable("PO-Y", "EUR", 900_000)
         plan = current_plan(db)
         step = next(s for s in plan.steps if s.payable_number == "PO-Y")
-        assert step.action == ACT_DEFER
+        assert_held(step)
         # costed in the FUNDING currency, which is USD
         assert "USD" in step.blockers[-1]
 
@@ -480,7 +493,7 @@ class TestSuspenseCashCannotFundAPayment:
 
         step = next(s for s in current_plan(db).steps
                     if s.payable_number == "PO-BIG")
-        assert step.action == ACT_DEFER, \
+        assert_held(step), \
             "a supplier must not be paid with money nobody has attributed yet"
         assert step.blocker_codes[0] in ("insufficient_balance", "reserve_floor",
                                          "waits_for_inflow")
@@ -566,7 +579,7 @@ def test_suspense_is_counted_once_in_the_plan_not_twice(db):
     # and it is genuinely not spendable: with the same cash 100% unattributed,
     # the bill cannot be paid at all
     tight = _plan({"USD": 700_000}, {"USD": 700_000})
-    assert tight.steps[0].action == ACT_DEFER
+    assert_held(tight.steps[0])
     # the account "holds" 7,000 but none of it is attributable, so the honest
     # reading is that it holds nothing we may spend
     assert "insufficient_balance" in tight.steps[0].blocker_codes

@@ -1041,27 +1041,44 @@ async def resolve_inflow_route(inflow_id: int, request: Request):
                         inflow.amount_minor
                     applied = ", ".join(str(m.invoice_receivable_id)
                                         for m in matches)
-                    summary = ("match", amount, ccy, applied)
+                    # THE NUMBER AND WHAT IS LEFT. The reply named the invoice
+                    # by its row id ("invoice id(s) 3"), which is not a thing an
+                    # operator can look up, and said nothing about the part still
+                    # unpaid -- on the screen that has just applied a payment to
+                    # it. Read here, inside the session, so the sentence can only
+                    # describe the state the write left behind.
+                    bits: list[tuple[str, int]] = []
+                    for m in matches:
+                        inv = s.get(InvoiceReceivable, m.invoice_receivable_id)
+                        if inv is not None:
+                            bits.append((inv.number,
+                                         max(0, int(inv.amount_minor or 0)
+                                             - int(inv.amount_paid_minor or 0))))
+                    summary = ("match", amount, ccy, applied, bits)
                 elif what == "reject":
                     from .domain.ledger import reject_inflow
                     reject_inflow(s, inflow, rejected_by=by, reason=reason)
-                    summary = ("reject", suspense_for(s, inflow), ccy, "")
+                    summary = ("reject", suspense_for(s, inflow), ccy, "", [])
                 elif what == "refund":
                     amount = resolve_refund(s, inflow, reason=reason, by=by)
-                    summary = ("refund", amount, ccy, "")
+                    summary = ("refund", amount, ccy, "", [])
                 else:
                     amount = resolve_income(s, inflow, note=note, by=by)
-                    summary = ("income", amount, ccy, "")
+                    summary = ("income", amount, ccy, "", [])
                 # read inside; used outside, after the commit
                 remaining = suspense_for(s, inflow)
         except LedgerError as exc:
             return _back(request, tab="ok", err=str(exc))
 
-        kind, amount, ccy, applied = summary
+        kind, amount, ccy, applied, bits = summary
         if kind == "match":
+            names = ", ".join(n for n, _ in bits) or f"invoice id(s) {applied}"
+            left = "; ".join(f"{money_str(o, ccy)} still to collect on {n}"
+                             for n, o in bits if o > 0)
             head = (f"Matched. {money_str(amount, ccy)} has been applied to "
-                    f"invoice id(s) {applied}; the invoice and the ledger have "
-                    f"both moved.")
+                    f"{names}"
+                    + (f"; {left}" if left else "")
+                    + "; the invoice and the ledger have both moved.")
         elif kind == "reject":
             head = (f"Left in suspense. {money_str(amount, ccy)} is still in the "
                     f"book and still not spendable: decide where it belongs "

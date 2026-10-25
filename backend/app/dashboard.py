@@ -1317,8 +1317,13 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
 
         # What is waiting, and WHY — from the planner, so the header, the tab and
         # the payable cards all quote the same rule.
-        waiting = [p for p in payables
-                   if p["plan_action"] in ("DEFER", "ESCALATE")]
+        # ANYTHING HELD, whichever action it carries. A bill over the auto-pay
+        # limit is a PAY step (a person can approve it, and its identity must not
+        # change when the cash lands) that is nevertheless NOT going anywhere
+        # until the reason is cleared, so it belongs here with its reason as well
+        # as on Needs your OK. Keyed on the BLOCKERS rather than the action word,
+        # because the blockers are what "held" actually means.
+        waiting = [p for p in payables if p["plan_blockers"]]
 
         # A payable the planner says needs approval AND which has not already
         # been sent. Once a step carries an Airwallex object id the approval was

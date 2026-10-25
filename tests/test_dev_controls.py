@@ -48,16 +48,19 @@ class TestTheStateMachineIsWalkedNotJumped:
 
         c = Recorder()
         Simulation(c).transition_transfer("tr_1", "PAID")
-        assert _statuses(c) == ["SENT", "PAID"]
+        assert _statuses(c) == ["PROCESSING", "SENT", "PAID"]
 
     def test_failing_goes_through_SENT_and_carries_the_type_only_at_the_end(self):
         c = Recorder()
         Simulation(c).transition_transfer(
             "tr_1", "FAILED", failure_type="INVALID_ACCOUNT_NAME_OR_NUMBER")
-        assert _statuses(c) == ["SENT", "FAILED"]
+        assert _statuses(c) == ["PROCESSING", "SENT", "FAILED"]
         assert "failure_type" not in c.calls[0]["body"], \
             "the intermediate hop must not carry the failure type"
-        assert c.calls[1]["body"]["failure_type"] == "INVALID_ACCOUNT_NAME_OR_NUMBER"
+        # THE TYPE RIDES THE FINAL HOP, which is the third one now: the walk
+        # starts at PROCESSING because a transfer the bank reports as SCHEDULED
+        # has to be asked for PROCESSING before anything else (run 8).
+        assert c.calls[-1]["body"]["failure_type"] == "INVALID_ACCOUNT_NAME_OR_NUMBER"
 
     def test_a_return_is_a_FAILED_with_a_return_reason(self):
         c = Recorder()
@@ -69,7 +72,7 @@ class TestTheStateMachineIsWalkedNotJumped:
     def test_settle_transfer_is_the_same_route(self):
         c = Recorder()
         Simulation(c).settle_transfer("tr_1")
-        assert _statuses(c) == ["SENT", "PAID"]
+        assert _statuses(c) == ["PROCESSING", "SENT", "PAID"]
 
     def test_an_unreachable_target_is_refused_rather_than_guessed(self):
         c = Recorder()
@@ -91,3 +94,81 @@ class TestTheLoopReportsWhatItActuallyDid:
         assert _dev_controls_are_offered("SENT")
         assert not _dev_controls_are_offered(None), \
             "an unknown status must not offer a button that cannot work"
+
+
+class TestATransferTheBankHasScheduled:
+    """Run 8: a transfer the bank reported as SCHEDULED could not be moved.
+
+    SCHEDULED is a FUNDING status, not one of the simulatable transfer statuses,
+    and Airwallex only accepts the NEXT valid status. Asking for SENT first was
+    refused, so Settle and Fail did nothing at all (twice) and the operator read
+    "Airwallex's sandbox refused this step".
+    """
+
+    class Refuses:
+        """A client that refuses any hop that is not the next valid one."""
+
+        def __init__(self, current: str, order: tuple[str, ...]):
+            self.current = current
+            self.order = order
+            self.calls: list[dict] = []
+
+        def call(self, method, path, *, json_body=None, **kw):
+            self.calls.append({"path": path, "body": dict(json_body or {})})
+            want = json_body.get("next_status")
+            i = self.order.index(self.current)
+            nxt = self.order[i + 1] if i + 1 < len(self.order) else None
+            if want != nxt:
+                from app.airwallex.client import ApiError
+
+                raise ApiError(
+                    f"next_status must be {nxt} for a transfer in "
+                    f"{self.current}", 400,
+                    {"details": {"errors": [{"source": "next_status"}]}})
+            self.current = want
+            return {"status": want}
+
+    def test_a_scheduled_transfer_is_walked_to_paid(self):
+        from app.airwallex.simulation import Simulation
+
+        c = self.Refuses("SCHEDULED", ("SCHEDULED", "PROCESSING", "SENT", "PAID"))
+        assert Simulation(c).transition_transfer("tr_1", "PAID")["status"] == "PAID"
+        assert c.current == "PAID"
+
+    def test_a_scheduled_transfer_is_walked_to_cancelled(self):
+        from app.airwallex.simulation import Simulation
+
+        c = self.Refuses("SCHEDULED",
+                         ("SCHEDULED", "PROCESSING", "SENT", "CANCELLED"))
+        assert Simulation(c).transition_transfer(
+            "tr_1", "CANCELLED")["status"] == "CANCELLED"
+        assert c.current == "CANCELLED"
+
+    def test_a_refused_FINAL_hop_is_still_an_error(self):
+        """A ladder that swallows everything would report success on nothing."""
+        import pytest
+
+        from app.airwallex.client import ApiError
+        from app.airwallex.simulation import Simulation
+
+        c = self.Refuses("SCHEDULED", ("SCHEDULED", "PROCESSING", "PAID"))
+        with pytest.raises(ApiError):
+            Simulation(c).transition_transfer("tr_1", "SENT")
+
+
+class TestScheduledReadsAsInFlight:
+    def test_the_token_is_not_shown_bare(self):
+        from app.ui import bank_words
+
+        words, tone = bank_words("SCHEDULED")
+        assert words == "Sent, the bank has scheduled it", words
+        assert tone == "info"
+        assert "SCHEDULED" not in words
+
+    def test_the_controls_are_offered_while_it_is_scheduled(self):
+        from app.ui import _dev_controls
+
+        html = _dev_controls("tr_1", "SCHEDULED")
+        assert "Settle" in html and "Fail" in html, (
+            "a scheduled transfer is in flight, so the controls must be there: "
+            + html[:300])

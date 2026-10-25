@@ -540,14 +540,18 @@ _JS = """
     var reason = f.querySelector("input[name=reason]");
     var note = f.querySelector("input[name=note]");
 
-    /* Only the field the chosen action needs. A refund needs a reason; releasing
-       money as income needs a note. Showing both for every choice invites the
-       reader to fill in the one that will be ignored. */
+    /* BOTH FIELDS STAY VISIBLE, AND THE LABELS SAY WHICH CHOICE NEEDS WHICH.
+       This used to hide the note unless "release as income" was chosen and the
+       reason unless "refund" was, on the theory that showing both invites the
+       reader to fill the one that will be ignored. What it actually did was
+       render the field as NOT THERE: run 8 typed a note into nothing, submitted,
+       and the form could not be completed -- a 25-minute hang in one test. A
+       label that names its choice is a cheaper guard than a hidden input. */
     var sync = function () {
       if (!sel) return;
-      var v = sel.value;
-      if (reason) reason.closest(".x-field").hidden = (v !== "refund");
-      if (note) note.closest(".x-field").hidden = (v !== "income");
+      /* Kept as a no-op hook point: the fields are always on the page, and the
+         server still refuses a refund without a reason and a release without a
+         note, so nothing here decides anything. */
     };
     if (sel) { sel.addEventListener("change", sync); sync(); }
 
@@ -1445,7 +1449,8 @@ def _home(c: dict) -> str:
     for w in c.get("waiting") or []:
         wait_inner = _card(span="x-span-4", inner=(
             '<div class="x-cardhead"><div><h3>On hold</h3>'
-            '<p class="x-help">Held by policy: not waiting on a person.</p>'
+            '<p class="x-help">Nothing here is sent until the reason below '
+            'clears.</p>'
             '</div></div><ul class="x-todo">' + "".join(
                 f'<li><span class="x-todo-ico is-warn">{_I["clock"]}</span>'
                 f'<div id="held-{e(p["number"])}">'
@@ -1585,6 +1590,15 @@ def bank_words(live) -> tuple[str, str]:
     tone = ("good" if value in ("PAID", "COMPLETED", "SUCCESS")
             else "bad" if value in ("CANCELLED", "FAILED", "RETURNED")
             else "info")
+    if value == "SCHEDULED":
+        # THE BANK'S "SCHEDULED" IS NOT A QUESTION, AND NOT A FINISH. It is a
+        # FUNDING status: the money is on its way on the transfer's own date, so
+        # a transfer sitting on it is IN FLIGHT and the money is committed. The
+        # bare token read as "waiting for me to do something" (run 8 tried to
+        # Fail it twice and to Settle it), and the word an operator needs is the
+        # one that says the bank already has it. The token stays in the payload
+        # for anyone reading the raw state; this is what the page says.
+        return "Sent, the bank has scheduled it", "info"
     return value, tone
 
 
@@ -2084,8 +2098,17 @@ def _money_out(c: dict) -> str:
         # 6. WHAT CAME BACK, AND WHY. A returned transfer arrives from the bank
         # as CANCELLED, which on its own reads as "someone stopped this". The
         # reason the bank gave is the whole point of the row.
+        # A REASON BELONGS TO A FAILURE, NOT TO A PAYMENT. The incident store
+        # keeps the reason a transfer failed for, and a transfer that later
+        # SUCCEEDS still has that row behind it: pinning it to the card made a
+        # paid payment read "account closed". So the reason is shown only while
+        # the transfer is where that reason applies -- the bank says it ended
+        # badly, or we do not know yet and our own last word was a bad one.
         back_why = (p.get("failure_reason") or p.get("return_reason")
                     or p.get("failure_type") or "")
+        if back_why and live not in ("", None) and \
+                live not in ("CANCELLED", "FAILED", "RETURNED"):
+            back_why = ""
         # The badge reports the BANK. A submitted transfer is not a paid one,
         # and in this project every transfer is sandbox money.
         if live in ("PAID", "COMPLETED", "SUCCESS"):
@@ -2100,6 +2123,18 @@ def _money_out(c: dict) -> str:
             badge = (f'<span class="x-pill x-pill--info" '
                      f'data-testid="{"checking-with-bank" if waiting else "bank-unreachable"}">'
                      f'{"Checking with the bank…" if waiting else "Could not reach the bank"}</span>')
+        elif live and live in ("CANCELLED", "FAILED", "RETURNED"):
+            # THE REASON HAS TO SURVIVE THE BANK'S ANSWER. This used to be the
+            # `elif live:` branch, so the moment the live status arrived the card
+            # showed "CANCELLED" and nothing else: the reason a person needs --
+            # rejected by the beneficiary bank, a wrong account number -- was
+            # only rendered while the status was still OUR stored value, which in
+            # the running app is never. The reason is the row. Run 8 asked for it
+            # in the trail as well as on the badge, so it appears in both.
+            badge = f'<span class="x-pill x-pill--bad">{e(live)}</span>'
+            if back_why:
+                badge += (f'<span class="x-why" data-testid="return-reason">'
+                          f'{e(_shown(back_why))}</span>')
         elif live:
             badge = f'<span class="x-pill x-pill--info">{e(live)}</span>'
         elif st in ("CANCELLED", "FAILED"):
@@ -2161,7 +2196,10 @@ def _money_out(c: dict) -> str:
                    f'>{e(live_txt)}</span></summary>'
                    f'<div class="x-meta"><span class="x-label">Reference</span>'
                    f'<span class="x-tag x-mono">{e(str(obj))}</span></div>'
-                   f'<div class="x-meta"><span class="x-label">Environment</span>'
+                   + (f'<div class="x-meta"><span class="x-label">The bank says'
+                      f'</span><span class="x-tag" data-testid="trail-reason">'
+                      f'{e(_shown(back_why))}</span></div>' if back_why else "")
+                   + f'<div class="x-meta"><span class="x-label">Environment</span>'
                    f'<span class="x-tag">sandbox</span></div>'
                    f'</details>')
             # Registered for the one Sandbox controls panel at the foot of the
@@ -3072,7 +3110,7 @@ def _setup(c: dict) -> str:
                  required=True)
         + _field("currency", "Currency", span="x-span-2", placeholder="USD",
                  hint=_CURRENCY_HINT)
-        + _field("criticality", "Priority", span="x-span-1", value="3",
+        + _field("criticality", "Priority", span="x-span-2", value="3",
                  kind="number", hint="1-5")
         + _field("due_date", "Due date", span="x-span-2", placeholder="2026-11-30")
         + _field("depends_on", "Pay only after invoice", span="x-span-3",

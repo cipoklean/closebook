@@ -117,6 +117,15 @@ def clear_steps(plan: Plan) -> list[Step]:
     return out
 
 
+#: A blocker an approval cannot fix. Approving a payment does not produce the
+#: cash, does not release a dependency on an unpaid invoice, and cannot price a
+#: currency; those are for the operator to solve, not to authorise. Cash and the
+#: reserve floor are DIFFERENT: the amount is approveable now and the money is a
+#: matter of WHEN, so the step gets a row and an approval card immediately.
+BLOCKERS_APPROVAL_CANNOT_FIX = ("dependency_not_met", "unsupported_currency",
+                                "no_rate")
+
+
 def approval_waiting_steps(plan: Plan) -> list[Step]:
     """Steps that are payable but waiting on a HUMAN, and so need a row.
 
@@ -133,7 +142,9 @@ def approval_waiting_steps(plan: Plan) -> list[Step]:
     their reasons.
     """
     return [s for s in plan.steps
-            if s.action in MONEY_ACTIONS and s.needs_approval and not s.blockers]
+            if s.action in MONEY_ACTIONS and s.needs_approval
+            and not any(c in BLOCKERS_APPROVAL_CANNOT_FIX
+                        for c in (s.blocker_codes or []))]
 
 
 def already_approved_steps(plan: Plan) -> list[Step]:
