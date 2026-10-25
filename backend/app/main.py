@@ -209,6 +209,21 @@ def _auto_execute() -> bool:
     return _require_sandbox() is None
 
 
+def _bank_reason(client, transfer_id: str) -> str:
+    """The BANK's own words for why a transfer ended, or "" if it gave none."""
+    try:
+        from .airwallex.transfers import Transfers
+
+        body = Transfers(client).get(transfer_id) or {}
+    except Exception:                                  # noqa: BLE001
+        return ""
+    for key in ("failure_reason", "reason", "failure_type"):
+        val = body.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
 def _run_loop(source: str, budget_s: float = 12.0) -> str:
     """Re-plan from live state after an event, and execute whatever is clear.
 
@@ -228,7 +243,15 @@ def _run_loop(source: str, budget_s: float = 12.0) -> str:
                        execute=True, dry_run=not _auto_execute())
     except Exception as exc:                       # noqa: BLE001
         log.exception("the planning loop failed after %s", source)
-        return f" Re-planning failed ({type(exc).__name__}); nothing was sent."
+        # NEVER THE CLASS NAME. "Re-planning failed (IntegrityError)" is a
+        # machine word where an operator needs to know whether their money
+        # moved: it did not, and the books are as they were.
+        from .domain.plain_words import one_line
+
+        detail = one_line(str(exc) or "", 120)
+        return (f" The books could not be re-planned, so nothing further was "
+                f"sent. Nothing you did was lost"
+                + (f" ({detail})." if detail else "."))
 
     bits = []
     for v in run.verdicts:
@@ -331,6 +354,23 @@ async def dev_transfer_transition(transfer_id: str, request: Request):
                 pass
             with _database().session_scope() as sess:
                 outcomes = settle_transfer(sess, transfer_id, live)
+                # KEEP WHAT THE BANK SAID. A Fail or a Return through these
+                # controls used to record only CANCELLED, so the card could not
+                # say whether the beneficiary bank sent it back or the payment
+                # was refused -- two facts that need different next steps.
+                if (live or "").upper() in TERMINAL_TRANSFER_STATES \
+                        and what in ("fail", "return"):
+                    try:
+                        from .domain.incidents import record_bank_failure
+                        _said, _inc = record_bank_failure(
+                            sess, transfer_id=transfer_id, kind=what,
+                            failure_type=failure_type or "",
+                            failure_reason=_bank_reason(client, transfer_id),
+                            status=(live or "").upper())
+                        if _inc is not None:
+                            INCIDENTS.append(_inc)
+                    except Exception:                  # noqa: BLE001
+                        log.exception("could not record the bank's reason")
             posted = [o for o in outcomes if o.posted]
             if posted:
                 settle_note = f" Ledger: {len(posted)} posting(s) written."
@@ -1334,10 +1374,10 @@ async def setup_settings(request: Request):
                  reserve_floor=str(b.get("reserve_floor") or ""),
                  auto_pay_limit=str(b.get("auto_pay_limit") or ""),
                  fx_tolerance_pct=str(b.get("fx_tolerance_pct") or "0.50"))
-        return _back(request, ok="Settings saved. The planner and the tiles both "
+        return _back(request, tab="setup", ok="Settings saved. The planner and the tiles both "
                                  "read these numbers.")
     except SettingsRefused as exc:
-        return _back(request, err=str(exc))
+        return _back(request, tab="setup", err=str(exc))
 
 
 @app.post("/setup/customers")
@@ -1351,9 +1391,9 @@ async def setup_customers(request: Request):
                                   email=str(b.get("email") or ""),
                                   country=str(b.get("country") or ""))
             name = row.name
-        return _back(request, ok=f"Added customer {name}.")
+        return _back(request, tab="setup", ok=f"Added customer {name}.")
     except WorkspaceRefused as exc:
-        return _back(request, err=str(exc))
+        return _back(request, tab="setup", err=str(exc))
 
 
 @app.post("/setup/invoices")
@@ -1370,9 +1410,9 @@ async def setup_invoices(request: Request):
                 amount=str(b.get("amount") or ""),
                 due_date=str(b.get("due_date") or ""))
             num = row.number
-        return _back(request, ok=f"Added invoice {num}.")
+        return _back(request, tab="setup", ok=f"Added invoice {num}.")
     except (WorkspaceRefused, ValueError) as exc:
-        return _back(request, err=str(exc))
+        return _back(request, tab="setup", err=str(exc))
 
 
 @app.post("/setup/suppliers")
@@ -1388,7 +1428,7 @@ async def setup_suppliers(request: Request):
 
     guard = _require_sandbox()
     if guard:
-        return _back(request, err=guard)
+        return _back(request, tab="setup", err=guard)
 
     b = await _read_body(request)
     form = {k: (v if isinstance(v, str) else "") for k, v in b.items()}
@@ -1401,7 +1441,7 @@ async def setup_suppliers(request: Request):
                 payout_method=str(b.get("payout_method") or "LOCAL"))
             supplier_id, supplier_name = sup.id, sup.name
     except WorkspaceRefused as exc:
-        return _back(request, err=str(exc))
+        return _back(request, tab="setup", err=str(exc))
 
     outcome = validate_and_create(None, form, beneficiaries=_beneficiary_client())
 
@@ -1411,10 +1451,10 @@ async def setup_suppliers(request: Request):
                            status=outcome.status, error=outcome.error)
 
     if outcome.ok:
-        return _back(request, ok=f"{supplier_name} is payable. Airwallex "
+        return _back(request, tab="setup", ok=f"{supplier_name} is payable. Airwallex "
                                  f"beneficiary {outcome.beneficiary_id} "
                                  f"({outcome.status}).")
-    return _back(request, err=f"{supplier_name} was saved but its beneficiary "
+    return _back(request, tab="setup", err=f"{supplier_name} was saved but its beneficiary "
                               f"was refused. {outcome.error}")
 
 
@@ -1464,10 +1504,10 @@ async def setup_payables(request: Request):
                 criticality=int(b.get("criticality") or 3),
                 due_date=str(b.get("due_date") or ""))
             num = row.number
-        return _back(request, ok=f"Added bill {num}. The planner will look at it "
+        return _back(request, tab="setup", ok=f"Added bill {num}. The planner will look at it "
                                  f"on the next event.")
     except (WorkspaceRefused, ValueError) as exc:
-        return _back(request, err=str(exc))
+        return _back(request, tab="setup", err=str(exc))
 
 
 @app.post("/workspace/reset")

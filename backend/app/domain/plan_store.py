@@ -108,6 +108,11 @@ def valid_approval(db: Session, *, step_key: str, amount_minor: int,
     if not step_key:
         return None
     row = db.query(PlanStep).filter(PlanStep.step_key == step_key).first()
+    # A DEAD ATTEMPT'S APPROVAL IS DEAD. Its terms can match a replacement
+    # exactly -- same bill, same amount, same supplier -- so honouring it would
+    # send a second payment on consent given for a payment that never happened.
+    if row is None or row.status in RETIRED_STATUSES:
+        return None
     if row is None or row.status in RETIRED_STATUSES:
         return None
     ap = (db.query(Approval).filter_by(plan_step_id=row.id)
@@ -223,7 +228,7 @@ def persist_plan(db: Session, run_id: str,
         row = PlanStep(
             run_id=run_id,
             type=_TYPE_FOR_ACTION[step.action],
-            step_key=_key_for(step),
+            step_key=_key_for(step, _attempt_number(db, step)),
             payload_json=_payload_for(step),
             reason=step.reason,
             status=StepStatus.PROPOSED,
@@ -256,16 +261,49 @@ def persist_plan(db: Session, run_id: str,
     return rows, skipped
 
 
-def _key_for(step: Step) -> Optional[str]:
-    """The step's identity, as the database stores it: (payable, action).
+def _attempt_number(db: Session, step: Step) -> int:
+    """How many attempts at this (payable, action) have been RETIRED.
+
+    Attempt identity and payment identity are different questions. A payable is
+    one bill; the attempts to pay it are several, and a dead one must not hold
+    the key the live one needs. Counting retired rows is what makes the next
+    attempt's key derivable by both the writer and the reader.
+    """
+    return sum(1 for row in db.query(PlanStep).all()
+               if _matches(row, step) and row.status in RETIRED_STATUSES)
+
+
+def _key_for(step: Step, attempt: int = 0) -> Optional[str]:
+    """The step's identity, as the database stores it: (payable, action, attempt).
 
     NEVER the payable alone: one bill legitimately has BOTH an FX step and a
     PAY step, and conflating them let a PAY step adopt the FX row's object id
     and report ALREADY_DONE while the supplier was never paid.
+
+    AND NEVER THE SAME KEY FOR A SECOND ATTEMPT. `find_step` deliberately skips a
+    RETIRED row so a dead attempt cannot block a new one, but the retired row
+    still HOLDS `PAY:<bill>` under a unique index -- so the replacement tried to
+    insert the same key, raised `UNIQUE constraint failed: plan_step.step_key`,
+    and (when it surfaced through an autoflush) took the whole re-plan with it
+    after a sandbox Fail or Return. The first attempt is `PAY:<bill>`; the next
+    is `PAY:<bill>#2`, and each is a payment of its own with its own approval.
     """
     if not step.payable_number:
         return None
-    return f"{step.action}:{step.payable_number}"
+    base = f"{step.action}:{step.payable_number}"
+    return base if attempt <= 0 else f"{base}#{attempt + 1}"
+
+
+def current_key(db: Session, *, number: str, action: str) -> Optional[str]:
+    """The key the LIVE attempt at this payment has, or will get.
+
+    The reader half of `_key_for`: what the wall says the current attempt is
+    called has to be the same string the writer used, or the approval a person
+    gave is looked for under a key no row carries -- or worse, found on the
+    attempt that already died.
+    """
+    step = Step(action=action, reason="", payable_number=number)
+    return _key_for(step, _attempt_number(db, step))
 
 
 def new_run_id() -> str:

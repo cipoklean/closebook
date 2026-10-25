@@ -1126,6 +1126,28 @@ def _home(c: dict) -> str:
         + '</div></details>'
     )))
 
+    # 1b. WHAT IS IN THE BANK AND NOT SPENDABLE YET. The money has arrived and
+    # nobody has decided about it, so it is neither cash nor free to spend, and
+    # an operator reading only those two figures concludes it never arrived.
+    # Read from the SAME per-arrival figure the Money in tile sums, so the two
+    # screens cannot disagree about what is held.
+    held_rows = [a for a in (c.get("arrivals") or [])
+                 if int(a.get("waiting_minor") or 0) > 0]
+    held_by_ccy: dict[str, int] = {}
+    for a in held_rows:
+        ccy = str(a.get("currency") or "USD")
+        held_by_ccy[ccy] = held_by_ccy.get(ccy, 0) + int(a.get("waiting_minor") or 0)
+    held_str = " + ".join(money_str(v, k) for k, v in sorted(held_by_ccy.items()))
+    cards.append(_card(span="x-span-3", inner=(
+        f'<span class="x-stat-ico">{_I["clock"]}</span>'
+        '<div class="x-label">Held for review</div>'
+        f'<div class="x-fig" data-figure="held">'
+        f'{e(held_str) if held_str else "Nothing held"}</div>'
+        f'<div class="x-statnote">In the bank and not spendable: '
+        f'{len(held_rows)} payment{"s" if len(held_rows) != 1 else ""} waiting '
+        f'on a decision in <a href="/app?tab=money-in">Money in</a>.</div>'
+    )))
+
     # 2. What we owe, in the currency that will PAY for it, excluding anything
     # already sent. "GBP 3,200.00", never "3200 GBP" — the project had both
     # shapes on screen at once and they read as different quantities.

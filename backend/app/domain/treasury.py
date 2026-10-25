@@ -81,9 +81,13 @@ def payables_from_db(session) -> list[Payable]:
                 dep_met = (r.status == RecStatus.PAID)
         # THE STORED APPROVAL, resolved here because the planner is a PURE
         # function: it gets the world handed to it, never a session.
-        from .plan_store import valid_approval
+        from .plan_store import current_key, valid_approval
+        # THE LIVE ATTEMPT'S KEY, not the first attempt's. Hardcoding the base
+        # key found the approval given for a payment that was returned or
+        # failed, and applied it to the replacement -- consent for one payment
+        # authorising another.
         _ap = valid_approval(
-            session, step_key=f"PAY:{p.number}",
+            session, step_key=current_key(session, number=p.number, action="PAY"),
             amount_minor=p.amount_minor, currency=p.currency,
             counterparty=(p.supplier.name if p.supplier else ""),
             beneficiary_id=(p.supplier.airwallex_beneficiary_id

@@ -753,7 +753,11 @@ def arrivals_block(s) -> list[dict]:
             # suspense, or recorded as a refund we owe. The unmatched-money tile
             # counts from the same list this feeds, so the figure and the count
             # cannot disagree about whether anything is waiting.
-            "waiting_minor": waiting_minor_for(s, i),
+            # WHAT IS STILL UNRESOLVED, which is suspense only. A refund owed
+            # has been decided already: it is a liability, reported on its own
+            # tile, and counting it as "waiting on you" asked for the decision
+            # a second time.
+            "waiting_minor": left,
             "resolvable": bool(left > 0),
             # MODEL SAID / CODE DECIDED, read from the stored proposal and the
             # stored trace. Built here so the AI activity screen and the money-in
@@ -895,8 +899,14 @@ def unmatched_block(s) -> list[dict]:
     decision rather than recomputed by the view."""
     from .domain.ledger import waiting_minor_for
 
+    # A RESOLVED PAYMENT IS NOT UNMATCHED. Resolving as refund owed or as
+    # income IS the decision; leaving the row here asked for it twice and kept
+    # the tile counting a payment nobody is waiting on (run 10).
+    from .domain.ledger import RESOLVED_STATES
+
     inflows = [i for i in s.query(Inflow).all()
-               if i.match_status in (MatchStatus.AMBIGUOUS, MatchStatus.UNMATCHED)]
+               if i.match_status in (MatchStatus.AMBIGUOUS, MatchStatus.UNMATCHED)
+               and (i.review_state or "") not in RESOLVED_STATES]
     out = []
     for i in inflows:
         # The money still waiting on a person, from the ONE helper that answers
@@ -960,6 +970,14 @@ def _return_reasons(incidents: list | None) -> dict:
     """
     out: dict = {}
     for d in incidents or []:
+        # AN INCIDENT ARRIVES EITHER AS ITS OBJECT OR AS A DICT. The webhook
+        # path keeps Incident objects in `main.INCIDENTS` and the page passed
+        # those straight in, so `.get` raised on every live incident and the
+        # reason a transfer came back was never attached to the card at all.
+        if hasattr(d, "to_dict"):
+            d = d.to_dict()
+        if not isinstance(d, dict):
+            continue
         tid = str(d.get("transfer_id") or "")
         if not tid:
             continue

@@ -308,3 +308,68 @@ __all__ = [
     "Incident", "Recovery", "Severity", "classify_failure", "handle_event",
     "in_flight", "parse_payload",
 ]
+
+
+#: What the common failure types mean, in the words a person needs.
+_FAILURE_WORDS = {
+    "BENEFICIARY_BANK_RETURNED": "the beneficiary bank sent the money back",
+    "INVALID_ACCOUNT_NAME_OR_NUMBER": "the account name or number was rejected",
+    "INVALID_BENEFICIARY": "the beneficiary details were rejected",
+    "INSUFFICIENT_FUNDS": "there were not enough funds to send it",
+}
+
+
+def _plain_failure_type(failure_type: str) -> str:
+    """A failure type as a sentence, never the token itself."""
+    value = str(failure_type or "").strip().upper()
+    if value in _FAILURE_WORDS:
+        return _FAILURE_WORDS[value]
+    if value:
+        return "the bank rejected this payment"
+    return "the bank did not say why"
+
+
+def record_bank_failure(db_session, *, transfer_id: str, kind: str,
+                        failure_type: str = "",
+                        failure_reason: str = "", status: str = "CANCELLED"):
+    """Keep what the BANK said about a transfer that came back.
+
+    A webhook does this on the way in; the sandbox controls are the other way a
+    transfer ends badly, and they recorded only the STATUS. So the card read
+    CANCELLED with no reason -- and "somebody stopped this" is a different fact
+    from "the beneficiary bank returned it, the account is closed". Stored as an
+    event so it reaches the same reader as a webhook's, and labelled with which
+    of the two happened, because the next action differs.
+    """
+    import json
+
+    from ..models import WebhookEvent
+    from ..timeutils import utcnow
+
+    label = "Returned" if str(kind).lower() == "return" else "Failed"
+    # A COLON AND A SENTENCE, ALWAYS. The sandbox reports a failure_type for
+    # some transitions and no reason text for others, and a card reading only
+    # "Failed" tells the operator as little as "CANCELLED" did.
+    why = (failure_reason or "").strip() or _plain_failure_type(failure_type)
+    said = f"{label}: {why}"
+    body = {
+        "id": f"sim-{kind}-{transfer_id}",
+        "name": "payout.transfer.failed",
+        "kind": "simulated",
+        "data": {"id": transfer_id, "status": "CANCELLED",
+                 "failure_type": failure_type or "",
+                 "failure_reason": said},
+    }
+    row = db_session.query(WebhookEvent).filter_by(
+        event_id=body["id"]).first()
+    if row is None:
+        db_session.add(WebhookEvent(
+            event_id=body["id"], name=body["name"], payload=json.dumps(body),
+            created_at=utcnow(), processed_at=utcnow()))
+    else:
+        row.payload = json.dumps(body)
+    db_session.flush()
+    # THE SAME BUILDER A WEBHOOK USES. A page reads incidents, not events, so
+    # writing the row alone left the card as silent as before.
+    return said, handle_event("payout.transfer.failed", body,
+                              live_status=status)

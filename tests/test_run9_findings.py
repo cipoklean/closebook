@@ -364,14 +364,19 @@ class TestWhatIsAppliedIsWhatTheInvoiceShows:
 
 # ------------------------------------- 3. one fact, one place, on the money
 class TestRefundsOwedAndTheUnmatchedCardAgree:
-    """The figure and the count must come from the SAME list.
+    """The figure and the count come from ONE list, and a resolution resolves.
 
     Run 9: after a refund was recorded, Home showed "GBP 100.00" in Refunds owed
     while the unmatched-money card said BOTH "Nothing waiting" AND "1 payment
     waiting on you" -- one screen, two sources, three claims.
+
+    Run 10 then settled which list a refund belongs to: it is RESOLVED, so it
+    leaves the waiting list, and its money is reported under Refunds owed. What
+    survives from run 9 is the invariant -- whatever the tile says, its figure
+    and its count describe the same payments.
     """
 
-    def _refund_owed(self, suffix: str = "aaa") -> None:
+    def _refund_owed(self, suffix: str = "aaa") -> int:
         from app.domain.intake import record_and_match
         from app.domain.ledger import resolve_refund
         from app.models import Inflow
@@ -382,37 +387,47 @@ class TestRefundsOwedAndTheUnmatchedCardAgree:
                              reference="cash with no invoice", llm=False)
             row = s.query(Inflow).order_by(Inflow.id.desc()).first()
             resolve_refund(s, row, reason="duplicate payment", by="tester")
-        in_book(suffix, write)
+            return row.id
+        return in_book(suffix, write)
 
-    def test_the_tile_never_says_nothing_waiting_with_a_payment_waiting(
-            self, books):
+    def _unresolved(self, suffix: str = "aaa") -> int:
+        from app.domain.intake import record_and_match
+        from app.models import Inflow
+
+        def write(s):
+            record_and_match(s, deposit_id="dep-r9-open", currency="USD",
+                             amount_minor=25_000, payer_name="Someone Else",
+                             reference="nothing matches this", llm=False)
+            return s.query(Inflow).order_by(Inflow.id.desc()).first().id
+        return in_book(suffix, write)
+
+    def test_the_figure_and_the_count_describe_the_same_payments(self, books):
+        make("aaa", floor="0", limit="2500", bill_minor=100_00)
+        self._refund_owed()
+        self._unresolved()
+        ctx, html = home_page("aaa")
+        listed = [a for a in ctx["unmatched"] if int(a.get("waiting_minor") or 0) > 0]
+        # ONE payment is waiting (the unresolved one) and it holds USD 250.00.
+        assert len(listed) == 1, [(a.get("inflow_id"), a.get("waiting_minor"))
+                                  for a in ctx["unmatched"]]
+        assert sum(int(a["waiting_minor"]) for a in listed) == 25_000
+        text = visible(html)
+        assert "1 payment waiting on you" in text, text[:400]
+        assert "Nothing waiting" not in text, text[:400]
+        assert "USD 250.00" in text, text[:400]
+
+    def test_a_resolved_refund_is_not_waiting_and_is_reported_as_owed(self, books):
         make("aaa", floor="0", limit="2500", bill_minor=100_00)
         self._refund_owed()
         ctx, html = home_page("aaa")
         text = visible(html)
-        listed = [a for a in ctx["unmatched"] if int(a.get("waiting_minor") or 0) > 0]
-        assert sum(int(a["waiting_minor"]) for a in listed) == 10_000, listed
-        # The tile names the same money as Refunds owed, and it never says
-        # nothing is waiting beside a count of one.
+        # Nothing is waiting on a person...
+        assert not [a for a in ctx["unmatched"]
+                    if int(a.get("waiting_minor") or 0) > 0]
+        assert "Nothing waiting" in text or "0 payments waiting on you" in text
+        # ...and the money is still visible, as the liability it is.
+        assert "Refunds owed" in text, text[:400]
         assert "USD 100.00" in text, text[:400]
-        assert "1 payment waiting on you" in text, text[:400]
-        assert "Nothing waiting" not in text, (
-            "the tile says nothing is waiting while a payment waits: "
-            + text[text.index("Waiting on you"):][:160])
-
-    def test_the_unmatched_figure_is_the_money_still_waiting(self, books):
-        """The figure is the sum over the SAME list the count uses."""
-        make("aaa", floor="0", limit="2500", bill_minor=100_00)
-        self._refund_owed()
-        ctx, html = home_page("aaa")
-        listed = ctx["unmatched"]
-        assert len(listed) == 1, [a["id"] for a in listed]
-        waiting = sum(int(a.get("waiting_minor") or 0) for a in listed)
-        assert waiting == 10_000, (
-            f"the listed payment holds {waiting} while {10_000} was received "
-            f"and is owed back")
-        assert "USD 100.00" in visible(html), (
-            "the tile does not show the money that is waiting")
 
 
 # --------------------------------- 4. an approved payment that is short of cash

@@ -372,7 +372,8 @@ def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: i
 
 
 def _approved_waiting_note(has_approval: bool, available_after: int,
-                           currency: str, floor_minor: int = 0) -> list[str]:
+                           currency: str, floor_minor: int = 0,
+                           unresolved_minor: int = 0) -> list[str]:
     """The sentence for a payment a person approved that is still waiting.
 
     Run 7's report: the card has to say the money is the only thing outstanding,
@@ -388,6 +389,12 @@ def _approved_waiting_note(has_approval: bool, available_after: int,
     # AND WHAT THE FLOOR IS. Run 9 asked for the figure; the floor it has to
     # clear is the other half of "when", and without it "USD 8,200.00 free to
     # spend" reads as an arbitrary number rather than the reserve being kept.
+    if unresolved_minor > 0 and unresolved_minor >= short:
+        # THE MONEY IS THERE AND NOBODY HAS DECIDED ABOUT IT. "Waiting on cash"
+        # with no further detail sent the operator looking for a transfer that
+        # had already arrived; naming the deposit and the screen is the action.
+        return [f"Approved. Waiting on cash: {money_str(unresolved_minor, currency)} "
+                f"deposit is unresolved. Resolve it in Money in."]
     note = f"Approved. Sends once {money_str(short, currency)} is free to spend"
     if floor_minor:
         note += (f" (reserve floor {money_str(int(floor_minor), currency)}, "
@@ -441,7 +448,9 @@ def _restate_deferrals(plan, deferred_ctx, *, available, holdings, floor_minor,
                 if c in ("dependency_not_met", "no_rate", "unsupported_currency")]
         lead = _approved_waiting_note(bool(getattr(st, "has_valid_approval", False)),
                                       available(needed), f_ccy,
-                                      floor_minor=int(floor_minor or 0))
+                                      floor_minor=int(floor_minor or 0),
+                                      unresolved_minor=int(
+                                          unattributed.get(f_ccy, 0)))
         st.blockers = [b for b, _ in keep] + lead + [bs]
         st.blocker_codes = [c for _, c in keep] + [bc]
         st.reason = "; ".join(st.blockers)

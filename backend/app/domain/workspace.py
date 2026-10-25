@@ -137,7 +137,9 @@ def create_payable(session, *, supplier_id: int, currency: str, amount: str,
             f"paid. Create a beneficiary for them first, on the Suppliers card."
         )
     if session.query(InvoicePayable).filter_by(number=number).first():
-        raise WorkspaceRefused(f"Bill {number} already exists.")
+        raise WorkspaceRefused(
+            f"{number} already exists, nothing added. A bill number is half of "
+            f"the payment's identity, so two bills cannot share one.")
     try:
         amount_minor = to_minor(amount, ccy)
     except Exception:
