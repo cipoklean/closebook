@@ -223,7 +223,10 @@ class TestAppShell:
 
     def test_unknown_tab_falls_back_to_home(self):
         html = _client().get("/app", params={"tab": "nope"}).text
-        assert "Everything money did" in html
+        # REWORDED ON PURPOSE (UI revamp): Home now opens by saying where the
+        # money stands, not by promising a history. The old line described a
+        # log; the page answers a question.
+        assert "Where the money stands today" in html
 
     def test_sidebar_lists_all_five_destinations(self):
         html = render_app(_ctx(), tab="home")
@@ -289,7 +292,7 @@ class TestLabelMapping:
         assert "5,000.00" in html
 
     def test_free_to_spend_subtracts_promised_in_flight_and_the_floor(self, db):
-        """free = cash - promised - in flight - reserve floor, per currency."""
+        """free = cash - promised - in flight - safety cushion, per currency."""
         _payable(db, number="PO-7201", currency="USD", amount=500_000)
         ctx = build_context([])
         m = ctx["money"]
@@ -1529,7 +1532,7 @@ class TestFundingCurrencyIsWhatHasToBeThere:
         html = render_app(ctx, tab="home")
         assert "Short by USD" in html
         assert "PO-7502" in html
-        assert "reserve floor" in html
+        assert "safety cushion" in html
 
     def test_the_floor_is_charged_only_to_the_budget_currency_after_fx(self, db):
         """GBP cash must not absorb a USD reserve."""
@@ -1547,7 +1550,7 @@ class TestFundingCurrencyIsWhatHasToBeThere:
         m = ctx["money"]
         assert m["headline_shortfall_minor"] == 0
         html = render_app(ctx, tab="home")
-        assert "after promised payments and the USD 5,000.00 reserve floor" in html
+        assert "for supplier bills and the USD 5,000.00 safety cushion" in html
         assert "Short by USD" not in html
 
     def test_a_payable_with_no_conversion_is_called_out_in_plain_words(self, db):
@@ -1612,7 +1615,7 @@ class TestAmountsAllReadTheSameWay:
         ctx = build_context([])
         html = render_app(ctx, tab="home")
         assert "USD 2,500.00" in html          # the auto-pay limit
-        assert "USD 5,000.00" in html          # the reserve floor
+        assert "USD 5,000.00" in html          # the safety cushion
         assert "USD 2500.0" not in html
         assert "USD 5000.0" not in html
 

@@ -1558,7 +1558,8 @@ def landing() -> str:
 
 
 @app.get("/app", response_class=HTMLResponse)
-def app_page(background: BackgroundTasks, tab: str = "home",
+def app_page(background: BackgroundTasks, request: Request,
+             tab: str = "home",
              ok: str = "", err: str = "") -> str:
     """The operator app. Everything on it was decided by the deterministic layer
     before this function ran — the page only presents.
@@ -1627,7 +1628,8 @@ def app_page(background: BackgroundTasks, tab: str = "home",
         log.warning("could not schedule the live-status refresh")
 
     return render_app(ctx, tab=tab, health=health,
-                      ws=_active_workspace())
+                      ws=_active_workspace(),
+                      guide=(request.query_params.get("guide") == "1"))
 
 
 def _active_workspace() -> str:

@@ -485,7 +485,7 @@ class TestHomeShowsTheMoneyHeldForReview:
 
         _ctx, html = home_page("aaa")
         text = visible(html)
-        assert "Held for review" in text, text[:500]
+        assert "Unmatched money" in text, text[:500]
         assert "USD 7,000.00" in text, (
             "the held figure is missing or wrong: " + text[:500])
 

@@ -275,8 +275,12 @@ class TestASentTransferNeverReadsUnchecked:
 
         note_live_status(oid, "PROCESSING")
         after = page_text("aaa", "money-out")
-        assert "PROCESSING" in after, after[:400]
+        # REWORDED ON PURPOSE (UI revamp): the chip says what the bank is doing
+        # rather than printing the bank's own word for it. The machine status
+        # still rides in the chip's explanation, which is where an operator
+        # looks when they need it.
         assert "Checking with the bank" not in after, after[:400]
+        assert "Sent, waiting for the bank" in after, after[:400]
 
     def test_a_failed_lookup_says_so_rather_than_showing_a_token(self, books):
         from app.dashboard import note_live_status

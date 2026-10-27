@@ -722,3 +722,149 @@ a { color: inherit; }
   .x-aifoot { gap: 6px; }
   .x-aifoot .x-pill { flex: 0 1 auto; }
 }
+
+/* ===========================================================================
+   UI revamp: three numbers, a first-run guide, one timeline.
+
+   Same tokens and the same one accent colour as the rest of the product. The
+   layout rule is phone-first: every block below is a single column until there
+   is room for more, so 390px is the width it was designed at and the desktop is
+   the one that gets the extra columns.
+   =========================================================================== */
+
+.x-label {
+  display: block;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--x-muted);
+}
+
+/* ---- the three numbers ---------------------------------------------------- */
+.x-bignums {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+@media (min-width: 920px) {
+  .x-bignums { grid-template-columns: repeat(3, 1fr); gap: 16px; }
+}
+.x-big {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 22px 22px 20px;
+  background: var(--x-card);
+  border: 1px solid var(--x-line);
+  border-radius: var(--x-r);
+  box-shadow: var(--x-shadow);
+  color: inherit;
+  text-decoration: none;
+}
+a.x-big:hover { border-color: var(--x-line-2); }
+.x-bigfig {
+  font-size: 32px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  color: var(--x-ink);
+}
+@media (min-width: 920px) { .x-bigfig { font-size: 38px; } }
+.x-big p { margin: 0; font-size: 13.5px; line-height: 1.5; color: var(--x-muted); }
+
+/* ---- start here ----------------------------------------------------------- */
+.x-steps-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.x-step {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 16px;
+  background: var(--x-card);
+  border: 1px solid var(--x-line);
+  border-radius: var(--x-r-s);
+}
+.x-step.is-done { background: var(--x-good-t); border-color: transparent; }
+.x-step-ico {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--x-bg);
+  color: var(--x-muted);
+}
+.x-step-ico.is-done { background: var(--x-good); color: #fff; }
+.x-step-ico .x-ico { width: 16px; height: 16px; }
+.x-step-num { font-size: 14px; font-weight: 650; }
+.x-step-body { flex: 1 1 auto; min-width: 0; }
+.x-step-body b { font-size: 15px; }
+.x-step-body p { margin: 3px 0 0; font-size: 13px; color: var(--x-muted); line-height: 1.5; }
+.x-step .x-btn { margin-left: auto; align-self: center; white-space: nowrap; }
+@media (max-width: 700px) {
+  .x-step { flex-wrap: wrap; }
+  .x-step .x-btn { margin-left: 46px; width: calc(100% - 46px); text-align: center; }
+}
+
+/* ---- what just happened --------------------------------------------------- */
+.x-happened { list-style: none; margin: 0; padding: 0; }
+.x-happened li a {
+  display: flex;
+  gap: 14px;
+  align-items: baseline;
+  padding: 13px 4px;
+  border-bottom: 1px solid var(--x-line);
+  color: var(--x-ink);
+  text-decoration: none;
+}
+.x-happened li:last-child a { border-bottom: 0; }
+.x-happened li a:hover { background: var(--x-bg); border-radius: 8px; }
+.x-when { flex: 0 0 104px; font-size: 12.5px; color: var(--x-faint); }
+@media (max-width: 700px) {
+  .x-happened li a { flex-direction: column; gap: 2px; }
+  .x-when { flex: 0 0 auto; }
+}
+.x-empty-row { padding: 14px 4px; font-size: 13.5px; color: var(--x-muted); }
+
+/* ---- details -------------------------------------------------------------- */
+.x-details { margin-top: 18px; }
+.x-details > summary {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 14px 0;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--x-ink);
+}
+.x-details[open] > summary { border-bottom: 1px solid var(--x-line); }
+.x-drow {
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--x-line);
+}
+.x-drow:last-child { border-bottom: 0; }
+.x-drow b { font-size: 14px; }
+.x-drow p { margin: 3px 0 0; font-size: 13px; line-height: 1.5; color: var(--x-muted); max-width: 62ch; }
+.x-dval { flex: 0 0 auto; font-weight: 600; font-size: 15px; text-align: right; }
+.x-dfig { display: block; }
+@media (max-width: 700px) {
+  .x-drow { flex-direction: column; gap: 4px; }
+  .x-dval { text-align: left; }
+}
+
+/* ---- the decision, in three steps ---------------------------------------- */
+.x-receipt-col--checks .x-receipt-row { display: flex; gap: 8px; align-items: flex-start; }
+.x-receipt-col--checks .x-receipt-row b { font-weight: 500; font-size: 13px; }
+.x-tick { flex: 0 0 auto; display: inline-grid; place-items: center; width: 16px; height: 16px; }
+.x-tick .x-ico { width: 14px; height: 14px; }
+.is-pass .x-tick { color: var(--x-good); }
+.is-fail .x-tick { color: var(--x-warn); }
+
+/* a chip explains itself on hover, and on tap where there is no hover */
+.x-tip { cursor: help; }

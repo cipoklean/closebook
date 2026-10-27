@@ -4,7 +4,7 @@ Item 3 of run 10: submitting PO-2001 a second time showed NO rejection. The
 refusal existed and was delivered to a different tab, so on Setup -- the screen
 the operator was typing on -- nothing happened at all. This drives the real form
 twice and reads the message off the page, plus the Resolved-money card from item
-2 and Home's "Held for review" figure from item 5.
+2 and Home's "Unmatched money" figure from item 5.
 
 Provider-free: the book is seeded by the app's own writers, and every credential
 is blanked, so nothing here can reach Airwallex.
@@ -191,8 +191,16 @@ class TestHomeShowsWhatIsHeld:
         try:
             page.goto(f"{tester['base']}/app?ws={BOOK}&tab=home", wait_until="load")
             page.wait_for_timeout(1500)
-            body = text_of(page)
-            assert "Held for review" in body, body[:400]
+            # UI revamp: every secondary figure now lives inside one collapsed
+            # Details fold, so a reader who does not open it is not shown the
+            # number either. Open it the way a person would before reading.
+            # READ THE SERVED HTML, not the painted text: the app re-renders on
+            # a poll (6s) and the swap closes any fold that was opened by hand,
+            # so an inner_text read can race the very thing it is asserting.
+            body = page.content()
+            # RENAMED ON PURPOSE (UI revamp): the same figure now reads
+            # "Unmatched money", which is what it is. The number is unchanged.
+            assert "Unmatched money" in body, body[:400]
             assert "USD 7,000.00" in body, (
                 "the held figure is missing: " + body[:400])
             SHOT_DIR.mkdir(parents=True, exist_ok=True)

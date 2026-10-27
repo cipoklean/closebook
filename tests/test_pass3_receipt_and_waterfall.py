@@ -214,7 +214,11 @@ class TestTheReceiptIsTwoColumns:
     def test_ai_activity_carries_it(self, client, book):
         html = client.get("/app?tab=ai").text
         assert 'data-testid="receipt"' in html
-        assert "Model said" in html and "Code decided" in html
+        # RENAMED ON PURPOSE (UI revamp): the receipt now reads "AI suggestion
+        # / Rule checks / Result", because a reader who has never seen this
+        # needs to know the middle column is what decided, not a second opinion.
+        assert "AI suggestion" in html and "Result" in html
+        assert "Rule checks" in html
 
     def test_the_columns_state_the_four_things_they_must(self):
         """Model: invoice, amount, claimed confidence, a line of reasoning.

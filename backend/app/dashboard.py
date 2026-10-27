@@ -762,6 +762,10 @@ def arrivals_block(s) -> list[dict]:
                                and left > 0 and i.review_state != "RELEASED_INCOME"
                                and i.review_state != "REFUND_OWED"),
             "settled_match": i.match_status == MatchStatus.MATCHED,
+            # WHEN it landed, for the "What just happened" timeline. Read-only:
+            # nothing decides anything from it.
+            "received_at": (i.received_at.isoformat()
+                            if getattr(i, "received_at", None) else ""),
             # HOW MUCH of this payment is still unresolved, read from the
             # ledger so a part-allocated inflow shows only its remainder.
             "suspense_minor": left,

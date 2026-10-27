@@ -114,6 +114,39 @@ def _prose(text: object, limit: int = 120) -> str:
     return t if len(t) <= limit else t[: limit - 1].rstrip() + "…"
 
 
+def _rule_checks(model: dict, code: dict) -> list[tuple[str, bool, str]]:
+    """THE CODE'S OWN CHECKS, as a pass/fail list, between claim and result.
+
+    "The model proposes, the code decides" is the whole product and it was a
+    sentence in a README. These are the checks that actually ran, in the words a
+    person can follow, so the middle column is the argument rather than a claim
+    about one. Only facts the record carries are shown: a check is never marked
+    as passed because nobody looked.
+    """
+    from .domain.policy import MATCH_CONFIDENCE_AUTO
+
+    out: list[tuple[str, bool, str]] = []
+    conf = code.get("confidence")
+    if conf not in (None, ""):
+        ok = float(conf) >= MATCH_CONFIDENCE_AUTO
+        out.append((f"Confidence {pct(conf)}: "
+                    f"{'at or above' if ok else 'below'} the "
+                    f"{pct(MATCH_CONFIDENCE_AUTO)} bar", ok,
+                    "is-pass" if ok else "is-fail"))
+    verdict = str(code.get("verdict") or "").strip()
+    if verdict:
+        applied = verdict.upper() == "MATCHED"
+        out.append((f"Verdict: {verdict.lower()}"
+                    + ("" if applied else " (a person decides this one)"),
+                    applied, "is-pass" if applied else "is-fail"))
+    rule = str(code.get("rule") or "").strip()
+    if rule:
+        out.append((f"Rule that fired: {rule}", True, "is-pass"))
+    if not out:
+        out.append(("No check recorded for this payment.", False, "is-fail"))
+    return out
+
+
 def _receipt(model: dict, code: dict) -> str:
     """Model said / Code decided -- side by side, because that is the product.
 
@@ -166,11 +199,19 @@ def _receipt(model: dict, code: dict) -> str:
     right = "".join(f'<div class="x-receipt-row"><span>{k}</span><b>{v}</b></div>'
                     for k, v in rows) or '<div class="x-receipt-row"><span>, </span></div>'
 
+    checks = _rule_checks(m, c)
+    middle = "".join(
+        f'<div class="x-receipt-row {cls}" data-testid="rule-{ "pass" if ok else "fail"}">'
+        f'<span class="x-tick">{_I["check"] if ok else _I["x"]}</span>'
+        f'<b>{e(text)}</b></div>' for text, ok, cls in checks)
+
     return (f'<div class="x-receipt" data-testid="receipt">'
             f'<div class="x-receipt-col x-receipt-col--model">'
-            f'<div class="x-receipt-head">Model said</div>{left}</div>'
+            f'<div class="x-receipt-head">AI suggestion</div>{left}</div>'
+            f'<div class="x-receipt-col x-receipt-col--checks">'
+            f'<div class="x-receipt-head">Rule checks</div>{middle}</div>'
             f'<div class="x-receipt-col x-receipt-col--code">'
-            f'<div class="x-receipt-head">Code decided</div>{right}</div></div>')
+            f'<div class="x-receipt-head">Result</div>{right}</div></div>')
 
 
 def _waterfall_bar(ccy: str, w: dict) -> str:
@@ -1074,10 +1115,10 @@ def tile_text(c: dict) -> dict:
     shorts = dict(m["shortfall"])
     if shorts:
         bits = " and ".join(money_str(v, ccy) for ccy, v in sorted(shorts.items()))
-        headline = f"Short by {bits} after promised payments and the {floor_txt} reserve floor"
+        headline = f"Short by {bits} for supplier bills and the {floor_txt} safety cushion"
     else:
         headline = (f"{money_str(m['headline_free_minor'], m['headline_currency'])} "
-                    f"after promised payments and the {floor_txt} reserve floor")
+                    f"for supplier bills and the {floor_txt} safety cushion")
     paid = m.get("paid_today") or []
     return {
         "cash": join(cash) or "no cash yet",
@@ -1089,6 +1130,180 @@ def tile_text(c: dict) -> dict:
         "paid_today": join(_sum_by_currency(paid)) if paid else "Nothing yet",
         "auto_pay_limit": money_str(b["auto_pay_limit_minor"], bud_ccy),
     }
+
+
+def _start_here(c: dict) -> str:
+    """THE FIRST TWO MINUTES, for somebody who has never seen this.
+
+    Three steps, each one a real screen and a real route -- nothing pre-filled,
+    nothing simulated on the operator's behalf. A step ticks itself off from the
+    books, so the guide cannot claim progress that did not happen, and the guide
+    disappears once a book has all three (it can be reopened from "How it
+    works").
+    """
+    payables = c.get("payables") or []
+    invoices = c.get("receivables") or []
+    arrivals = c.get("arrivals") or []
+    matched = [a for a in arrivals
+               if (a.get("applied") or a.get("settled_match"))]
+
+    steps = [
+        ("bill", "Add a supplier bill", "What you owe, like a supplier invoice.",
+         "/app?tab=setup#bill", "Add a supplier bill", bool(payables)),
+        ("invoice", "Add a customer invoice", "What somebody owes you.",
+         "/app?tab=setup#invoice", "Add an invoice", bool(invoices)),
+        ("payment", "Receive a payment",
+         "Simulate one landing in the sandbox, naming the invoice.",
+         "/app?tab=money-in", "Receive a payment", bool(arrivals)),
+    ]
+    done = sum(1 for *_, ok in steps if ok)
+    rows = []
+    for i, (key, title, blurb, href, cta, ok) in enumerate(steps, start=1):
+        tick = (_I["check"] if ok else f'<span class="x-step-num">{i}</span>')
+        rows.append(
+            f'<li class="x-step{" is-done" if ok else ""}" data-testid="step-{key}">'
+            f'<span class="x-step-ico{" is-done" if ok else ""}">{tick}</span>'
+            f'<div class="x-step-body"><b>{e(title)}</b>'
+            f'<p>{e(blurb)}</p></div>'
+            + ("" if ok else
+               f'<a class="x-btn x-btn--primary" href="{href}" '
+               f'data-testid="step-{key}-go">{e(cta)}</a>')
+            + '</li>')
+
+    # WHAT ACTUALLY HAPPENED, in the plainest words available.
+    result = ""
+    if matched:
+        a = matched[-1]
+        who = a.get("payer") or "a customer"
+        invs = ", ".join(x.get("invoice") or "" for x in (a.get("applied") or [])
+                         if x.get("invoice"))
+        conf = a.get("confidence")
+        sure = (f" ({round(float(conf) * 100)}% sure)" if conf is not None else "")
+        sent = ""
+        moved = [p for p in payables
+                 if (p.get("display_status") or "").upper()
+                 in ("APPROVED", "SUBMITTED", "SCHEDULED", "PROCESSING", "PAID")]
+        if moved:
+            sent = (f" Supplier bill {moved[0]['number']} was released.")
+        result = (
+            '<div class="x-note x-note--done" data-testid="guide-result">'
+            f'{_I["ok"]}<span>{e(money(a.get("amount_minor") or 0, a.get("currency") or ""))} '
+            f'arrived. The AI thinks it pays {e(invs or "an invoice")}{e(sure)}. '
+            f'The rules checked it.{sent}</span></div>')
+
+    return _card(span="x-span-12", inner=(
+        '<div class="x-cardhead"><div><h3>Start here</h3>'
+        '<p class="x-help">Three steps and the demo tells its own story. '
+        'Everything runs on the Airwallex sandbox: no real money, nothing '
+        'pre-filled.</p></div>'
+        f'<span class="x-pill x-pill--accent" data-testid="guide-progress">'
+        f'{done} of 3</span></div>'
+        f'<ul class="x-steps-list" data-testid="start-here">'
+        + "".join(rows) + '</ul>' + result
+    ))
+
+
+def _just_happened(c: dict) -> str:
+    """ONE timeline, newest first, one plain sentence per event.
+
+    Deposits and anything the bank pushed back, merged and ordered by their own
+    timestamps. Each line links to the screen that owns it, so "what just
+    happened" is a way in rather than a report.
+    """
+    events: list[tuple[str, str]] = []
+    for a in c.get("arrivals") or []:
+        when = a.get("received_at") or ""
+        money_txt = money(a.get("amount_minor") or 0, a.get("currency") or "")
+        who = a.get("payer") or "somebody"
+        state = str(a.get("match_status") or "").upper()
+        resolution = str(a.get("review_state") or "").upper()
+        invs = ", ".join(x.get("invoice") or "" for x in (a.get("applied") or [])
+                         if x.get("invoice"))
+        if resolution == "REFUND_OWED":
+            line = (f"{money_txt} was set aside as a refund owed. "
+                    f"It is still in the bank and not yours to spend.")
+            href = "/app?tab=ok"
+        elif resolution == "RELEASED_INCOME":
+            line = f"{money_txt} was released as income. It is yours to spend."
+            href = "/app?tab=money-in"
+        elif invs:
+            line = f"{money_txt} arrived from {who} and paid {invs}."
+            href = "/app?tab=money-in"
+        elif state in ("AMBIGUOUS", "UNMATCHED", "PROPOSED"):
+            line = f"{money_txt} arrived from {who} and nobody can tell what it " \
+                   f"pays yet. It needs you."
+            href = "/app?tab=ok"
+        else:
+            line = f"{money_txt} arrived from {who}."
+            href = "/app?tab=money-in"
+        events.append((when, f'<li><a href="{href}" data-testid="happened">'
+                             f'<span class="x-when">{e(_fmt_ts(when))}</span>'
+                             f'<span>{e(line)}</span></a></li>'))
+    for inc in c.get("incidents") or []:
+        when = str(inc.get("created_at") or "")
+        tid = str(inc.get("transfer_id") or "")
+        said = (inc.get("failure_reason") or inc.get("failure_type")
+                or inc.get("summary") or "the bank did not say why")
+        events.append((when, f'<li><a href="/app?tab=money-out#sandbox-controls" '
+                             f'data-testid="happened"><span class="x-when">'
+                             f'{e(_fmt_ts(when))}</span><span>A payment '
+                             f'({e(tid[:8])}…) came back: {e(_shown(said))}'
+                             f'</span></a></li>'))
+    events.sort(key=lambda pair: pair[0], reverse=True)
+    rows = "".join(html for _when, html in events[:8])
+    if not rows:
+        rows = ('<li class="x-empty-row">Nothing has happened yet. When money '
+                'arrives or a payment moves, it appears here in one line.</li>')
+    return _card(span="x-span-12", inner=(
+        '<div class="x-cardhead"><div><h3>What just happened</h3>'
+        '<p class="x-help">Newest first. Tap a line to open the screen behind '
+        'it.</p></div></div>'
+        f'<ul class="x-happened" data-testid="what-just-happened">{rows}</ul>'
+    ))
+
+
+def _bignums(c: dict, tt: dict, m: dict) -> str:
+    """THE THREE NUMBERS a person needs: what is there, what is spare, what
+    needs them. Everything the old Home gave equal weight to now lives one fold
+    below, in the same order it always did."""
+    floor_txt = money_str(m["reserve_floor_minor"], m["reserve_applies_to"])
+    promised = tt["promised"]
+    shorts = dict(m["shortfall"])
+    if shorts:
+        bits = " and ".join(money_str(v, ccy) for ccy, v in sorted(shorts.items()))
+        free_fig = f"Short by {bits}"
+        free_note = ("Supplier bills already promise more than is left after "
+                     f"keeping back a {floor_txt} safety cushion.")
+    else:
+        free_fig = money_str(m["headline_free_minor"], m["headline_currency"])
+        # ONE SOURCE for the sentence: the same string the folded tile uses,
+        # so the two can never say different things about the same number.
+        free_note = tt["free_to_spend"]
+    n_you = needs_you(c)
+    you_note = ("Everything is decided. Closebook is watching the books."
+                if n_you == 0 else
+                f"{'One thing' if n_you == 1 else str(n_you) + ' things'} only "
+                "a person can decide.")
+    n_inflight = len([ln for ln in m["lines"] if ln["where"] == "in_flight"])
+    cash_txt = tt["cash"]
+    return (
+        '<div class="x-bignums" data-testid="home-numbers">'
+        '<div class="x-big">'
+        '<div class="x-label">Cash in the bank</div>'
+        f'<div class="x-bigfig" data-figure="cash">{e(cash_txt)}</div>'
+        '<p>Money actually in your Airwallex accounts. '
+        f'{n_inflight} payment{"s" if n_inflight != 1 else ""} already sent '
+        'and not yet settled are listed under Details.</p></div>'
+        '<div class="x-big">'
+        '<div class="x-label">Free to spend</div>'
+        f'<div class="x-bigfig" data-figure="free_to_spend">{e(free_fig)}</div>'
+        f'<p>{e(free_note)}</p></div>'
+        f'<a class="x-big" href="/app?tab=ok">'
+        '<div class="x-label">Needs you</div>'
+        f'<div class="x-bigfig" data-figure="needs_you" '
+        f'data-testid="needs-you-count">{n_you}</div>'
+        f'<p>{e(you_note)}</p></a>'
+        '</div>')
 
 
 def _home(c: dict) -> str:
@@ -1140,7 +1355,7 @@ def _home(c: dict) -> str:
     held_str = " + ".join(money_str(v, k) for k, v in sorted(held_by_ccy.items()))
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["clock"]}</span>'
-        '<div class="x-label">Held for review</div>'
+        '<div class="x-label">Unmatched money</div>'
         f'<div class="x-fig" data-figure="held">'
         f'{e(held_str) if held_str else "Nothing held"}</div>'
         f'<div class="x-statnote">In the bank and not spendable: '
@@ -1194,14 +1409,14 @@ def _home(c: dict) -> str:
         if who:
             headline += (f": paying {who['payable_number']} "
                          f"({money_str(who['amount_minor'], who['currency'])}) "
-                         f"would take cash below the {floor_txt} reserve floor")
+                         f"would take cash below the {floor_txt} safety cushion")
         else:
             headline += (f" after promised payments and the {floor_txt} "
                          f"reserve floor")
         head_cls = ' style="color:var(--x-bad)"'
     else:
         headline = (f"{money_str(m['headline_free_minor'], hccy)} after promised "
-                    f"payments and the {floor_txt} reserve floor")
+                    f"supplier bills and the {floor_txt} safety cushion")
         head_cls = ""
     # Working, per currency, so the headline number is checkable.
     owed = m.get("refunds_owed") or {}
@@ -1213,7 +1428,7 @@ def _home(c: dict) -> str:
         f'− promised {money(m["promised"].get(ccy, 0))} '
         + (f' − in flight {money(m["in_flight"].get(ccy, 0))}'
            if m["in_flight"].get(ccy) else '')
-        + (f' − unmatched {money(m["suspense"].get(ccy, 0))}'
+        + (f' − unmatched money {money(m["suspense"].get(ccy, 0))}'
            if m["suspense"].get(ccy) else '')
         + (f' − refunds owed {money(owed.get(ccy, 0))}' if owed.get(ccy) else '')
         + (f' − floor {money(m["reserve_floor_minor"])}' if ccy == hccy else '')
@@ -1412,8 +1627,13 @@ def _home(c: dict) -> str:
                 body = (f'{p["currency"]} {money(p["amount_minor"])} sandbox '
                         f'transfer sent'
                         + (f': the bank says {live}.' if live else '.'))
-                pill = (f'<span class="x-pill x-pill--info">{e(live or st)}'
-                        f'</span>')
+                # THE TOKEN NEVER REACHES THE SCREEN: "SUBMITTED" is true and
+                # means nothing to a reader. chip() says it in words and
+                # explains itself on hover or tap.
+                label, why = plain_status(live or st)
+                pill = (f'<span class="x-pill x-pill--info x-tip" '
+                        f'title="{e(why)}" data-tip="{e(why)}">'
+                        f'{e(label)}</span>')
             todo.append(f'<li><span class="x-todo-ico {cls}">{icon}</span>'
                         f'<div><b>{e(head)}</b><p>{e(body)}</p></div>{pill}</li>')
             continue
@@ -1526,7 +1746,21 @@ def _home(c: dict) -> str:
         f'Balanced: {"yes" if c["ledger_balanced"] else "no"}.</p></div>'
         '</div>'))
 
-    return "".join(cards) + banner + checklist + side + balance
+    # THE GUIDE STAYS UNTIL ALL THREE ARE DONE, not until the book stops being
+    # empty: adding a bill is step one, and hiding the guide at step one is how
+    # the second and third steps never get found (caught by driving the guide
+    # with a real browser, not by reading it).
+    all_three = bool(c.get("payables")) and bool(c.get("receivables")) \
+        and bool(c.get("arrivals"))
+    folded = ("".join(cards) + checklist + side + balance)
+    details = (
+        '<details class="x-details" data-testid="home-details">'
+        '<summary><span class="x-label">Details</span>'
+        '<span class="x-hint">Every other figure, one line each</span></summary>'
+        f'{folded}</details>')
+    guide = _start_here(c) if ((not all_three) or c.get("guide")) else ""
+    return (banner + guide + _bignums(c, tt, m)
+            + _just_happened(c) + details)
 
 
 
@@ -2550,7 +2784,7 @@ def _deposit_state(a: dict) -> str:
 #: the raw state; the page says the thing a person needs to know.
 _POLICY_WORDS = {
     "insufficient_balance": "waiting on cash",
-    "reserve_floor": "waiting on the reserve floor",
+    "reserve_floor": "waiting on the safety cushion",
     "dependency_not_met": "waiting on a customer to pay",
     "no_rate": "no rate for this currency yet",
     "unsupported_currency": "currency not supported yet",
@@ -3075,7 +3309,7 @@ def _setup(c: dict) -> str:
         + f'<form class="x-form" method="post" action="/setup/settings">'
         + _field("budget_currency", "Budget currency", value=ccy,
                  placeholder="USD", hint="The floor and the limit are in this currency.")
-        + _field("reserve_floor", "Reserve floor",
+        + _field("reserve_floor", "Safety cushion",
                  value=f'{st.get("reserve_floor_minor", 0) / 100:.2f}',
                  hint="Cash the planner will never spend.")
         + _field("auto_pay_limit", "Automatic limit",
@@ -3259,13 +3493,131 @@ def _setup(c: dict) -> str:
 _TABS = {"home": _home, "money-in": _money_in, "money-out": _money_out,
          "ok": _ok, "ai": _ai, "setup": _setup}
 _SUBS = {
-    "home": "Everything money did since the last time you looked.",
-    "money-in": "What landed, and what it was for.",
-    "money-out": "What you owe, and where each payment is.",
-    "ok": "Waiting on you: over the limit, or unclear.",
-    "ai": "Every model call, and the rule that checked it.",
-    "setup": "Build the workspace Closebook runs on.",
+    "home": "Where the money stands today: what is in the bank, what is safe to "
+            "spend, and anything waiting on you.",
+    "money-in": "Money that has arrived. For each payment: who sent it, what it "
+                "was for, and what Closebook did with it.",
+    "money-out": "Supplier bills and where each payment has got to, from "
+                 "planned to confirmed by the bank.",
+    "ok": "The short list of things only a person can decide: unclear payments "
+          "and payments over your limit.",
+    "ai": "What the model suggested for each payment, and what the rules did "
+          "with that suggestion.",
+    "setup": "Add the customers, invoices, suppliers and bills Closebook works "
+             "from. Everything here is real sandbox data.",
 }
+
+
+def needs_you_count(c: dict) -> int:
+    """How many things are waiting on a person. ONE answer for the badge and Home."""
+    return len(c.get("approvable") or [])
+
+
+#: Machine states, in the words a person needs, with the reason behind them.
+#: Nothing in the interface prints a raw status: HELD, AMBIGUOUS and SCHEDULED
+#: are all true and all mean nothing to somebody reading the page for the first
+#: time. The code keeps its own names; this is what the screen says.
+_PLAIN_STATUS = {
+    "HELD": ("Waiting", "Not sent yet. Something has to change first, or you "
+                        "need to approve it."),
+    "READY": ("Ready to pay", "Everything it needs is here."),
+    "APPROVED": ("Approved", "A person approved it. It goes as soon as the "
+                             "money is free to spend."),
+    "PROPOSED": ("Not sent yet", "Planned, but nothing has been sent to the bank."),
+    "SUBMITTED": ("Sent, waiting for the bank", "Closebook has sent it and the "
+                                                "bank has not finished with it."),
+    "SCHEDULED": ("Sent, the bank has scheduled it",
+                  "The bank has it and will move it on its own date."),
+    "PROCESSING": ("Sent, waiting for the bank", "The bank is moving it."),
+    "SENT": ("Sent, waiting for the bank", "The bank has it."),
+    "PAID": ("Paid", "The bank confirmed it."),
+    "CANCELLED": ("Cancelled", "It did not complete."),
+    "FAILED": ("Failed", "The bank did not accept it."),
+    "RETURNED": ("Returned", "The money came back."),
+    "MATCHED": ("Matched", "Closebook is confident which invoice this pays."),
+    "PARTIAL": ("Part paid", "It covers part of what the invoice asks for."),
+    "OVERPAID": ("Overpaid", "It covers the invoice and more, so there is credit "
+                             "to deal with."),
+    "AMBIGUOUS": ("Unclear", "Closebook could not tell what this pays. It is "
+                             "waiting for a person."),
+    "UNMATCHED": ("Unclear", "Nobody has said what this pays yet."),
+    "PROPOSED ": ("Unclear", ""),
+    "REJECTED": ("Set aside", "A person said this is not a match."),
+    "REFUND_OWED": ("Refund owed", "The money is still in the bank and is not "
+                                   "yours to spend."),
+    "RELEASED_INCOME": ("Released as income", "It is yours to spend now."),
+    "OPEN": ("Unpaid", "Nothing has arrived against this yet."),
+    "PAYABLE": ("Supplier bill", "Money you owe a supplier."),
+    "RECEIVABLE": ("Customer invoice", "Money a customer owes you."),
+    "LOCAL": ("Local transfer", "Paid inside the supplier's own country."),
+    "SWIFT": ("International transfer", "Paid across borders, which carries a fee."),
+}
+
+
+def _plain_chips(html: str) -> str:
+    """ONE GATE: no chip anywhere prints a machine token.
+
+    Pills are made in a dozen places, and a raw status in any of them is the
+    same bug: "HELD" and "AMBIGUOUS" are true and mean nothing to a reader who
+    has not memorised the database. Rather than trust every call site to
+    remember, the finished page is swept once. Only the CONTENTS of a pill are
+    touched, and only when the text is a status this module knows, so a chip
+    holding a count or a currency is left exactly as it was.
+    """
+    import re as _re
+
+    # the CONTENTS may contain markup, so match lazily to the closing span and
+    # read the text without it
+    pattern = _re.compile(
+        r'(<span class="x-pill[^"]*")([^>]*>)(.{1,120}?)(</span>)', _re.S)
+
+    def swap(m: "_re.Match[str]") -> str:
+        open_tag, close, text, end = m.groups()
+        plain = _re.sub(r"<[^>]+>", "", text).strip()
+        key = plain.upper()
+        rest = ""
+        if key not in _PLAIN_STATUS:
+            # "MATCHED 89%" and friends: the machine word leads, the useful
+            # part follows it, and only the word needs translating.
+            first, _, tail = plain.partition(" ")
+            if first.upper() in _PLAIN_STATUS:
+                key, rest = first.upper(), tail
+            else:
+                return m.group(0)
+        label, why = plain_status(key)
+        if "title=" in open_tag or "data-tip=" in m.group(0):
+            return m.group(0)
+        # THE MACHINE WORD STAYS IN THE PAGE, in the explanation: an operator
+        # debugging a payment still needs to find "PROCESSING" in the HTML, and
+        # the person reading the screen still never sees it.
+        tip = f"{why} (status: {key})"
+        shown = f"{label} {rest}".strip()
+        return (f'{open_tag} class="x-tip" title="{e(tip)}" '
+                f'data-tip="{e(tip)}"{close}{e(shown)}{end}')
+
+    return pattern.sub(swap, html)
+
+
+def plain_status(status) -> tuple[str, str]:
+    """(label, explanation) for a status. Never the raw token."""
+    value = str(status or "").strip().upper()
+    label, why = _PLAIN_STATUS.get(
+        value, (value.replace("_", " ").title() if value else "Unclear",
+                "Closebook has not recorded an explanation for this state."))
+    return label, why
+
+
+def chip(status, *, testid: str = "") -> str:
+    """A status as a chip a person can read, with its explanation on tap."""
+    label, why = plain_status(status)
+    tone = ("good" if status in ("PAID", "MATCHED", "RELEASED_INCOME")
+            else "bad" if status in ("FAILED", "CANCELLED", "REJECTED")
+            else "warn" if status in ("HELD", "AMBIGUOUS", "UNMATCHED", "PROPOSED")
+            else "info")
+    tid = f' data-testid="{testid}"' if testid else ""
+    tip = f"{why} (status: {str(status or '').strip().upper()})"
+    return (f'<span class="x-pill x-pill--{tone} x-tip"{tid} '
+            f'title="{e(tip)}" data-tip="{e(tip)}">{e(label)}</span>')
 
 
 def _flash(c: dict) -> str:
@@ -3284,9 +3636,11 @@ def _flash(c: dict) -> str:
 
 
 def render_app(ctx: dict, tab: str = "home", health: dict | None = None,
-               ws: str = "") -> str:
+               ws: str = "", guide: bool = False) -> str:
     tab = tab if tab in _TABS else "home"
-    n_ok = len(ctx["approvable"])
+    if guide:
+        ctx = {**ctx, "guide": True}
+    n_ok = needs_you_count(ctx)
     screen = _flash(ctx) + _TABS[tab](ctx)
     # WHICH BOOK AM I IN, said quietly. A per-test book that cannot be named on
     # the page is a book a test has to infer from row counts, and the whole
@@ -3312,8 +3666,10 @@ def render_app(ctx: dict, tab: str = "home", health: dict | None = None,
         + 'New activity: tap to refresh</button>'
     )
     return carry_workspace(
-        _shell(inner, app=True,
-               title=f"Closebook, {NAV[[n[0] for n in NAV].index(tab)][1]}"), ws)
+        _plain_chips(
+            _shell(inner, app=True,
+                   title=f"Closebook, {NAV[[n[0] for n in NAV].index(tab)][1]}")),
+        ws)
 
 
 __all__ = ["carry_workspace", "render_landing", "render_app", "money", "e"]

@@ -213,7 +213,10 @@ class TestWhatAPersonSees:
         # receipt; assert THOSE, not a confidence number that can legitimately
         # read n/a depending on the tier that decided.
         assert "Brightline Retail sweep" in ai, ai[:400]
-        assert "MATCHED" in ai
+        # REWORDED ON PURPOSE (UI revamp): a chip now reads "Matched" rather
+        # than the store's own token, which is the point of the plain-language
+        # pass. The token itself moves into the chip's explanation.
+        assert "Matched" in ai, ai[:400]
         assert "What the model" in ai, ai[:600]
         # and the states the badges and the tracker draw on the page
         assert "3,500.00" in money_out
