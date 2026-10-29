@@ -2657,10 +2657,16 @@ def _ok(c: dict) -> str:
     else:
         n_dep = len(c.get("inflows_waiting") or [])
         if n_dep:
-            # NEVER "Nothing needs your OK" above deposits that do.
-            head = "No payments need your OK"
-            sub = (f"{n_dep} deposit{'s' if n_dep != 1 else ''} below "
-                   f"need{'s' if n_dep == 1 else ''} your decision.")
+            # THE SAME NUMBER HOME SHOWS, from the same function. This header
+            # used to say "No payments need your OK" above a deposit that did,
+            # which was literally true (that count is payments) and read as a
+            # contradiction: Home said one thing needed a person and this page
+            # appeared to say nothing did.
+            n = needs_you(c)
+            head = (f"{n} thing{'s' if n != 1 else ''} "
+                    f"need{'s' if n == 1 else ''} your OK")
+            sub = (f"Including {n_dep} deposit{'s' if n_dep != 1 else ''} nobody "
+                   f"has placed yet. Decide each one below.")
         else:
             head = "Nothing needs your OK"
             sub = "Every payment is inside your limits, or already decided."

@@ -186,7 +186,12 @@ class TestNeverClaimsMoreThanHappened:
         _deposit(dep_id="dep-3", amount=999, reference="no idea")
         html = client.get("/app?tab=ok").text
         assert "Nothing needs your OK" not in html
-        assert "No payments need your OK" in html
+        # UPDATED WITH THE COPY (deploy 5e77d8f): the header used to say "No
+        # payments need your OK", which was true of payments and read as "you
+        # have nothing to do" above a deposit that needed a decision. It now
+        # says the same count Home does, and still names the deposit.
+        assert "1 thing needs your OK" in html
+        assert "1 deposit" in html
 
     def test_a_proposed_deposit_is_never_not_sent_yet(self, client):
         _invoice()
