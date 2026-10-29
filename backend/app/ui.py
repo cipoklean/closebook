@@ -1120,17 +1120,29 @@ def tile_text(c: dict) -> dict:
         return " · ".join(money_str(v, k) for k, v in sorted(d.items()))
 
     floor_txt = money_str(m["reserve_floor_minor"], m["reserve_applies_to"])
+    # read BEFORE the headline needs it: the sentence below decides whether
+    # there is anything to be short FOR, and `promised` is otherwise only built
+    # in the returned dict further down (which is how it became a NameError).
+    promised_txt = join(m["promised"])
     shorts = dict(m["shortfall"])
     if shorts:
         bits = " and ".join(money_str(v, ccy) for ccy, v in sorted(shorts.items()))
-        headline = f"Short by {bits} for supplier bills and the {floor_txt} safety cushion"
+        # WITH NOTHING PROMISED THERE ARE NO SUPPLIER BILLS TO BLAME. Saying
+        # "short by X for supplier bills and the Y cushion" over an empty book
+        # invents an obligation and reads as if something had gone wrong.
+        headline = (f"Short by {bits} of the {floor_txt} safety cushion"
+                    if not promised_txt
+                    else f"Short by {bits} for supplier bills and the "
+                         f"{floor_txt} safety cushion")
     else:
         headline = (f"{money_str(m['headline_free_minor'], m['headline_currency'])} "
-                    f"for supplier bills and the {floor_txt} safety cushion")
+                    + (f"for supplier bills and the {floor_txt} safety cushion"
+                       if promised_txt else
+                       f"spare above the {floor_txt} safety cushion"))
     paid = m.get("paid_today") or []
     return {
         "cash": join(cash) or "no cash yet",
-        "promised": join(m["promised"]) or "Nothing owed",
+        "promised": promised_txt or "Nothing owed",
         "in_flight": join(m["in_flight"]) or "Nothing sent",
         "free_to_spend": headline,
         "unmatched": join(susp) or "Nothing waiting",
@@ -1454,7 +1466,10 @@ def _home(c: dict) -> str:
     cards.append(_card(span="x-span-3", inner=(
         f'<span class="x-stat-ico">{_I["bolt"]}</span>'
         '<div class="x-label">Free to spend</div>'
-        f'<div class="x-fig"{head_cls} data-figure="free_to_spend">{e(headline)}</div>'
+        # ONE figure carries this attribute on Home. The folded copy below is
+        # the same number in the old tile's clothing, and giving it the same
+        # hook made anything reading data-figure="free_to_spend" see two.
+        f'<div class="x-fig"{head_cls} data-figure="free_to_spend_detail">{e(headline)}</div>'
         + unfunded_note
         # THE WATERFALL REPLACES THE DETAILS TEXT. It is the same arithmetic,
         # drawn, and per currency -- so the headline above and the bar below
@@ -3253,7 +3268,14 @@ def _field(name: str, label: str, *, span: str = "x-span-3", kind: str = "text",
 
 
 def _select(name: str, label: str, options: list[tuple[str, str]], *,
-            span: str = "x-span-3", hint: str = "") -> str:
+            span: str = "x-span-3", hint: str = "",
+            selected: str = "") -> str:
+    """A dropdown that PRESELECTS the thing you most likely mean.
+
+    A select with no selected option submits its FIRST option, so an operator
+    who filled in a bill and pressed submit invoiced whichever customer happened
+    to sort first. The form was choosing the customer, not the person.
+    """
     if not options:
         return (f'<div class="x-field {span}"><label for="f-{e(name)}">'
                 f'{e(label)}</label><select class="x-select" id="f-{e(name)}" '
@@ -3261,7 +3283,9 @@ def _select(name: str, label: str, options: list[tuple[str, str]], *,
                 f'<option value="">nothing to pick yet</option></select>'
                 f'<span class="x-hint">{e(hint or "Create one above first.")}</span>'
                 f'</div>')
-    opts = "".join(f'<option value="{e(v)}">{e(t)}</option>' for v, t in options)
+    opts = "".join(
+        f'<option value="{e(v)}"{" selected" if str(v) == str(selected) else ""}>'
+        f'{e(t)}</option>' for v, t in options)
     hint_html = f'<span class="x-hint">{e(hint)}</span>' if hint else ""
     return (f'<div class="x-field {span}"><label for="f-{e(name)}">{e(label)}</label>'
             f'<select class="x-select" id="f-{e(name)}" name="{e(name)}">{opts}</select>'
@@ -3424,7 +3448,10 @@ def _setup(c: dict) -> str:
         + _table(["Name", "Country", "Email", "Invoices"], cust_rows))))
 
     # 3 ---- invoices
-    cust_opts = [(str(x["id"]), x["name"]) for x in ws.get("customers", [])]
+    customers = ws.get("customers", [])
+    cust_opts = [(str(x["id"]), x["name"]) for x in customers]
+    # the one you just added is the one you mean
+    newest_customer = str(max((c["id"] for c in customers), default=""))
     inv_rows = []
     for x in ws.get("invoices", []):
         pill = _pill(x["status"])
@@ -3435,7 +3462,8 @@ def _setup(c: dict) -> str:
         _cardhead("Invoices", "Money owed to you. Payments match against these "
                               "numbers, so a messy reference is the interesting case.")
         + '<form class="x-form" method="post" action="/setup/invoices">'
-        + _select("customer_id", "Customer", cust_opts, span="x-span-4")
+        + _select("customer_id", "Customer", cust_opts, span="x-span-4",
+                  selected=newest_customer)
         + _field("number", "Invoice number", span="x-span-2",
                  placeholder="INV-0041", required=True)
         + _field("amount", "Amount", span="x-span-2", placeholder="12000",
@@ -3509,7 +3537,9 @@ def _setup(c: dict) -> str:
                  sup_rows))))
 
     # 5 ---- bills
-    sup_opts = [(str(x["id"]), x["name"]) for x in ws.get("suppliers", [])]
+    suppliers = ws.get("suppliers", [])
+    sup_opts = [(str(x["id"]), x["name"]) for x in suppliers]
+    newest_supplier = str(max((x["id"] for x in suppliers), default=""))
     inv_nums = [x["number"] for x in ws.get("invoices", [])]
     # The REAL state of each bill: what Airwallex says, else our newest step,
     # else the planner's verdict. The stored column alone is stale by design —
@@ -3535,7 +3565,8 @@ def _setup(c: dict) -> str:
         _cardhead("Bills to pay", "What you owe. A bill only becomes payable "
                                   "once its supplier has a beneficiary.")
         + '<form class="x-form" method="post" action="/setup/payables">'
-        + _select("supplier_id", "Supplier", sup_opts, span="x-span-3")
+        + _select("supplier_id", "Supplier", sup_opts, span="x-span-3",
+                  selected=newest_supplier)
         + _field("number", "Your reference", span="x-span-2", placeholder="PO-7001",
                  required=True, hint="Half of the payment's identity")
         + _field("amount", "Amount", span="x-span-2", placeholder="1800",

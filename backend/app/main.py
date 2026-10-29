@@ -227,6 +227,59 @@ def _bank_reason(client, transfer_id: str) -> str:
     return ""
 
 
+def _replan_and_describe(source: str, number: str) -> str:
+    """Re-plan now, then say what happened to THIS bill in one sentence.
+
+    ADDING A BILL IS AN EVENT. The route used to commit the row and say "the
+    planner will look at it on the next event", which is only true if another
+    event ever happens: a bill inside every rule sat at Checked forever until
+    somebody pressed Run. That is the form telling the operator to come back and
+    do the thing it could have done.
+
+    `_run_loop` is the same budgeted re-plan every other event uses, and it
+    respects the AI pause inside the conductor: while paused it plans and sends
+    nothing, so this says so rather than claiming a payment went out.
+    """
+    from .dashboard import build_context
+    from .domain.settings_store import is_paused
+    from .ui import tile_text
+
+    with _database().session_scope() as s:
+        paused = is_paused(s)
+    tail = _run_loop(source, 20.0) if not paused else ""
+    if paused:
+        return " Nothing was sent: the AI is paused. Resume it and it will go."
+
+    try:
+        c = build_context([])
+    except Exception:                                  # noqa: BLE001
+        return tail
+    payable = next((p for p in (c.get("payables") or [])
+                    if str(p.get("number")) == number), None)
+    if payable is None:
+        return tail
+
+    moved = (payable.get("airwallex_object_id")
+             or str(payable.get("display_status") or "").upper()
+             in ("SUBMITTED", "SCHEDULED", "PROCESSING", "PAID", "SENT"))
+    if moved:
+        return " Sent to the bank."
+
+    limit_txt = tile_text(c)["auto_pay_limit"]
+    # OVER THE LIMIT IS A PERSON'S DECISION, and the sentence should say which
+    # limit and who can clear it -- not quote the planner's full reasoning,
+    # which is right and reads like a log line.
+    over_limit = bool(payable.get("plan_needs_approval")) or any(
+        str(a.get("payable_number")) == number
+        for a in (c.get("approvable") or []))
+    if over_limit:
+        return f" Held: over the {limit_txt} limit, waiting for your OK."
+    reason = str(payable.get("plan_reason") or "").strip()
+    if reason:
+        return f" Held: {reason.rstrip('.')}."
+    return tail
+
+
 def _run_loop(source: str, budget_s: float = 12.0) -> str:
     """Re-plan from live state after an event, and execute whatever is clear.
 
@@ -1518,8 +1571,15 @@ async def setup_supplier_beneficiary(supplier_id: int, request: Request):
                            beneficiary_id=outcome.beneficiary_id,
                            status=outcome.status, error=outcome.error)
     if outcome.ok:
+        # A SUPPLIER THAT JUST BECAME PAYABLE IS AN EVENT TOO: bills waiting on
+        # this beneficiary can move now, and the caller should not have to go
+        # and press something else to find out.
+        with _database().session_scope() as s:
+            waiting = [p.number for p in s.query(InvoicePayable)
+                       .filter_by(supplier_id=supplier_id).all()]
+        tail = (_replan_and_describe("beneficiary", waiting[0]) if waiting else "")
         return _back(request, ok=f"{name} is payable: beneficiary "
-                                 f"{outcome.beneficiary_id} ({outcome.status}).")
+                                 f"{outcome.beneficiary_id} ({outcome.status})." + tail)
     return _back(request, err=f"{name}: {outcome.error}")
 
 
@@ -1539,8 +1599,11 @@ async def setup_payables(request: Request):
                 criticality=int(b.get("criticality") or 3),
                 due_date=str(b.get("due_date") or ""))
             num = row.number
-        return _back(request, tab="setup", ok=f"Added bill {num}. The planner will look at it "
-                                 f"on the next event.")
+        # THE FORM DOES WHAT IT SAYS. Re-plan on the spot and report the result,
+        # instead of telling the operator to wait for an event that may never
+        # come.
+        return _back(request, tab="setup",
+                     ok=f"Added bill {num}." + _replan_and_describe("bill", num))
     except (WorkspaceRefused, ValueError) as exc:
         return _back(request, tab="setup", err=str(exc))
 

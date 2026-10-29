@@ -20,7 +20,9 @@ if str(BACKEND) not in sys.path:
 BASE = (sys.argv[1].rstrip("/") if len(sys.argv) > 1
         else "http://127.0.0.1:8020")
 BOOK = sys.argv[2] if len(sys.argv) > 2 else "deploycheck"
-PIN = os.environ.get("DEMO_APPROVER_PIN") or "314159"
+# THE PIN IS NEVER WRITTEN DOWN HERE. It comes from the environment, like every
+# other credential, so this file can be committed and read.
+PIN = os.environ.get("DEMO_APPROVER_PIN") or ""
 SHOTS = Path("/tmp/proof/deploy-5e77d8f")
 
 
@@ -42,6 +44,10 @@ def _seed_ambiguous() -> None:
 
 def main() -> int:
     from playwright.sync_api import sync_playwright
+
+    if not PIN:
+        print("DEMO_APPROVER_PIN is not set, so Resume cannot be checked")
+        return 2
 
     _seed_ambiguous()
     SHOTS.mkdir(parents=True, exist_ok=True)
