@@ -348,7 +348,19 @@ def on_event(db: DB, *, source: str, dry_run: bool = True,
     # made to hold the operator's screen hostage. Steps not reached are HELD with
     # the reason, so the page never claims more than happened.
     started = time.monotonic()
+    # THE KILL SWITCH, checked after the plan is written (so anything waiting
+    # on a person is still there to approve) and before anything is sent.
+    # Paused, no step leaves; each goes the moment the AI is resumed.
+    from .settings_store import is_paused
+    with session_scope() as s:
+        paused = is_paused(s)
     for step in clear:
+        if paused:
+            run.verdicts.append(Verdict(
+                payable_number=step.payable_number or "", action=step.action,
+                outcome="HELD",
+                detail="the AI is paused: nothing is sent until it is resumed"))
+            continue
         if budget_s is not None and (time.monotonic() - started) > budget_s:
             run.verdicts.append(Verdict(
                 payable_number=step.payable_number or "", action=step.action,

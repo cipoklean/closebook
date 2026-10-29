@@ -391,9 +391,6 @@ def _head(title: str) -> str:
         '<meta name="description" content="Closebook: real-time books for a '
         'cross-border business. Money in is matched, money out is checked, and '
         'anything unclear waits for a human.">\n'
-        '<link rel="preconnect" href="https://fonts.googleapis.com">\n'
-        '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n'
-        '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">\n'
         # System fonts first, Google as an upgrade: a blocked or slow CDN must
         # never leave the page unstyled.
         f'<link rel="stylesheet" href="/static/closebook.css?v={v}">\n'
@@ -404,6 +401,12 @@ def _head(title: str) -> str:
 _JS = """
 (function () {
   "use strict";
+  var stamp = function () {
+    var u = document.querySelector("[data-updated]");
+    if (u) u.textContent = "Updated " + new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  };
+  stamp();
+  document.addEventListener("closebook:patched", stamp);
   var $ = function (s, r) { return (r || document).querySelector(s); };
 
   /* --- one toast, used for every outcome -------------------------------- */
@@ -1022,7 +1025,7 @@ NAV = [
     ("money-in", "Money in", "/app?tab=money-in", _I["in"]),
     ("money-out", "Money out", "/app?tab=money-out", _I["out"]),
     ("ok", "Needs your OK", "/app?tab=ok", _I["ok"]),
-    ("ai", "AI activity", "/app?tab=ai", _I["ai"]),
+    ("ai", "AI decisions", "/app?tab=ai", _I["ai"]),
     ("setup", "Setup", "/app?tab=setup", _I["out"]),
 ]
 
@@ -1057,7 +1060,7 @@ def _bottom_tabs(tab: str, n_ok: int) -> str:
         badge = (f'<span class="x-badge">{n_ok}</span>'
                  if key == "ok" and n_ok else "")
         cur = ' aria-current="page"' if key == tab else ""
-        short = label.replace("Needs your OK", "Approve").replace("AI activity", "AI")
+        short = label.replace("Needs your OK", "Approve").replace("AI decisions", "Decisions")
         links.append(f'<a href="{href}"{cur} data-testid="tab-mobile-{key}">'
                      f'{icon}<span>{e(short)}</span>{badge}</a>')
     return '<div class="x-tabs">' + "".join(links) + '</div>'
@@ -1067,9 +1070,9 @@ def _top(title: str, sub: str, health: dict | None) -> str:
     live = ""
     if health:
         sandbox = bool(health.get("sandbox_ready"))
-        live = (f'<div class="x-live"><span class="x-livepill">'
-                f'<i></i>{"Sandbox connected" if sandbox else "Sandbox not ready"}</span>'
-                f'<small>Updates when the books change</small></div>')
+        live = (f'<div class="x-live"><span class="x-livepill{"" if sandbox else " is-off"}">'
+                f'<i></i>{"Live · sandbox" if sandbox else "Sandbox not ready"}</span>'
+                f'<small data-updated>Updated {datetime.now(timezone.utc).strftime("%H:%M")} UTC</small></div>')
     return (f'<div class="x-top"><div><h1>{e(title)}</h1><p>{e(sub)}</p></div>'
             f'{live}</div>')
 
@@ -1089,7 +1092,12 @@ def needs_you(c: dict) -> int:
     one number the operator uses to decide whether to go and look.
     """
     obligations = {x.get("payable_number") for x in c["approvable"]}
-    obligations |= {p["number"] for p in c.get("awaiting_approval") or []}
+    # A bill over the limit that cash cannot cover yet is HELD, not waiting on
+    # a person: the Approve tab lists it under "not waiting on you", so Home
+    # must not count it as a decision (the two screens said opposite things).
+    held_for_cash = {p.get("number") for p in c.get("waiting") or []}
+    obligations |= {p["number"] for p in c.get("awaiting_approval") or []
+                    if p["number"] not in held_for_cash}
     obligations.discard(None)
     return len(obligations) + len(c.get("inflows_waiting") or [])
 
@@ -1759,8 +1767,8 @@ def _home(c: dict) -> str:
         '<span class="x-hint">Every other figure, one line each</span></summary>'
         f'{folded}</details>')
     guide = _start_here(c) if ((not all_three) or c.get("guide")) else ""
-    return (banner + guide + _bignums(c, tt, m)
-            + _just_happened(c) + details)
+    from .ui_home import compose
+    return compose(c, tt, guide=guide, details=details)
 
 
 
@@ -2647,11 +2655,20 @@ def _ok(c: dict) -> str:
     if cards:
         body = "".join(cards)
     else:
+        n_dep = len(c.get("inflows_waiting") or [])
+        if n_dep:
+            # NEVER "Nothing needs your OK" above deposits that do.
+            head = "No payments need your OK"
+            sub = (f"{n_dep} deposit{'s' if n_dep != 1 else ''} below "
+                   f"need{'s' if n_dep == 1 else ''} your decision.")
+        else:
+            head = "Nothing needs your OK"
+            sub = "Every payment is inside your limits, or already decided."
         body = _card(inner=(
             '<div class="x-banner"><div class="x-banner-l">'
             f'<span class="x-banner-ico">{_I["check"]}</span>'
-            '<div><h2>Nothing needs your OK</h2>'
-            '<p>Every payment is inside your limits, or already decided.</p></div>'
+            f'<div><h2>{head}</h2>'
+            f'<p>{sub}</p></div>'
             '</div></div>'))
 
     note = _card(inner=(
@@ -2774,7 +2791,10 @@ def _deposit_state(a: dict) -> str:
     word = _RESOLUTION_WORDS.get(resolved)
     if word:
         return word
-    return str(a.get("match_status") or "")
+    st = str(a.get("match_status") or "")
+    # A deposit is never "Not sent yet": that is a payment's word. A proposed
+    # deposit is a suggestion waiting on a person.
+    return "SUGGESTED" if st.upper() == "PROPOSED" else st
 
 
 #: What a plan step's reason CODE means, in words. A code is a machine value:
@@ -3550,8 +3570,7 @@ def _setup(c: dict) -> str:
 _TABS = {"home": _home, "money-in": _money_in, "money-out": _money_out,
          "ok": _ok, "ai": _ai, "setup": _setup}
 _SUBS = {
-    "home": "Where the money stands today: what is in the bank, what is safe to "
-            "spend, and anything waiting on you.",
+    "home": "Your money, what the AI did with it, and what needs you.",
     "money-in": "Money that has arrived. For each payment: who sent it, what it "
                 "was for, and what Closebook did with it.",
     "money-out": "Supplier bills and where each payment has got to, from "
@@ -3581,6 +3600,8 @@ _PLAIN_STATUS = {
     "APPROVED": ("Approved", "A person approved it. It goes as soon as the "
                              "money is free to spend."),
     "PROPOSED": ("Not sent yet", "Planned, but nothing has been sent to the bank."),
+    "SUGGESTED": ("Suggested", "A rule or the AI suggested an invoice. Nothing is "
+                  "applied until a person decides."),
     "SUBMITTED": ("Sent, waiting for the bank", "Closebook has sent it and the "
                                                 "bank has not finished with it."),
     "SCHEDULED": ("Sent, the bank has scheduled it",

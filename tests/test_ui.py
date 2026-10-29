@@ -179,18 +179,22 @@ class TestLanding:
         assert "$" not in html and "GBP 4,800" not in html
 
     def test_uses_the_mockup_palette_and_inter(self):
-        """Accent #5B5BD6, ground #F6F7F9, Inter — from the stylesheet, which is
-        where the mockup's tokens live once extracted."""
+        """Warm redesign: accent #C2410C, paper ground #F5F1E8, white cards,
+        Inter self-hosted -- from the stylesheet, the one place tokens live."""
         from app.ui import _head
         head = _head("Closebook")
         assert "/static/closebook.css" in head
-        assert "Inter" in head
+        # REWORDED ON PURPOSE (warm redesign): Inter is self-hosted from the
+        # stylesheet now, so the head carries no font link to a CDN.
+        css_text = open(os.path.join(os.path.dirname(__file__), "..", "backend",
+                        "app", "static", "closebook.css")).read()
+        assert 'font-family: "Inter"' in css_text
 
         css = open(os.path.join(os.path.dirname(__file__), "..", "backend",
                                 "app", "static", "closebook.css"),
                    encoding="utf-8").read().lower()
-        assert "#5b5bd6" in css          # accent
-        assert "#f6f7f9" in css          # ground
+        assert "#c2410c" in css          # accent
+        assert "#f5f1e8" in css          # ground
         assert "#ffffff" in css          # cards
 
     def test_footer_states_sandbox_only(self):
@@ -226,12 +230,14 @@ class TestAppShell:
         # REWORDED ON PURPOSE (UI revamp): Home now opens by saying where the
         # money stands, not by promising a history. The old line described a
         # log; the page answers a question.
-        assert "Where the money stands today" in html
+        # REWORDED ON PURPOSE (warm redesign): Home opens on the cash figure.
+        assert 'data-testid="home-numbers"' in html
+        assert "Cash in the bank" in html
 
     def test_sidebar_lists_all_five_destinations(self):
         html = render_app(_ctx(), tab="home")
         for label in ("Home", "Money in", "Money out", "Needs your OK",
-                      "AI activity"):
+                      "AI decisions"):
             assert label in html
 
     def test_back_to_site_links_to_root(self):
@@ -473,13 +479,14 @@ class TestProblemClassification:
     def test_banner_reflects_the_problem_count(self, db):
         _cancelled_step(db)
         html = render_app(build_context([]), tab="home")
-        assert "Nothing needs you right now" not in html
-        assert "but 1 payment failed" in html
+        assert 'data-testid="needs-none"' not in html
+        assert "1 payment came back from the bank" in html
 
     def test_all_clear_banner_when_nothing_is_wrong(self, db):
         html = render_app(build_context([]), tab="home")
-        assert "Nothing needs you right now" in html
-        assert "payment failed" not in html
+        assert "Nothing needs your OK" in html
+        assert "came back from the bank" not in html
+        assert "on hold" not in html
 
     def test_a_successful_payment_is_not_a_problem(self, db):
         """SUBMITTED + settled + plan prose is a payment that went through."""
@@ -916,8 +923,8 @@ class TestHeldPaymentsAreExplained:
         assert ctx["waiting"], "the payable must be reported as waiting"
         html = render_app(ctx, tab="home")
         # it must NOT claim nothing is happening
-        assert "on hold" in html
-        assert "Nothing needs you right now" not in html
+        assert "1 payment on hold" in html
+        assert "inside your rules" not in html
 
     def test_the_vague_phrase_waiting_on_policy_is_gone(self, db):
         """The exact wording item 2 was raised about: a hold must carry the rule
@@ -982,7 +989,7 @@ class TestHeldPaymentsAreExplained:
         assert po["plan_needs_approval"] is True
         assert any(p["number"] == "PO-7101" for p in ctx["awaiting_approval"])
         html = render_app(ctx, tab="home")
-        assert "waiting for your OK" in html
+        assert "waiting for your ok" in html.lower()
 
     def test_an_already_sent_payable_is_not_asked_for_approval_again(self, db):
         """A submitted step already has its approval. Re-asking invites a second
@@ -1550,7 +1557,7 @@ class TestFundingCurrencyIsWhatHasToBeThere:
         m = ctx["money"]
         assert m["headline_shortfall_minor"] == 0
         html = render_app(ctx, tab="home")
-        assert "for supplier bills and the USD 5,000.00 safety cushion" in html
+        assert "After the USD 5,000.00 safety cushion" in html
         assert "Short by USD" not in html
 
     def test_a_payable_with_no_conversion_is_called_out_in_plain_words(self, db):

@@ -1,6 +1,7 @@
 /* Closebook design tokens — visual spec: docs/design/closebook-mockup.html
 
-Colours: #F6F7F9 ground, white cards, #5B5BD6 accent, Inter.
+Colours: #F5F1E8 paper ground, white cards, #C2410C accent; Newsreader serif
+for money and headings, Inter for body (both self-hosted in static/fonts).
 The mockup is a static HTML file; this is the same system, extracted so both
 the landing page and the app share one stylesheet and cannot drift.
 
@@ -8,33 +9,39 @@ the landing page and the app share one stylesheet and cannot drift.
 declared first so older browsers still get a readable page rather than
 transparent text.
 */
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 400 700; font-display: swap; src: url("fonts/inter-latin.woff2") format("woff2"); }
+@font-face { font-family: "Newsreader"; font-style: normal; font-weight: 500 700; font-display: swap; src: url("fonts/newsreader-latin.woff2") format("woff2"); }
 :root {
-  --x-bg: #f6f7f9;
+  /* Warm paper ground, white cards, ink text, one burnt-orange accent.
+     Serif for money and headings; Inter for everything you read. */
+  --x-bg: #f5f1e8;
   --x-card: #ffffff;
-  --x-line: #eceef2;
-  --x-line-2: #e2e5eb;
-  --x-ink: #1b1d24;
-  --x-muted: #5e6472;
-  --x-faint: #636977;
-  --x-accent: #5b5bd6;
-  --x-accent-ink: #4646c0;
-  --x-accent-t: #eeeefc;
-  --x-good: #1f7a45;
-  --x-good-t: #e6f6ec;
-  --x-warn: #8a5a00;
-  --x-warn-t: #fff4df;
-  --x-bad: #b42318;
-  --x-bad-t: #fdecea;
-  --x-info: #2554c7;
-  --x-info-t: #e8effd;
+  --x-line: #e6dfd1;
+  --x-line-2: #ddd4c3;
+  --x-ink: #1c1917;
+  --x-muted: #57534e;
+  --x-faint: #57534e;
+  --x-soft: #57534e;
+  --x-accent: #c2410c;
+  --x-accent-ink: #9a3412;
+  --x-accent-t: #fff1e7;
+  --x-good: #166534;
+  --x-good-t: #dcfce7;
+  --x-warn: #92400e;
+  --x-warn-t: #fef3c7;
+  --x-bad: #b91c1c;
+  --x-bad-t: #fee2e2;
+  --x-info: #1c1917;
+  --x-info-t: #f5f1e8;
 
-  --x-r: 18px;
-  --x-r-s: 12px;
-  --x-shadow: 0 1px 2px rgba(20, 22, 30, 0.04);
-  --x-shadow-lg: 0 12px 28px -8px rgba(20, 22, 30, 0.18);
+  --x-r: 16px;
+  --x-r-s: 11px;
+  --x-shadow: 0 0 0 1px var(--x-line);
+  --x-shadow-lg: 0 12px 28px -10px rgba(28, 25, 23, 0.22);
   --x-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --x-serif: "Newsreader", Georgia, "Times New Roman", serif;
   --x-mono: ui-monospace, "SF Mono", Menlo, monospace;
-  --x-max: 1296px;
+  --x-max: 1180px;
 }
 
 * { box-sizing: border-box; }
@@ -149,7 +156,7 @@ a { color: inherit; }
 .x-stat-ico { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--x-bg); color: var(--x-muted); margin-bottom: 8px; }
 .x-statnote { font-size: 13px; color: var(--x-muted); }
 
-.x-banner { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 32px; border-radius: 20px; background: linear-gradient(120deg, #f1f0fe 0%, #f6f4ff 55%, #eef4ff 100%); border: 1px solid #e4e3fa; }
+.x-banner { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 32px; border-radius: 20px; background: var(--x-card); border: 0; }
 .x-banner-l { display: flex; align-items: center; gap: 20px; }
 .x-banner-ico { width: 56px; height: 56px; border-radius: 16px; background: var(--x-card); color: var(--x-accent); display: grid; place-items: center; box-shadow: var(--x-shadow); flex: none; }
 .x-banner-ico .x-ico { width: 28px; height: 28px; }
@@ -186,7 +193,7 @@ a { color: inherit; }
 .x-inv-amt { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; color: var(--x-muted); margin-bottom: 8px; }
 .x-inv-amt b { color: var(--x-ink); font-weight: 600; }
 
-.x-feature { border-color: #e4e3fa; }
+.x-feature { border-color: var(--x-line); }
 .x-feature-head { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 24px; }
 .x-arrived { display: flex; align-items: center; gap: 16px; padding: 16px 20px; border-radius: 14px; background: var(--x-bg); margin-bottom: 24px; flex-wrap: wrap; }
 .x-arrived .x-fig { font-size: 26px; }
@@ -868,3 +875,146 @@ a.x-big:hover { border-color: var(--x-line-2); }
 
 /* a chip explains itself on hover, and on tap where there is no hover */
 .x-tip { cursor: help; }
+
+
+/* ======================================================================
+   Closebook, warm ledger theme (Oct 29). Serif money, white cards on paper,
+   one accent. Everything below overrides or extends the base above.
+   ====================================================================== */
+.x-card { border: 0; box-shadow: var(--x-shadow); border-radius: var(--x-r); }
+.x-top h1, .x-card h2, .x-card h3, .x-l-hero h1 { font-family: var(--x-serif); font-weight: 600; letter-spacing: -0.01em; }
+.x-top h1 { font-size: 30px; }
+.x-fig, .x-bigfig { font-family: var(--x-serif); font-weight: 700; letter-spacing: -0.01em; }
+.x-label { color: var(--x-muted); }
+.x-btn--primary { background: var(--x-ink); border-color: var(--x-ink); }
+.x-btn--primary:hover { background: #000; }
+.x-input, input, select, textarea { border-color: var(--x-line-2); }
+.x-side { background: var(--x-card); border-right: 1px solid var(--x-line); }
+.x-word { font-family: var(--x-serif); font-weight: 700; font-size: 21px; }
+.x-logo { background: var(--x-ink) !important; color: var(--x-bg) !important; border-radius: 50% !important; }
+.x-nav a[aria-current="page"] { background: var(--x-accent-t); color: var(--x-accent-ink); }
+.x-tabs { background: var(--x-card); border-top: 1px solid var(--x-line); }
+.x-tabs a[aria-current="page"] { color: var(--x-accent); font-weight: 700; }
+.x-tabs a[aria-current="page"] .x-ico { stroke-width: 2.2; }
+.x-badge { background: var(--x-accent); color: #fff; }
+.x-livepill i { background: #16a34a; box-shadow: 0 0 0 3px var(--x-good-t); }
+
+/* ---------- Home ---------- */
+.h-card { background: var(--x-card); border-radius: var(--x-r); box-shadow: var(--x-shadow); padding: 18px; margin: 0 0 14px; }
+.h-lbl { font-size: 13px; color: var(--x-muted); }
+.h-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+.h-head h3 { font-family: var(--x-sans); font-size: 15px; font-weight: 600; letter-spacing: 0; }
+.h-big { font-family: var(--x-serif); font-weight: 700; font-size: 42px; line-height: 1.1; letter-spacing: -0.02em; margin: 4px 0 10px; overflow-wrap: anywhere; }
+.h-mid { font-family: var(--x-serif); font-weight: 700; font-size: 22px; line-height: 1.2; overflow-wrap: anywhere; }
+.h-mid.is-bad { color: var(--x-bad); font-size: 19px; }
+.h-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.h-chip { font-size: 12.5px; background: var(--x-bg); border-radius: 8px; padding: 4px 9px; color: #44403c; }
+.h-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; border-top: 1px solid #efe9dd; padding-top: 14px; }
+.h-note { font-size: 13px; color: var(--x-muted); margin-top: 12px; }
+.h-held { font-size: 13px; color: var(--x-warn); background: var(--x-warn-t); border-radius: 10px; padding: 8px 10px; margin-top: 10px; }
+.h-tag { font-size: 12px; font-weight: 600; border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
+.h-tag.is-ok { background: var(--x-good-t); color: var(--x-good); }
+.h-tag.is-bad { background: var(--x-bad-t); color: var(--x-bad); }
+.h-tag.is-wait { background: var(--x-warn-t); color: var(--x-warn); }
+.h-list { list-style: none; margin: 0; padding: 0; }
+.h-chk { display: flex; gap: 10px; padding: 4px 0; font-size: 14px; line-height: 1.4; }
+.h-tick { flex: none; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; margin-top: 0; }
+.h-tick .x-ico { width: 12px; height: 12px; stroke-width: 3; }
+.is-ok > .h-tick { background: var(--x-good-t); color: var(--x-good); }
+.is-no > .h-tick { background: var(--x-bad-t); color: var(--x-bad); }
+.h-pause { all: unset; box-sizing: border-box; cursor: pointer; margin-top: 12px; width: 100%; min-height: 46px; display: flex; align-items: center; justify-content: center; gap: 8px; border: 1.5px solid var(--x-ink); border-radius: 12px; font-weight: 600; font-size: 15px; }
+.h-pause:hover { background: var(--x-bg); }
+.h-resume { margin-top: 12px; }
+.h-inline { display: flex; gap: 8px; margin-top: 6px; }
+.h-inline .x-input { flex: 1; min-width: 0; }
+.h-needs { background: var(--x-accent); color: #fff; border-radius: var(--x-r); padding: 16px 18px; margin: 0 0 14px; }
+.h-needs-t { font-size: 17px; font-weight: 700; margin-bottom: 8px; }
+.h-need { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-top: 1px solid rgba(255,255,255,.25); font-size: 14.5px; text-decoration: none; color: #fff; }
+.h-need small { color: #ffedd5; font-size: 13px; text-align: right; }
+.h-need-more { font-size: 13px; color: #ffedd5; padding-top: 6px; }
+.h-needs-btn { display: block; margin-top: 12px; background: #fff; color: var(--x-accent-ink); border-radius: 12px; text-align: center; padding: 12px; font-weight: 700; text-decoration: none; }
+.h-calm { display: flex; gap: 12px; align-items: center; }
+.h-calm-ico { width: 36px; height: 36px; border-radius: 50%; background: var(--x-good-t); color: var(--x-good); display: grid; place-items: center; flex: none; }
+.h-calm p { font-size: 13.5px; color: var(--x-muted); }
+.h-stopped { box-shadow: 0 0 0 1.5px #fca5a5; }
+.h-amt { font-family: var(--x-serif); font-weight: 700; font-size: 26px; margin-bottom: 12px; line-height: 1.2; }
+.h-amt span { font-family: var(--x-sans); font-weight: 400; font-size: 14px; color: var(--x-muted); }
+.h-stage { position: relative; border-left: 2px solid var(--x-line); margin-left: 8px; padding: 0 0 14px 18px; }
+.h-stage:last-child { padding-bottom: 0; }
+.h-stage::before { content: ""; position: absolute; left: -7px; top: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--x-ink); }
+.h-stage.is-ok::before { background: #16a34a; }
+.h-stage.is-bad::before { background: var(--x-bad); }
+.h-stage.is-wait::before { background: #d97706; }
+.h-stage-k { font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--x-muted); margin-bottom: 3px; }
+.h-stage p { font-size: 14.5px; }
+.h-stage .h-why { font-size: 13px; color: var(--x-muted); margin-top: 3px; }
+.h-tl ul { list-style: none; margin: 0; padding: 0; }
+.h-tl li a { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; border-top: 1px solid #efe9dd; text-decoration: none; color: inherit; }
+.h-tl li:first-child a { border-top: 0; }
+.h-ic { flex: none; width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--x-bg); }
+.h-ic.is-ok { background: var(--x-good-t); color: var(--x-good); }
+.h-ic.is-wait { background: var(--x-warn-t); color: var(--x-warn); }
+.h-ic.is-bad { background: var(--x-bad-t); color: var(--x-bad); }
+.h-tl-b { flex: 1; min-width: 0; }
+.h-tl-b b { display: block; font-weight: 600; font-size: 14.5px; }
+.h-tl-b small { color: var(--x-muted); font-size: 13px; }
+.h-tl time { font-size: 12.5px; color: var(--x-muted); flex: none; }
+.h-empty { color: var(--x-muted); font-size: 14px; padding: 6px 0; }
+/* Home layout: everything spans the screen grid; two columns when wide. */
+.x-screen > .h-grid, .x-screen > .h-card, .x-screen > .h-needs,
+.x-screen > .x-details, .x-screen > .x-guide, .x-screen > section, .x-screen > details { grid-column: 1 / -1; }
+.h-grid { display: grid; gap: 20px; align-items: start; }
+.h-col-main, .h-col-side { display: grid; gap: 20px; align-content: start; min-width: 0; }
+@media (min-width: 1100px) {
+  .h-grid { grid-template-columns: minmax(0, 1.55fr) minmax(320px, 1fr); gap: 24px; }
+  .h-col-side { position: sticky; top: 24px; }
+}
+@media (max-width: 1099px) {
+  .h-grid { max-width: 760px; }
+  .h-col-main, .h-col-side { display: contents; }
+  .h-hero { order: 1; } .h-needs, .h-calm { order: 2; } .h-auth { order: 3; }
+  .h-stopped { order: 4; } .h-in { order: 5; } .h-out { order: 6; } .h-tl { order: 7; }
+}
+
+/* Six tabs on one row at phone width, never wrapping. */
+@media (max-width: 767px) {
+  .x-tabs { display: grid !important; grid-template-columns: repeat(6, 1fr); padding: 6px 2px calc(8px + env(safe-area-inset-bottom)); }
+  .x-tabs a { min-width: 0; padding: 4px 0; font-size: 11px; position: relative; }
+  .x-tabs a span:not(.x-badge) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .x-tabs .x-badge { position: absolute; top: 0; right: 10%; font-size: 10px; min-width: 16px; padding: 0 4px; }
+}
+
+/* ---------- the receipt as three stages: suggestion, checks, result ---------- */
+.x-receipt { display: block !important; border: 0 !important; background: none !important; padding: 4px 0 !important; }
+.x-receipt-col, .x-receipt-col--model, .x-receipt-col--code, .x-receipt-col--checks { background: none !important; border: 0 !important; border-left: 2px solid var(--x-line) !important; margin-left: 8px; padding: 0 0 14px 18px !important; position: relative; }
+.x-receipt-col--code { padding-bottom: 2px !important; }
+.x-receipt-col::before { content: ""; position: absolute; left: -7px; top: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--x-ink); }
+.x-receipt-col--checks::before { background: #d97706; }
+.x-receipt-col--checks:not(:has(.is-fail))::before { background: #16a34a; }
+.x-receipt-col--checks:has(.is-fail)::before { background: var(--x-bad); }
+.x-receipt-head { font-size: 11.5px !important; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--x-muted) !important; margin-bottom: 4px; }
+.x-receipt-row { display: flex; justify-content: flex-start !important; gap: 10px; font-size: 14px; padding: 2px 0; }
+.x-receipt-row > span { min-width: 92px; }
+.x-receipt-row > b, .x-receipt-row > s { text-align: left !important; font-weight: 500; }
+.x-receipt-col--checks .x-receipt-row > span { min-width: 0; }
+.x-tick { flex: none; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; }
+.x-tick .x-ico { width: 12px; height: 12px; stroke-width: 3; }
+.is-pass .x-tick { background: var(--x-good-t); color: var(--x-good); }
+.is-fail .x-tick { background: var(--x-bad-t); color: var(--x-bad); }
+.x-livepill.is-off i { background: #a8a29e; box-shadow: 0 0 0 3px #f5f1e8; }
+
+/* ---------- every field looks like a field, wherever it was built ---------- */
+.x-app input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]),
+.x-app select, .x-app textarea {
+  box-sizing: border-box; width: 100%; min-height: 44px; padding: 10px 12px;
+  border: 1px solid var(--x-line-2); border-radius: 10px; background: #fff;
+  font: 15px var(--x-sans); color: var(--x-ink); }
+.x-app select { appearance: auto; }
+.x-app input:focus, .x-app select:focus, .x-app textarea:focus { outline: 2px solid var(--x-accent); outline-offset: 1px; border-color: var(--x-accent); }
+.x-app form label { display: block; font-size: 13px; font-weight: 600; color: var(--x-muted); margin: 10px 0 5px; }
+.x-banner { background: var(--x-card) !important; border: 0 !important; box-shadow: none; padding: 4px !important; }
+.x-banner-ico { background: var(--x-good-t) !important; color: var(--x-good) !important; box-shadow: none !important; width: 44px !important; height: 44px !important; border-radius: 50% !important; }
+.x-banner h2 { font-family: var(--x-serif); }
+.x-receipt-col, .x-receipt-col--model, .x-receipt-col--code { background: none; }
+.x-pill--accent { background: var(--x-accent-t); color: var(--x-accent-ink); }
+.x-pill--info { background: #f5f1e8; color: #44403c; }

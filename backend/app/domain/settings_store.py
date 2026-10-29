@@ -128,6 +128,8 @@ def describe(row: WorkspaceSettings) -> dict:
         "reserve_floor": money_str(row.reserve_floor_minor, ccy),
         "auto_pay_limit": money_str(row.auto_pay_limit_minor, ccy),
         "updated_at": row.updated_at,
+        "ai_paused": bool(getattr(row, "ai_paused", False)),
+        "ai_paused_at": getattr(row, "ai_paused_at", None),
     }
 
 
@@ -181,3 +183,19 @@ def save(session, *, budget_currency: str, reserve_floor: str,
 
 __all__ = ["SettingsRefused", "as_budget", "describe", "get_or_create",
            "read", "save", "workspace_budget"]
+
+
+# ---- the kill switch -------------------------------------------------------
+def is_paused(session) -> bool:
+    """Is the AI paused for this book? Pure read; a missing row is running."""
+    return bool(getattr(read(session), "ai_paused", False))
+
+
+def set_paused(session, paused: bool) -> WorkspaceSettings:
+    """Pause or resume. Writes the one row; returns it."""
+    row = get_or_create(session)
+    row.ai_paused = bool(paused)
+    row.ai_paused_at = utcnow() if paused else None
+    row.updated_at = utcnow()
+    session.flush()
+    return row

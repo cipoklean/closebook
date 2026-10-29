@@ -1172,8 +1172,14 @@ def receipt_data(s, i, prop: dict, final_conf, applied) -> dict:
         model["reason"] = ("The model answered but no claim was stored on this "
                            "payment, so the code went on the rules alone.")
 
-    verdict = "held for you" if applied <= 0 or getattr(i, "review_state", None) in (
-        "PENDING", "REJECTED") else "applied"
+    # `applied` IS THE AMOUNT STILL LEFT IN SUSPENSE (both callers pass the
+    # suspense figure). Reading it as "how much was applied" printed "held for
+    # you" on every deposit the rules HAD applied, right beside a Matched chip.
+    # Held means nothing of it was applied: everything is still in suspense.
+    left = int(applied or 0)
+    nothing_applied = left >= int(getattr(i, "amount_minor", 0) or 0)
+    verdict = "held for you" if nothing_applied or getattr(
+        i, "review_state", None) in ("PENDING", "REJECTED") else "applied"
     if i.match_status and i.match_status.value == "ESCALATED":
         verdict = "escalated to a person"
     elif i.match_status and i.match_status.value == "UNMATCHED":

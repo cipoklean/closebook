@@ -1383,6 +1383,38 @@ async def setup_settings(request: Request):
         return _back(request, tab="setup", err=str(exc))
 
 
+@app.post("/agent/pause")
+async def agent_pause(request: Request):
+    """THE KILL SWITCH. No PIN: stopping must never be harder than starting.
+
+    While paused, nothing moves on the AI's say-so: confident deposits are kept
+    as proposals and cleared payments are held. Approvals still work.
+    """
+    from .domain.settings_store import set_paused
+
+    with _database().session_scope() as s:
+        set_paused(s, True)
+    return _back(request, tab="home", ok=(
+        "The AI is paused. Nothing will be applied or sent on its own until "
+        "you resume it. You can still approve things yourself."))
+
+
+@app.post("/agent/resume")
+async def agent_resume(request: Request):
+    """Resume needs the PIN: handing control back is a decision."""
+    from .domain.settings_store import set_paused
+
+    b = await _read_body(request)
+    refusal = _check_pin(str(b.get("pin") or ""))
+    if refusal:
+        return _back(request, tab="home", err=refusal + " The AI is still paused.")
+    with _database().session_scope() as s:
+        set_paused(s, False)
+    return _back(request, tab="home", ok=(
+        "The AI is running again, inside the same rules."
+        + _run_loop("resume")))
+
+
 @app.post("/setup/customers")
 async def setup_customers(request: Request):
     from .domain.workspace import WorkspaceRefused, create_customer

@@ -428,7 +428,7 @@ class TestStuckStates:
         from app.ui import _deposit_state
 
         assert _deposit_state({"match_status": "PROPOSED", "review_state": ""}) \
-            == "PROPOSED"
+            == "SUGGESTED"   # plain word on purpose (warm redesign)
         assert _deposit_state({"match_status": "UNMATCHED", "review_state": None}) \
             == "UNMATCHED"
 

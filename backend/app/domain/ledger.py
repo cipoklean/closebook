@@ -139,6 +139,12 @@ def apply_inflow_to_receivables(db_session, inflow, result) -> list[Match]:
                  and bool(result.allocations))
     if not confident:
         return _propose(db_session, inflow, result)
+    # PAUSED MEANS NOTHING IS APPLIED ON ITS OWN. A confident match becomes a
+    # proposal a person approves, with the same numbers, so pausing loses
+    # nothing and resuming needs no replay.
+    from .settings_store import is_paused
+    if is_paused(db_session):
+        return _propose(db_session, inflow, result)
 
     created = _apply_allocations(db_session, inflow, result.allocations,
                                  confidence=result.confidence,

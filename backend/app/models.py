@@ -359,6 +359,13 @@ class WorkspaceSettings(Base):
     # the demo needs the last few to survive a restart. One nullable column is
     # the smallest thing that does that without a new table.
     card_decisions_json: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    # THE KILL SWITCH. While true, nothing moves on the AI's say-so: a deposit
+    # the rules would have applied is parked as a proposal, and a payment the
+    # policy would have sent is held. A person can still approve either. Null
+    # reads as "running", so an old row needs no backfill.
+    ai_paused: Mapped[Optional[bool]] = mapped_column(Boolean, default=False)
+    ai_paused_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), default=None)
 
 
 class IgnoredEvent(Base):
