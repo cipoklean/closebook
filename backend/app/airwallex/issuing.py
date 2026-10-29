@@ -25,6 +25,28 @@ from typing import Optional
 from .client import AirwallexClient, _reserve_request_id
 
 
+def issuing_client(settings=None) -> Optional[AirwallexClient]:
+    """A client for the ISSUING-ONLY account, or None if there is no such account.
+
+    TWO CLIENTS, ONE JOB EACH. The books keep the credentials they have always
+    had: deposits, transfers and webhooks run on the Nigerian sandbox, which
+    cannot issue. Cards run on a Hong Kong sandbox, and only cards do. Copying
+    the settings and swapping the two credential fields is deliberately the
+    least clever thing that could work: there is no second code path for auth,
+    retries, rate limiting or request ids, so the issuing client cannot drift
+    away from the client the rest of the app uses.
+    """
+    from ..config import get_settings
+
+    s = settings or get_settings()
+    if not s.issuing_ready():
+        return None
+    return AirwallexClient(settings=s.model_copy(update={
+        "awx_client_id": s.airwallex_issuing_client_id,
+        "awx_api_key": s.airwallex_issuing_api_key,
+    }))
+
+
 class Issuing:
     def __init__(self, client: AirwallexClient):
         self._c = client
@@ -123,6 +145,71 @@ class Issuing:
             "POST", f"/api/v1/issuing/cards/{card_id}/update",
             json_body={"card_status": card_status},
         )
+
+    # ---- authorisations -------------------------------------------------
+    def authorise(self, card_id: str, *, amount: str, currency: str,
+                  limit_minor: int, merchant: str = "") -> dict:
+        """Ask the sandbox to authorise a purchase, and record what came back.
+
+        THE BANK IS THE SECOND LINE, NOT THE FIRST. The card carries our
+        per-transaction limit, and this function also checks the amount itself
+        before calling: a control that only exists in the payload is a control
+        you have not tested. If the two ever disagree the DECLINE is what gets
+        recorded, because the money did not move.
+
+        `outcome` is CLEARING for both calls ON PURPOSE. A decline staged by the
+        caller (`outcome=FAILED`) would prove only that we can ask for a
+        decline; the point of the beat is that the CARD's own limit refuses the
+        amount and the bank says why.
+        """
+        from ..money import money_str, to_major_str, to_minor
+        from .simulation import Simulation
+
+        amount_minor = to_minor(amount, currency)
+        ours_allows = amount_minor <= int(limit_minor)
+        raw = Simulation(self._c).simulate_issuing_authorization(
+            card_id, currency=currency, amount_minor=amount_minor,
+            outcome="CLEARING", merchant_name=merchant or "Test Merchant")
+        # LIVE SHAPE: the sandbox answers with `process_result` of APPROVED or
+        # DECLINED (and a `failure_reason`), not the transaction_type/status
+        # pair the card-transaction reads use. Checking only the old fields
+        # meant a bank decline our own arithmetic did not predict would have
+        # been recorded as an approval.
+        outcome_word = (str(raw.get("process_result") or "")
+                        or str(raw.get("transaction_type") or "")
+                        or str(raw.get("status") or "")).upper()
+        bank_failed = outcome_word in ("DECLINED", "FAILED", "REJECTED")
+        bank_reason = str(raw.get("failure_reason") or "")
+        declined = (not ours_allows) or bank_failed
+        if declined and not bank_reason:
+            bank_reason = ("LIMIT_EXCEEDED" if not ours_allows
+                           else "the bank gave no reason")
+
+        result = ("Declined" if declined
+                  else "Approved" if amount_minor else "Approved")
+        decision = {
+            "card_id": card_id,
+            "amount_minor": amount_minor,
+            "currency": currency,
+            "merchant": merchant,
+            "limit_minor": int(limit_minor),
+            "suggestion": f"authorise {money_str(amount_minor, currency)}"
+                          + (f" at {merchant}" if merchant else ""),
+            "checks": [
+                (f"Amount is within the {money_str(int(limit_minor), currency)} "
+                 f"card limit", ours_allows),
+                ("The card answered", True),
+                (f"The bank {'declined it' if bank_failed else 'accepted it'}",
+                 not bank_failed),
+            ],
+            "result": result,
+            "bank_reason": bank_reason,
+            "live": True,
+            "raw": {k: raw.get(k) for k in
+                    ("id", "transaction_type", "status", "failure_reason")},
+        }
+        return {"declined": declined, "bank_reason": bank_reason,
+                "amount_minor": amount_minor, "raw": raw, "decision": decision}
 
     def transactions(self, card_id: Optional[str] = None) -> list[dict]:
         data = self._c.call("GET", "/api/v1/issuing/transactions")

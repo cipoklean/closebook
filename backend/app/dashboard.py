@@ -39,6 +39,16 @@ def _loads(text) -> dict:
 
 
 # ---------------------------------------------------------------- budget
+def _card_decisions(session) -> list[dict]:
+    try:
+        from .domain.cards import decisions
+
+        return decisions(session)
+    except Exception:
+        log.warning("could not read card decisions")
+        return []
+
+
 def budget_block(s=None) -> dict:
     """The limits, plus the FORECAST — shown, never spent.
 
@@ -1473,6 +1483,9 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
             "outflow": rep.outflow_by_account,
             "ledger_balanced": rep.balanced,
             "receivables": receivables,
+            # Card authorisations: the one control that refuses OUTSIDE our
+            # process. Read here so the AI page shows what the bank said.
+            "card_decisions": _card_decisions(s),
             "payables": payables,
             "waiting": waiting,
             "awaiting_approval": awaiting_approval,

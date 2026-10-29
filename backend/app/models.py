@@ -354,6 +354,11 @@ class WorkspaceSettings(Base):
     deposits_from: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # THE CARD AUTHORISATIONS this workspace has seen, as a JSON list. A card
+    # decision is a fact about a card, not a plan step and not an inflow, and
+    # the demo needs the last few to survive a restart. One nullable column is
+    # the smallest thing that does that without a new table.
+    card_decisions_json: Mapped[Optional[str]] = mapped_column(Text, default=None)
 
 
 class IgnoredEvent(Base):

@@ -64,6 +64,23 @@ class Settings(BaseSettings):
     # case in the client.
     llm_extra_body: str = ""
 
+    # A SECOND AIRWALLEX ACCOUNT, FOR ISSUING ONLY. The sandbox that runs the
+    # books is registered in NIGERIA, which is not an issuing region: every
+    # card create returned the generic `invalid_request: Invalid issuance
+    # details`, and Airwallex confirmed the cause was the business country, not
+    # the payload. A second sandbox registered in HONG KONG exists only to
+    # issue cards, and it has its own keys. Nothing else uses them.
+    #
+    # EMPTY IS A SUPPORTED STATE: with no issuing keys the app issues no cards
+    # and beat 4 says so in plain words rather than pretending.
+    airwallex_issuing_client_id: SecretStr = Field(default=SecretStr(""))
+    airwallex_issuing_api_key: SecretStr = Field(default=SecretStr(""))
+
+    def issuing_ready(self) -> bool:
+        """Are there issuing credentials to make a SECOND client from?"""
+        return bool(self.airwallex_issuing_client_id.get_secret_value().strip()
+                    and self.airwallex_issuing_api_key.get_secret_value().strip())
+
     # Demo: shared PIN gating the approval endpoints.
     demo_approver_pin: SecretStr = Field(default=SecretStr(""))
     # WHO IS DOING THE APPROVING. Audit rows used to be stamped "dashboard",

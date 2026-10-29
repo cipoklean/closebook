@@ -167,20 +167,40 @@ class Simulation:
     # --- issuing outcomes ------------------------------------------------
     def simulate_issuing_authorization(self, card_id: str, *, currency: str,
                                        amount_minor: int, outcome: str = "CLEARING",
-                                       test_card_number: str = "4035501000000008",
+                                       test_card_number: str = "",
                                        merchant_name: str = "Test Merchant") -> dict:
-        """Create a synthetic authorization against a card.
-        outcome in {CLEARING, FAILED}. Use failure_reason to stage a decline
-        (e.g. LIMIT_EXCEEDED)."""
+        """Authorise a purchase against a real card, and let the CARD decide.
+
+        DOCUMENTED SHAPE, read from the Airwallex docs MCP (the live API named
+        `transaction_amount` after this module sent `amount`):
+          transaction_amount (number), transaction_currency, card_id or
+          card_number, merchant_info, single_phase, and an OPTIONAL
+          transaction_failure_reason for a staged failure.
+
+        `outcome` is kept for callers, but it no longer sends a
+        `transaction_type`: that field is not in the schema, and sending it was
+        a guess. A real decline has to come from the CARD's own controls -- ask
+        for a failure reason and you have only tested that Airwallex can be told
+        to fail.
+
+        `test_card_number` is deliberately NOT defaulted. A card_number
+        alongside a card_id TAKES PRIORITY, so the old default authorised the
+        sandbox test card instead of the card under test.
+        """
         from ..money import to_major_str
         body: dict = {
             "card_id": card_id,
-            "amount": to_major_str(amount_minor, currency),
-            "currency": currency,
-            "card_number": test_card_number,
-            "merchant_name": merchant_name,
-            "transaction_type": outcome,
+            "transaction_amount": float(to_major_str(amount_minor, currency)),
+            "transaction_currency": currency,
+            "merchant_info": merchant_name,
+            # authorize AND clear in one: the demo wants a settled answer, not
+            # a pending authorisation that never resolves
+            "single_phase": True,
         }
+        if test_card_number:
+            body["card_number"] = test_card_number
+        if outcome.upper() == "FAILED":
+            body["transaction_failure_reason"] = "TRANSACTION_BLOCKED"
         return self._c.call("POST", "/api/v1/simulation/issuing/create",
                             json_body=body, is_simulation=True)
 

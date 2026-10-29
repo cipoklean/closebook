@@ -2905,6 +2905,63 @@ def _arrivals_card(c: dict, *, span: str = "x-span-12", detail: bool = True,
         "matcher recorded.") + '</p></div></div>' + body))
 
 
+def _card_decisions_card(c: dict) -> str:
+    """Card authorisations, in the same three columns as every other decision.
+
+    A card is where Closebook's limits stop being a sentence: the bank refuses
+    the purchase and the money does not move. Showing it the same way as a
+    matching decision is the point -- suggestion, the checks that ran, result.
+    """
+    rows = []
+    for d in (c.get("card_decisions") or [])[:6]:
+        declined = str(d.get("result") or "").lower().startswith("declin")
+        # a decision stored without prose still has to read as a sentence
+        said = str(d.get("suggestion") or "").strip() or (
+            "authorise " + money_str(int(d.get("amount_minor") or 0),
+                                     str(d.get("currency") or "USD")))
+        checks = "".join(
+            f'<div class="x-receipt-row {"is-pass" if bool(x[1]) else "is-fail"}">'
+            f'<span class="x-tick">{_I["check"] if bool(x[1]) else _I["x"]}</span>'
+            f'<b>{e(str(x[0]))}</b></div>'
+            for x in (d.get("checks") or []) if isinstance(x, (list, tuple)))
+        bank = (f'<div class="x-receipt-row"><span class="x-hint">The bank said: '
+                f'{e(str(d.get("bank_reason")))}</span></div>'
+                if d.get("bank_reason") else "")
+        provenance = ('<div class="x-receipt-row"><span class="x-hint">live from '
+                      'the issuing sandbox</span></div>' if d.get("live") else
+                      '<div class="x-receipt-row"><span class="x-hint">our own '
+                      'check, no bank call</span></div>')
+        rows.append(
+            '<div class="x-receipt" data-testid="card-decision" style="margin-bottom:14px">'
+            '<div class="x-receipt-col x-receipt-col--model">'
+            '<div class="x-receipt-head">AI suggestion</div>'
+            f'<div class="x-receipt-row"><b>{e(said)}</b></div>'
+            '<div class="x-receipt-row"><span class="x-hint">card '
+            f'{e(str(d.get("card_id") or "")[:12])}</span></div></div>'
+            '<div class="x-receipt-col x-receipt-col--checks">'
+            f'<div class="x-receipt-head">Rule checks</div>{checks}</div>'
+            '<div class="x-receipt-col x-receipt-col--code">'
+            '<div class="x-receipt-head">Result</div>'
+            f'<div class="x-receipt-row {"is-fail" if declined else "is-pass"}">'
+            f'<span class="x-tick">{_I["x"] if declined else _I["check"]}</span>'
+            f'<b>{e(str(d.get("result") or ""))}</b></div>{bank}{provenance}'
+            '</div></div>')
+    if rows:
+        tail = ('<p class="x-help" style="margin-top:10px">Both amounts were sent '
+                'against the same card. The one over the limit was refused by the '
+                "card itself, and the reason above is the bank's, not ours.</p>")
+    else:
+        tail = ('<p class="x-empty">No card has been authorised yet. A card is how '
+                'a spend limit refuses a purchase instead of asking a model '
+                'nicely: the bank declines and the money does not move. Nothing '
+                'is issued until issuing credentials are configured.</p>')
+    return _card(span="x-span-12", inner=(
+        '<div class="x-cardhead"><div><h3>Card authorisations</h3>'
+        '<p class="x-help">The limit lives on the card, so the refusal happens '
+        'at Airwallex and not on this page.</p></div></div>'
+        + "".join(rows) + tail))
+
+
 def _ai(c: dict) -> str:
     """Every matching decision, then every model call.
 
@@ -3115,7 +3172,7 @@ def _ai(c: dict) -> str:
 
                  f'{len(shown)} of {total}.</p>')
 
-    return matches + _card(span="x-span-12", inner=(
+    return _card_decisions_card(c) + matches + _card(span="x-span-12", inner=(
         '<div class="x-cardhead"><div><h3>What the model said, and what the rules did</h3>'
         '<p class="x-help">Straight from <span class="x-mono">agent_trace</span>. '
         'Nothing here is a decision: every row is one the code already made.</p></div>'

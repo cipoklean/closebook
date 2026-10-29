@@ -110,3 +110,89 @@ against Airwallex and no decline was returned.
 
 The per-transaction limit logic itself is fully unit-tested; what is missing is
 a live authorisation to demonstrate it against.
+
+---
+
+# RESOLUTION (2026-10-29): issuing was a country problem, and it is solved
+
+## What Airwallex confirmed
+
+Card issuing depends on the **business country of the account**, not on the
+request body. The sandbox that runs Closebook's books is registered in
+**Nigeria**, which is not an issuing region. That is why every card create
+returned the generic
+
+```
+[invalid_request] Invalid issuance details
+```
+
+with an **empty `source`**. The error named no field because the problem was
+never a field. Every payload theory we chased (is_personalized, cardholder
+type, program shape, issue_to) was a theory about the wrong layer.
+
+## What fixed it
+
+A second Airwallex sandbox, registered in **Hong Kong**, used for issuing only:
+
+| | account | job |
+|---|---|---|
+| books | Nigeria sandbox (`AWX_CLIENT_ID` / `AWX_API_KEY`) | deposits, transfers, beneficiaries, webhooks |
+| cards | Hong Kong sandbox (`AIRWALLEX_ISSUING_CLIENT_ID` / `AIRWALLEX_ISSUING_API_KEY`) | cardholders, cards, authorisations |
+
+`airwallex/issuing.py::issuing_client()` builds the second client by copying
+the settings and swapping those two credential fields, so auth, retries, rate
+limiting and request ids have exactly one implementation. **With no issuing
+credentials it returns `None`** and beat 4 keeps its policy-verdict caveat:
+empty is a supported state, not a crash.
+
+## Live proof (2026-10-29, HK sandbox)
+
+```
+cardholder f1f7a1dc-928d-41f9-9212-5d21d88938e5  type=DELEGATE  status=READY
+card       c000fbf0-5792-4fcb-b330-cfafc0834827  VIRTUAL  status=ACTIVE
+           limits USD 2,500.00 PER_TRANSACTION / USD 10,000.00 ALL_TIME
+           (the per-transaction limit is the operator's auto-pay limit)
+
+inside the limit  USD 2,500.00 -> process_result APPROVED
+over the limit    USD 2,500.01 -> process_result DECLINED
+                                   failure_reason LIMIT_EXCEEDED
+```
+
+That is a **real decline returned by the card**, not a staged failure. No
+`transaction_failure_reason` was sent: asking Airwallex to fail a transaction
+would only prove that Airwallex can be told to fail.
+
+## Contract facts captured live (these cost attempts to find)
+
+- `POST /issuing/cardholders/create` returns **`cardholder_id`**, not `id`.
+- `POST /issuing/cards/create` returns **`card_id`** and `card_status`.
+- The HK program is `{"purpose":"COMMERCIAL","type":"CREDIT","sub_type":"GOOD_FUNDS_CREDIT"}`,
+  wallet-funded, **no `funding_source_id`**.
+- A DELEGATE cardholder cannot hold a personalized card: `is_personalized: false`.
+- Reusing a `request_id` is refused (`The provided ID is already associated with
+  a previous request`) — the idempotency guard working, not a bug.
+- The same email cannot create a second cardholder
+  (`already associated with a cardholder`) — reuse it.
+- `POST /simulation/issuing/create` takes **`transaction_amount`** and
+  **`transaction_currency`** (not `amount`/`currency`), `merchant_info`
+  (not `merchant_name`), and `single_phase: true` to authorise and clear at
+  once. It answers with **`process_result`**: `APPROVED` or `DECLINED` plus
+  `failure_reason`. It had no `transaction_type` field at all; sending one was
+  a guess, and the response's `process_result` is the only reliable word.
+- `card_number` **outranks** `card_id` when both are sent, so the old default
+  test-card number would have authorised the wrong card. It is now omitted
+  unless asked for.
+
+## What beat 4 says now
+
+`domain/cards.py::caveat_wanted()` keeps the caveat until a decision that is
+**both live and a decline** is recorded in the workspace. A verdict produced by
+our own arithmetic can never retire it, because a verdict is not evidence. On a
+workspace where the probe has run, beat 4 reports the bank's amount and reason;
+everywhere else it still says "policy verdict" and means it.
+
+To record it on a workspace:
+
+```bash
+.venv/bin/python scripts/probe_issuing_hk.py <book>
+```

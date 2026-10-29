@@ -287,54 +287,51 @@ class LiveDemo:
 
     # ---- beat 4: card guardrail ---------------------------------------
     def beat_card_decline(self) -> None:
-        """Authorize 7,000.01 against a 7,000 limit.
+        """A card is a limit that refuses, not a limit that is written down.
 
-        HONEST SCOPE: this beat reports CLOSEBOOK'S POLICY VERDICT. It is NOT a
-        live card-network decline, because no card exists on this account.
+        THE BEAT REPORTS WHAT ACTUALLY HAPPENED, and it will not claim more.
+        If the issuing sandbox has authorised a card and the card refused an
+        amount, the bank's own reason is reported. If it has not, the beat says
+        "policy verdict" and means it.
 
-        Airwallex Dev Help attributed our 400 `Invalid issuance details` to
-        `is_personalized: true` on a DELEGATE cardholder, so the payload was
-        corrected to `is_personalized: false`, `program: {purpose: COMMERCIAL}`
-        only, and no `issue_to`. The error was UNCHANGED, and an INDIVIDUAL
-        cardholder — the type Dev Help said personalized cards require — fails
-        identically, so the cardholder type is not the cause.
-
-        What the probes did establish, by elimination:
-          - Every required field is read: removing one returns a NAMED error
-            (`created_by is mandatory`, `limits field is required`, ...), so the
-            body is being parsed field by field and is not malformed.
-          - `program: CONSUMER` is refused outright for this account.
-          - `COMMERCIAL` rejects both values of `is_personalized` with the same
-            generic error and an EMPTY `source`.
-          - `/issuing/programs`, `/issuing/balances` AND
-            `/issuing/cards/create/schema` all return "Admin permissions
-            required".
-
-        That pattern is an account-level issuing entitlement, not a payload bug.
-        The simulation endpoint needs a real card_id, so there is nothing to
-        authorise against and no decline was ever returned.
-
-        Stated plainly rather than dressed up: a synthetic decline is not
-        evidence that our policy is enforced.
+        Why there are two accounts at all: the sandbox that runs the books is
+        registered in NIGERIA, and Nigeria is not an issuing region, so every
+        card create returned the generic `invalid_request: Invalid issuance
+        details` -- an error that names no field because the problem was never
+        a field. Airwallex confirmed the cause was the business country and
+        opened a second sandbox registered in HONG KONG, used only for cards
+        (see docs/AIRWALLEX_CARD_ISSUING_REQUEST.md).
         """
+        from ..domain import cards as card_store
+
         beat = "beat 4 (card guardrail)"
-        over = 700_001  # USD 7,000.01
-        within = 700_000
-        allowed = over <= int(CARD_LIMIT_USD * 100)
-        self._record(beat, not allowed,
-                     f"POLICY VERDICT (not a live decline): USD {over/100:,.2f} "
-                     f"against a USD {CARD_LIMIT_USD:,.0f} limit -> "
-                     f"{'ALLOWS (BUG)' if allowed else 'DECLINES'}; "
-                     f"USD {within/100:,.2f} would be allowed "
-                     f"(limit is inclusive per transaction). "
-                     f"No live card: card creation returns invalid_request "
-                     f"'Invalid issuance details'. The Dev Help fix "
-                     f"(is_personalized false, program COMMERCIAL only, no "
-                     f"issue_to) was applied and the error was unchanged, and "
-                     f"an INDIVIDUAL cardholder fails identically: so the "
-                     f"cardholder type is not the cause. Cardholders create "
-                     f"fine; every issuing-management endpoint returns 'Admin "
-                     f"permissions required'. Awaiting Airwallex.")
+        limit_minor, all_time_minor, ccy = card_store.policy_limits(self.db)
+        live = card_store.live_decline(self.db)
+        if live is not None:
+            self._record(
+                beat, True,
+                f"LIVE DECLINE from Airwallex. Card {live.get('card_id')} "
+                f"refused {live.get('currency')} "
+                f"{int(live.get('amount_minor') or 0) / 100:,.2f} with reason "
+                f"{live.get('bank_reason')} (card limit {ccy} "
+                f"{limit_minor / 100:,.2f} per transaction). The authorisation "
+                f"inside the limit was approved by the same card. The limit "
+                f"lives on the card, so the refusal came from the bank and the "
+                f"money did not move.")
+            return
+
+        over = limit_minor + 1
+        allowed = over <= limit_minor
+        self._record(
+            beat, not allowed,
+            f"POLICY VERDICT (not a live decline): {ccy} {over / 100:,.2f} "
+            f"against a {ccy} {limit_minor / 100:,.2f} limit -> "
+            f"{'ALLOWS (BUG)' if allowed else 'DECLINES'}. No card has been "
+            f"authorised on this workspace, so nothing reached the bank. The "
+            f"issuing account is a separate Hong Kong sandbox; with its "
+            f"credentials configured, "
+            f"scripts/probe_issuing_hk.py issues the card, sends this amount "
+            f"and this beat reports the bank's own decline instead.")
 
     # ---- beat 5: failure recovery on a real transfer -------------------
     def beat_failure_recovery(self) -> None:

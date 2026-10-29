@@ -167,22 +167,17 @@ BEATS: list[DemoBeat] = [
     ),
     DemoBeat(
         "guardrail",
-        inject='card USD 7000 limit; authorize 7000.01',
-        expect="Policy verdict: the 7,000.01 authorisation is DECLINED by "
-               "Closebook's inclusive per-transaction limit (7,000.00 would "
-               "pass). NOTE: this is our policy verdict, NOT a live card "
-               "decline. No card exists on this sandbox account, so nothing "
-               "was authorised against Airwallex and no decline was returned. "
-               "Card CREATION fails with 'Invalid issuance details'. Airwallex "
-               "Dev Help attributed that to is_personalized on a DELEGATE "
-               "cardholder; the payload was corrected and the error was "
-               "unchanged, and an INDIVIDUAL cardholder fails identically: so "
-               "the cardholder type is not the cause. /issuing/programs, "
-               "/issuing/balances and /issuing/cards/create/schema all return "
-               "'Admin permissions required', so this looks like an "
-               "account-level issuing entitlement that Airwallex must enable. "
-               "See docs/AIRWALLEX_CARD_ISSUING_REQUEST.md and "
-               "scripts/probe_card_create.py.",
+        inject="card with the auto-pay limit; authorise inside it, then over it",
+        expect="The card itself refuses the amount over the per-transaction "
+               "limit and Airwallex returns the reason (LIMIT_EXCEEDED), while "
+               "the amount inside the limit is approved by the same card. Both "
+               "appear in AI activity as AI suggestion / Rule checks / Result. "
+               "The limit is the operator's auto-pay limit, carried on the card, "
+               "so the refusal happens at the bank and the money does not move. "
+               "Cards are issued from a separate Hong Kong sandbox because the "
+               "books' account is registered in Nigeria, which cannot issue; see "
+               "docs/AIRWALLEX_CARD_ISSUING_REQUEST.md. Until a live decline is "
+               "recorded the beat reports Closebook's own verdict and says so.",
     ),
     DemoBeat(
         "failure_recovery",
