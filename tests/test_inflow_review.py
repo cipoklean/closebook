@@ -172,6 +172,28 @@ class TestReject:
             assert s.query(Inflow).one().review_state == "PENDING"
 
 
+class TestApproveFlashReportsAppliedSum:
+    def test_overpayment_flash_says_applied_and_credit(self, client, db):
+        """F5: approving an overpayment must report what was APPLIED (capped at
+        the open balance), not the deposit amount, and name the credit."""
+        _invoice(number="INV-1002", ccy="GBP", minor=800_000)
+        r = _proposed_inflow(db, amount=1_000_000, ccy="GBP",
+                              payer="Harrow & Co", reference="INV-1002")
+        resp = client.post(f"/inflows/{r.inflow_id}/approve",
+                           data={"pin": PIN}, follow_redirects=False)
+        loc = resp.headers["location"]
+        from urllib.parse import unquote
+        loc = unquote(loc).replace("+", " ")
+        assert "ok=" in loc, loc
+        assert "8,000.00 has been applied" in loc, \
+            "the flash must quote the applied sum, not the 10,000 deposit"
+        assert "10,000.00 has been applied" not in loc
+        assert "2,000.00 held as credit" in loc, "the credit must be named"
+        with session_scope() as s:
+            inv = s.query(InvoiceReceivable).filter_by(number="INV-1002").one()
+            assert inv.amount_paid_minor == 800_000
+
+
 class TestThePageOffersBothChoices:
     def test_a_pending_proposal_offers_all_three_resolutions(self, client, db):
         """Suspense can only leave three ways, so the page must offer three.

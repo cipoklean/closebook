@@ -1007,12 +1007,20 @@ async def approve_inflow_route(inflow_id: int, request: Request):
             if left > 0:
                 outstanding.append(f"{money_str(left, inv.currency)} is still to "
                                    f"collect on {inv.number}")
-        amount = inflow.amount_minor
+        # F5: the flash must report what was APPLIED, not the deposit amount,
+        # and name anything held as credit. `matches` carry the actual applied
+        # sums (capped at the inflow by the ledger), so they are the truth.
+        applied_minor = sum(m.amount_applied_minor for m in matches)
+        credit_minor = max(0, int(inflow.amount_minor) - applied_minor)
         ccy = inflow.currency
+        head = (f"Approved. {money_str(applied_minor, ccy)} has been applied "
+                f"to invoice {applied}; the invoice and the ledger have both "
+                f"moved")
+        if credit_minor:
+            head += f"; {money_str(credit_minor, ccy)} held as credit"
     tail = (". " + "; ".join(outstanding)) if outstanding else ""
     return _back(request, tab="ok", ok=(
-        f"Approved. {money_str(amount, ccy)} has been applied to invoice "
-        f"{applied}; the invoice and the ledger have both moved{tail}"
+        head + tail
         + _run_loop("approval")))
 
 
