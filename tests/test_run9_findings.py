@@ -457,7 +457,9 @@ class TestAnApprovedPaymentShortOfCashSaysSo:
         assert "Approved" in joined, joined
         assert "USD 8,200.00" in joined, (
             "the shortfall against the floor is not computed: " + joined)
-        assert "reserve floor" in joined.lower(), joined
+        # RENAMED ON PURPOSE (run 13): the product calls it the safety cushion
+        # everywhere a reader looks, and the same figure is still named here.
+        assert "safety cushion" in joined.lower(), joined
 
         text = visible(html)
         assert "Approved. Sends once" in text, (

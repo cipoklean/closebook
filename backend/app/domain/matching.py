@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Callable, Iterable, Optional, Protocol
 
-from ..money import minor_for, to_major_str, to_minor
+from ..money import minor_for, money_str, to_major_str, to_minor
 from .policy import (
     MATCH_CONFIDENCE_AUTO, MATCH_CONFIDENCE_ESCALATE, MATERIAL_SHORT_THRESHOLD,
     within_bank_fee_tolerance,
@@ -226,21 +226,47 @@ def try_rule(inflow_amount_minor: int, inflow_currency: str,
     if not same_ccy:
         return None
     # exact open-balance for this payer
-    for c in same_ccy:
-        if c.amount_open_minor == inflow_amount_minor:
-            sim = token_set_ratio(payer_name, c.customer_name)
-            # A fuzzy-but-strong payer name plus an exact amount is still only
-            # good enough to auto-apply when the name is a near-identical match.
-            conf = 0.92 if sim >= 0.90 else 0.88
-            return MatchResult(
-                status="MATCHED",
-                allocations=[Allocation(c.invoice_id, inflow_amount_minor)],
-                confidence=conf, method="RULE",
-                evidence={"rule": "payer amount equals one open balance",
-                          "invoice": c.number, "payer": payer_name,
-                          "name_similarity": round(sim, 3)},
-                reason=f"amount matches the open balance on {c.number}",
-            )
+    #
+    # TWO INVOICES OF THE SAME AMOUNT ARE A TIE, NOT A MATCH. The loop used to
+    # return the FIRST candidate whose open balance equalled the amount, which
+    # silently paid INV-3100 when INV-3101 was just as good a fit: the payer was
+    # identified and the amount was real, but neither fact says WHICH invoice
+    # the money settles. 0.92 also cleared the auto bar, so a coin flip was
+    # applied without anyone looking. The amount cannot break a tie, so this
+    # tier stops here and asks; a tie is also terminal, because no lower tier
+    # and no model can know either.
+    exact = [c for c in same_ccy if c.amount_open_minor == inflow_amount_minor]
+    if len(exact) > 1:
+        names = [c.number for c in exact]
+        if len(names) == 2:
+            fits = f"{names[0]} and {names[1]}"
+        else:
+            fits = ", ".join(names[:-1]) + f" and {names[-1]}"
+        return MatchResult(
+            status="AMBIGUOUS",
+            allocations=[],
+            confidence=0.5, method="RULE",
+            evidence={"rule": "the amount fits more than one open invoice",
+                      "invoices": names, "payer": payer_name,
+                      "tie": True},
+            reason=(f"{money_str(inflow_amount_minor, inflow_currency)} fits "
+                    f"{fits}; which one?"),
+        )
+    if exact:
+        c = exact[0]
+        sim = token_set_ratio(payer_name, c.customer_name)
+        # A fuzzy-but-strong payer name plus an exact amount is still only
+        # good enough to auto-apply when the name is a near-identical match.
+        conf = 0.92 if sim >= 0.90 else 0.88
+        return MatchResult(
+            status="MATCHED",
+            allocations=[Allocation(c.invoice_id, inflow_amount_minor)],
+            confidence=conf, method="RULE",
+            evidence={"rule": "payer amount equals one open balance",
+                      "invoice": c.number, "payer": payer_name,
+                      "name_similarity": round(sim, 3)},
+            reason=f"amount matches the open balance on {c.number}",
+        )
     # Exactly one open invoice for this payer in this currency — but ONLY when
     # the payer name genuinely identifies that customer AND the amount is at
     # least consistent with that invoice. Without the first gate a fuzzy name
@@ -615,6 +641,12 @@ def match_inflow(inflow_amount_minor: int, inflow_currency: str,
         res = tier()
         if res is None:
             continue
+        # A TIE IS TERMINAL. "This amount fits two open invoices" is not a
+        # weaker opinion than a part-payment tier's guess; it is a fact those
+        # tiers cannot change, and the model is not reading a reference that
+        # names either invoice (try_exact ran first).
+        if (res.evidence or {}).get("tie"):
+            return res
         if res.confidence >= MATCH_CONFIDENCE_AUTO:
             return res
         if best is None or res.confidence > best.confidence:

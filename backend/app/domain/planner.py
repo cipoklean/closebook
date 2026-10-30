@@ -395,9 +395,10 @@ def _approved_waiting_note(has_approval: bool, available_after: int,
         # had already arrived; naming the deposit and the screen is the action.
         return [f"Approved. Waiting on cash: {money_str(unresolved_minor, currency)} "
                 f"deposit is unresolved. Resolve it in Money in."]
+    # SAFETY CUSHION, the name the product uses everywhere a reader looks.
     note = f"Approved. Sends once {money_str(short, currency)} is free to spend"
     if floor_minor:
-        note += (f" (reserve floor {money_str(int(floor_minor), currency)}, "
+        note += (f" (safety cushion {money_str(int(floor_minor), currency)}, "
                  f"which stays put)")
     return [note]
 

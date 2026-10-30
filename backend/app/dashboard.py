@@ -1367,6 +1367,24 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
         number_by_invoice_id = {inv.id: inv.number
                                 for inv in s.query(InvoiceReceivable).all()}
 
+        def _kept_promise(step_row_state: dict, bank_attempt: dict) -> bool:
+            """Does this payable already have a real transfer?
+
+            Then any "Sends once X is free to spend" caption is history, not a
+            promise, and must not be shown next to "Sent, the bank has
+            scheduled it".
+            """
+            return bool((step_row_state or {}).get("airwallex_object_id")
+                        or (bank_attempt or {}).get("id"))
+
+        def _without_kept_promise(text: str, drop: bool) -> str:
+            """Remove the waiting-on-cash sentence, keeping everything else."""
+            if not drop or not text:
+                return text
+            parts = [x for x in text.split("; ")
+                     if not x.strip().startswith("Approved. Sends once")]
+            return "; ".join(parts)
+
         payables = []
         for p in s.query(InvoicePayable).order_by(InvoicePayable.number).all():
             sup = suppliers.get(p.supplier_id)
@@ -1407,12 +1425,25 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
                 # The planner's own verdict on this payable: action, the exact
                 # reason with its numbers, and whether it needs a human.
                 "plan_action": step.action if step else None,
-                "plan_reason": step.reason if step else None,
+                "plan_reason": _without_kept_promise(
+                    step.reason if step else None, _kept_promise(state, bank)),
                 "plan_policy_reason": step.policy_reason if step else None,
                 "plan_needs_approval": bool(step.needs_approval) if step else False,
-                "plan_approval_reason": step.approval_reason if step else None,
+                # A CAPTION MUST NOT OUTLIVE ITS TRUTH. The planner re-says
+                # "Approved. Sends once USD X is free to spend" on EVERY render,
+                # because it is a pure function with no idea a transfer already
+                # exists -- so the card said it was waiting on cash it no longer
+                # needed, right beside "Sent, the bank has scheduled it". The
+                # ORM row knows: once it holds an Airwallex object id, the
+                # promise has been kept and the caption goes.
+                "plan_approval_reason": (
+                    None if _kept_promise(state, bank)
+                    else (step.approval_reason if step else None)),
                 # EVERY reason the planner gave, not just the first.
-                "plan_blockers": list(step.blockers) if step else [],
+                "plan_blockers": [
+                    b for b in (list(step.blockers) if step else [])
+                    if not (_kept_promise(state, bank)
+                            and b.strip().startswith("Approved. Sends once"))],
                 "plan_blocker_codes": list(step.blocker_codes) if step else [],
                 # The conversion step's Airwallex id, if one was ever executed
                 # for this payable. money_block checks it against the LEDGER.
