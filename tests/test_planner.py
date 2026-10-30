@@ -174,7 +174,7 @@ def test_reserve_floor_defers_the_big_payment():
     tight = beat1_position(cash_minor=1_300_000)
     plan = build_plan([_unblock_roterdam()], tight, load_budget())
     assert_held(plan.steps[0])
-    assert "floor" in plan.steps[0].reason
+    assert "safety cushion" in plan.steps[0].reason
     assert "below" in plan.steps[0].reason
     assert plan.steps[0].policy_reason == "reserve_floor"
 

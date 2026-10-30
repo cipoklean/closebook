@@ -264,7 +264,7 @@ def money_block(s, cash: dict, budget: dict, plan=None,
                 f"paying {line['payable_number']} "
                 f"({money_str(line['amount_minor'], line['currency'])}) would "
                 f"leave cash {money_str(after, budget_ccy)}, below the "
-                f"{money_str(floor, budget_ccy)} floor")
+                f"{money_str(floor, budget_ccy)} safety cushion")
             line["cash_floor_code"] = "cash_reserve_floor"
             breaching.append(line)
         else:

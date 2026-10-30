@@ -181,7 +181,7 @@ class TestTheHeldReasonNamesEveryBlocker:
             "the sentence does not name the reserve floor that is also holding "
             "this: " + joined)
         assert "waiting on a match" in joined, joined
-        assert "floor" in joined.lower(), joined
+        assert "safety cushion" in joined.lower(), joined
 
     def test_an_over_limit_payment_says_so_even_while_it_is_held(self, books):
         """A person has to know a payment needs them even before it can be paid."""

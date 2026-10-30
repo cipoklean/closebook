@@ -6,6 +6,7 @@ overpaid and ambiguous cases. Each test below maps to one demo beat.
 from __future__ import annotations
 
 import pytest
+from decimal import Decimal
 
 from app.domain.matching import (
     Allocation, Candidate, MatchResult, fold_digits, match_inflow, normalise,
@@ -127,6 +128,52 @@ def test_single_open_invoice_overpayer_proposes_capped_allocation():
     assert [a.amount_minor for a in r.allocations] == [500_000]
     assert r.credit_minor == 100_000
     assert r.confidence < 0.90, "overpayments never auto-apply"
+
+
+def test_deferral_reason_calls_it_a_safety_cushion():
+    """F7: user-facing copy says safety cushion, never reserve floor."""
+    from app.domain.planner import CashPosition, Payable, build_plan
+    from app.domain.policy import BudgetSettings
+
+    pos = CashPosition(
+        balances={"USD": 6_000_00},
+        budget_currency="USD",
+        floor_minor=5_000_00,
+        rates={"USD": Decimal("1")},
+    )
+    plan = build_plan(
+        [Payable(number="PO-1", supplier="S", currency="USD",
+                 amount_minor=2_000_00)],
+        pos, BudgetSettings(),
+    )
+    text = plan.summary()
+    assert "safety cushion" in text
+    assert "floor" not in text.lower()
+
+
+def test_waits_for_inflow_reason_calls_it_a_safety_cushion():
+    """F7: the waits_for_inflow sentence is user-facing too."""
+    from app.domain.planner import CashPosition, Payable, build_plan
+    from app.domain.policy import BudgetSettings, Forecast
+
+    pos = CashPosition(
+        balances={"USD": 6_000_00},
+        budget_currency="USD",
+        floor_minor=5_000_00,
+        rates={"USD": Decimal("1")},
+        forecast=Forecast(
+            lines=[{"number": "INV-1", "currency": "USD",
+                    "usd_minor": 10_000_00}],
+        ),
+    )
+    plan = build_plan(
+        [Payable(number="PO-1", supplier="S", currency="USD",
+                 amount_minor=3_000_00)],
+        pos, BudgetSettings(),
+    )
+    text = plan.summary()
+    assert "safety cushion" in text
+    assert "floor" not in text.lower()
 
 
 def test_rule_high_confidence_on_fuzzy_payer_and_amount():

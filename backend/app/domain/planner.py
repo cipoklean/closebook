@@ -324,7 +324,7 @@ def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: i
             who = " and ".join(names)
             if enough_cash:
                 return (f"waits for {who} to land: paying it now would leave cash "
-                        f"{left_txt}, below the {floor_txt} floor"), "waits_for_inflow"
+                        f"{left_txt}, below the {floor_txt} safety cushion"), "waits_for_inflow"
             return (f"waits for {who} to land: the book holds "
                     f"{money_str(max(book_held, 0), currency)} and this needs "
                     f"{money_str(needed_minor, currency)}"), "waits_for_inflow"
@@ -360,7 +360,7 @@ def _blocked_reason(*, needed_minor: int, available_after: int, currency_held: i
     if floor_binds:
         clauses.append(f"paying it would leave cash "
                        f"{money_str(max(window - needed_minor, 0), currency)}, "
-                       f"below the {floor_txt} floor")
+                       f"below the {floor_txt} safety cushion")
     if auto_limit_minor and needed_minor > auto_limit_minor:
         clauses.append(f"it is also over the "
                        f"{money_str(auto_limit_minor, currency)} automatic limit, so "

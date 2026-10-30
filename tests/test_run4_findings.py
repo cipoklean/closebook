@@ -238,7 +238,7 @@ class TestAHeldBillSaysWhatHoldsIt:
         # 5,400 cash, a 4,000 bill, a 5,000 floor: the bill breaches the floor
         step = self._step(cash_minor=5_400_00)
         joined = " ".join(step.blockers).lower()
-        assert "floor" in joined, step.blockers
+        assert "safety cushion" in joined, step.blockers
         assert any(ch.isdigit() for ch in joined), step.blockers
 
     def test_an_over_limit_bill_says_the_limit_and_its_number(self):

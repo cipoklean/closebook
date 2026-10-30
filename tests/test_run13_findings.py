@@ -332,7 +332,7 @@ class TestABillDoesNotReserveAgainstItself:
         plan = build_plan([bill], pos, budget=_budget())
         said = " | ".join(list(plan.steps[0].blockers)
                           + [plan.steps[0].reason or ""])
-        assert "floor" in said or "free to spend" in said, said
+        assert "safety cushion" in said or "free to spend" in said, said
 
 
 def _budget():

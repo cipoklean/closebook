@@ -140,7 +140,7 @@ class TestWhatMayMoveWithoutAHuman:
         held = [v for v in run.verdicts if v.outcome == "HELD"
                 and v.payable_number == "PO-2001"]
         assert held, [v.as_dict() for v in run.verdicts]
-        assert "floor" in held[0].detail, held[0].detail
+        assert "safety cushion" in held[0].detail, held[0].detail
         assert "4,200.00" in held[0].detail, \
             "the reason must carry the number that actually decides it"
 
