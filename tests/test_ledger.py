@@ -241,6 +241,66 @@ def test_an_unmatchable_inflow_is_AMBIGUOUS_not_PROPOSED(db):
     assert inflow.review_state == "PENDING"
 
 
+def test_apply_path_caps_grand_total_at_inflow(db):
+    """F3: even if a confident result names allocations summing above the inflow,
+    the write path must apply at most what arrived. 700,000 of allocations
+    against a 500,000 inflow invents 200,000."""
+    a = _receivable(db, number="INV-1", amount=300_000)
+    b = _receivable(db, number="INV-2", amount=400_000)
+    from app.domain.matching import Allocation, MatchResult
+    res = MatchResult(status="MATCHED",
+                      allocations=[Allocation(a.id, 300_000),
+                                   Allocation(b.id, 400_000)],
+                      confidence=0.96, method="RULE")
+    L.apply_inflow_to_receivables(db, FakeInflow(500_000), res)
+    db.flush()
+
+    assert a.amount_paid_minor == 300_000
+    assert b.amount_paid_minor == 200_000, "capped at what actually arrived"
+    assert b.status == RecStatus.PARTIAL
+    rows = {}
+    for e in db.query(L.LedgerEntry).all():
+        rows[e.account] = rows.get(e.account, 0) + e.debit_minor - e.credit_minor
+    assert rows["cash:USD"] == 500_000
+    assert rows["receivable_clearing"] == -500_000
+    assert rows.get("unapplied_cash", 0) == 0
+
+
+def test_approving_an_overallocated_proposal_is_capped(db):
+    """F3: a stored proposal that over-allocates (a pre-F3 model reading) must
+    apply at most the inflow on approval; the excess stays visible in suspense."""
+    import json
+    inv = _receivable(db, number="INV-1002", amount=800_000)
+    from app.domain.matching import MatchResult
+    inflow = FakeInflow(500_000)
+    # Park the cash as a proposal first (the normal below-band path).
+    L.apply_inflow_to_receivables(
+        db, inflow, MatchResult(status="AMBIGUOUS", confidence=0.0,
+                                 method="RULE"))
+    # Overwrite the stored proposal with an over-sum allocation, as a stale or
+    # hostile model reading would have.
+    inflow.proposed_json = json.dumps({
+        "status": "MATCHED", "confidence": 0.89, "method": "LLM",
+        "reason": "model reading", "evidence": {},
+        "allocations": [{"invoice_id": inv.id, "amount_minor": 700_000}],
+    })
+    inflow.match_status = MatchStatus.PROPOSED
+    inflow.review_state = "PENDING"
+    db.flush()
+
+    L.approve_inflow(db, inflow, approved_by="david")
+    db.flush()
+
+    assert inv.amount_paid_minor == 500_000
+    assert inflow.review_state == "APPROVED"
+    rows = {}
+    for e in db.query(L.LedgerEntry).all():
+        rows[e.account] = rows.get(e.account, 0) + e.debit_minor - e.credit_minor
+    assert rows["cash:USD"] == 500_000
+    assert rows.get("unapplied_cash", 0) == 0
+    assert rows["receivable_clearing"] == -500_000
+
+
 def test_apply_overpayment_marks_overpaid(db):
     """A CONFIDENT overpayment applies, credit and all."""
     inv = _receivable(db, amount=450_000)

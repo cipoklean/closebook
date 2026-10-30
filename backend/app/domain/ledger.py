@@ -159,7 +159,9 @@ def apply_inflow_to_receivables(db_session, inflow, result) -> list[Match]:
     # (The proposal path above posts its own legs; the approval path posts from
     # suspense in `approve_inflow`.)
     legs = [("cash:" + inflow.currency, inflow.amount_minor, 0, inflow.currency)]
-    allocated = sum(a.amount_minor for a in result.allocations)
+    # F3: the cap lives in `_apply_allocations`, so the clearing and suspense
+    # legs must use what was ACTUALLY applied, not the proposal's raw sum.
+    allocated = sum(m.amount_applied_minor for m in created)
     suspense = inflow.amount_minor - allocated
     if allocated:
         legs.append(("receivable_clearing", 0, allocated, inflow.currency))
@@ -203,7 +205,15 @@ def _apply_allocations(db_session, inflow, allocations, *, confidence, method,
     # allocations to one invoice are checked against what is left after the
     # first — not against the invoice's original balance twice.
     already: dict[int, int] = {}
+    # F3: THE GRAND TOTAL IS CAPPED AT WHAT ACTUALLY ARRIVED. Allocations may
+    # sum above the inflow (a stale or hostile stored proposal); applying them
+    # all invents money. `remaining` is the budget of real money left; each
+    # allocation is trimmed to it, and the untrimmed part stays in suspense.
+    remaining = int(inflow.amount_minor)
     for alloc in allocations:
+        take = min(int(alloc.amount_minor), remaining)
+        if take <= 0:
+            continue
         inv = db_session.query(InvoiceReceivable).filter_by(
             id=alloc.invoice_id).first()
         if inv is None:
@@ -217,21 +227,22 @@ def _apply_allocations(db_session, inflow, allocations, *, confidence, method,
         # round to approving it.
         open_minor = inv.amount_minor - inv.amount_paid_minor
         open_minor -= already.get(inv.id, 0)
-        if alloc.amount_minor > open_minor:
+        if take > open_minor:
             from ..money import money_str
             raise LedgerError(
                 f"{inv.number} has only {money_str(max(0, open_minor), inv.currency)} "
-                f"left open. Applying {money_str(alloc.amount_minor, inv.currency)} "
+                f"left open. Applying {money_str(take, inv.currency)} "
                 f"would overpay it. Record this one as a refund owed, or match it "
                 f"to a different invoice.")
-        already[inv.id] = already.get(inv.id, 0) + alloc.amount_minor
-        inv.amount_paid_minor += alloc.amount_minor
+        already[inv.id] = already.get(inv.id, 0) + take
+        inv.amount_paid_minor += take
         if inv.amount_paid_minor < inv.amount_minor:
             inv.status = RecStatus.PARTIAL
         elif inv.amount_paid_minor == inv.amount_minor:
             inv.status = RecStatus.PAID
         else:
             inv.status = RecStatus.OVERPAID
+        remaining -= take
         # A CREDIT IS NOT A PAYMENT OF THIS INVOICE. This added the overpayment
         # to the invoice's paid amount, so a USD 1,200.00 invoice paid by a
         # USD 120,000.00 deposit read as having had the WHOLE 120,000.00 applied
@@ -250,14 +261,18 @@ def _apply_allocations(db_session, inflow, allocations, *, confidence, method,
             credit_to_note = credit_minor
             credit_minor = 0
 
+        evidence = dict(evidence or {})
+        if take != int(alloc.amount_minor):
+            # The proposal named more than we could apply; say so on the record.
+            evidence["capped_from"] = int(alloc.amount_minor)
         m = Match(
             inflow_id=inflow.id, invoice_receivable_id=inv.id,
-            amount_applied_minor=alloc.amount_minor,
+            amount_applied_minor=take,
             confidence=confidence,
             method=(MatchMethod[method] if method in MatchMethod.__members__
                     else MatchMethod.RULE),
             evidence_json=json.dumps(
-                {**(evidence or {}), "credit_minor": credit_to_note},
+                {**evidence, "credit_minor": credit_to_note},
                 default=str)[:2000],
         )
         db_session.add(m)
@@ -298,7 +313,7 @@ def approve_inflow(db_session, inflow, *, approved_by: str = "dashboard") -> lis
                       approved_by=approved_by, approved_from_proposal=True),
         credit_minor=int(blob.get("credit_minor") or 0))
 
-    allocated = sum(a.amount_minor for a in allocs)
+    allocated = sum(m.amount_applied_minor for m in created)
     if allocated:
         from ..timeutils import utcnow
         post(db_session, txn_id=f"inflow:{inflow.id}:approved",

@@ -9,8 +9,8 @@ import pytest
 
 from app.domain.matching import (
     Allocation, Candidate, MatchResult, fold_digits, match_inflow, normalise,
-    number_blob, token_set_ratio, try_exact, try_exact_multi, try_partial,
-    try_rule,
+    number_blob, token_set_ratio, try_exact, try_exact_multi, try_llm,
+    try_partial, try_rule,
 )
 
 
@@ -276,14 +276,38 @@ def test_llm_overallocation_is_caught_by_code():
 
 
 def test_llm_allocations_must_sum_to_inflow():
+    """F3: allocations that sum to MORE than the inflow are rejected outright —
+    approving them would apply money that never arrived. The orchestrator keeps
+    the best DETERMINISTIC reading (below the auto band) and records the model
+    attempt as escalated; the model's numbers are never applied."""
     r = match_inflow(
         700_000, "USD", {"payer_name": "", "reference_raw": "batch"},
         _needs_llm_candidates(),
         llm=StubLLM({"allocations": {"1": 7_000, "2": 5_000},
                      "confidence": 0.99, "rationale": "both"}),
     )
-    assert r.status in {"PARTIAL", "OVERPAID"}
-    assert r.confidence <= 0.9   # never a clean auto-match on a bad sum
+    assert r.method != "LLM", "the over-sum model numbers were not used"
+    assert r.confidence < 0.90, "nothing over-sum may auto-apply"
+    attempt = r.evidence["model_attempt"]
+    assert attempt["status"] == "AMBIGUOUS"
+    assert attempt["confidence"] == 0.0
+    assert "over" in attempt["reason"].lower() or \
+        "never arrived" in attempt["reason"].lower()
+
+
+def test_try_llm_rejects_over_sum_proposal_itself():
+    """F3: at the tier itself, an over-sum proposal is AMBIGUOUS with no
+    allocations — there is no OVERPAID-over-sum shape to approve any more."""
+    r = try_llm(
+        700_000, "USD", {"payer_name": "", "reference_raw": "batch"},
+        _needs_llm_candidates(),
+        StubLLM({"allocations": {"1": 7_000, "2": 5_000},
+                 "confidence": 0.99, "rationale": "both"}),
+    )
+    assert r.status == "AMBIGUOUS"
+    assert r.confidence == 0.0
+    assert not r.allocations
+    assert r.evidence.get("rule") == "model allocations exceed the inflow"
 
 
 def test_llm_currency_crossing_is_rejected():

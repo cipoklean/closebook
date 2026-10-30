@@ -614,34 +614,51 @@ def try_llm(inflow_amount_minor: int, inflow_currency: str,
     llm_band_conf = min(conf, _LLM_MAX_CONFIDENCE)   # 0.89 < 0.90 by construction
 
     if total != inflow_amount_minor:
-        # Over-allocation becomes a recorded credit; under-allocation is a
-        # partial. Neither is silently accepted as exact.
         if total > inflow_amount_minor:
-            status = "OVERPAID"
-            credit = total - inflow_amount_minor
-        else:
-            status = "PARTIAL"
-            credit = 0
+            # F3: OVER-SUM PROPOSALS ARE REJECTED OUTRIGHT. Approving one
+            # would apply money that never arrived — the allocations sum to
+            # more than the deposit — so it is not a readable answer at all.
+            # Under-sum stays a PARTIAL (the rest waits in suspense); over-sum
+            # escalates with the numbers side by side.
+            return MatchResult(
+                status="AMBIGUOUS", confidence=0.0,
+                method="LLM",
+                evidence={"rule": "model allocations exceed the inflow",
+                          "allocated": total, "inflow": inflow_amount_minor,
+                          "model_claimed_confidence": conf,
+                          "allocations": [
+                              {"invoice": by_id[a.invoice_id].number,
+                               "amount": to_major_str(a.amount_minor,
+                                                       inflow_currency)}
+                              for a in cleaned
+                          ],
+                          "rationale": rationale},
+                reason=(f"model allocated {money_str(total, inflow_currency)} "
+                        f"against an inflow of "
+                        f"{money_str(inflow_amount_minor, inflow_currency)}; "
+                        f"escalated rather than applying money that never "
+                        f"arrived"),
+            )
+        # Under-allocation is a partial: what arrived covers less than the
+        # proposal names, and the rest stays in suspense.
+        status = "PARTIAL"
+        credit = 0
         return MatchResult(
             status=status, allocations=cleaned, confidence=llm_band_conf,
             method="LLM",
-            shortfall_minor=(inflow_amount_minor - total) if status == "PARTIAL" else 0,
+            shortfall_minor=(inflow_amount_minor - total),
             credit_minor=credit,
             evidence={"rule": "allocations do not sum to the inflow",
                       "allocated": total, "inflow": inflow_amount_minor,
                       "model_claimed_confidence": conf,
-                      # What the model proposed, as re-validated. The AI-activity
-                      # screen reads this; without it a run whose allocation the
-                      # code just ACCEPTED was displayed as "the model proposed
-                      # nothing", which is the exact confusion that screen exists
-                      # to prevent.
                       "allocations": [
                           {"invoice": by_id[a.invoice_id].number,
-                           "amount": to_major_str(a.amount_minor, inflow_currency)}
+                           "amount": to_major_str(a.amount_minor,
+                                                   inflow_currency)}
                           for a in cleaned
                       ],
                       "rationale": rationale},
-            reason=f"model allocations {'over' if credit else 'under'}-allocate the inflow",
+            reason="model allocations under-allocate the inflow",
         )
 
     return MatchResult(
