@@ -130,6 +130,67 @@ def test_single_open_invoice_overpayer_proposes_capped_allocation():
     assert r.confidence < 0.90, "overpayments never auto-apply"
 
 
+def test_unknown_payer_no_reference_is_not_pinned_to_an_invoice():
+    """F1 leftover: an unrecognized payer with no reference must not be pinned
+    to one invoice by the overpayment tier. Alpha INV-C1 USD 400, Beta
+    INV-C2 USD 600, USD 1,000 from 'Mystery Payer' with an empty reference."""
+    alpha = _c(1, "INV-C1", "Alpha", "USD", 400_00)
+    beta = _c(2, "INV-C2", "Beta", "USD", 600_00)
+    r = try_partial(1_000_00, "USD", "Mystery Payer", [alpha, beta],
+                    reference="")
+    assert r is not None, "the tier must still answer"
+    assert r.status in ("AMBIGUOUS", "UNMATCHED"), r.status
+    assert r.allocations == [], "no invoice may be named by an unknown sender"
+    text = r.reason.lower()
+    assert "suspense" in text, r.reason
+    # The amounts do fit across the two customers, so the honest reading names
+    # the possibility without choosing it.
+    assert "inv-c1" in text and "inv-c2" in text, r.reason
+
+
+def test_unknown_payer_overpayment_via_orchestrator_is_not_pinned():
+    alpha = _c(1, "INV-C1", "Alpha", "USD", 400_00)
+    beta = _c(2, "INV-C2", "Beta", "USD", 600_00)
+    r = match_inflow(1_000_00, "USD",
+                     {"payer_name": "Mystery Payer", "reference_raw": ""},
+                     [alpha, beta])
+    assert r.status != "OVERPAID", r.status
+    assert r.allocations == []
+
+
+def test_single_invoice_unknown_payer_empty_reference_is_ambiguous():
+    inv = _c(9, "INV-1009", "Lumen Stores", "USD", 1_000_00)
+    r = try_partial(1_200_00, "USD", "Mystery Payer", [inv], reference="")
+    assert r.status == "AMBIGUOUS", r.status
+    assert r.allocations == []
+    assert "suspense" in r.reason.lower(), r.reason
+
+
+def test_reference_naming_the_invoice_gates_the_overpayment_tier():
+    inv = _c(9, "INV-1009", "Lumen Stores", "USD", 1_000_00)
+    r = try_partial(1_200_00, "USD", "Mystery Payer", [inv],
+                    reference="INV-1009")
+    assert r.status == "OVERPAID", r.status  # the reference names it
+    assert r.confidence < 0.90, "overpayments never auto-apply"
+
+
+def test_unapplied_proposal_never_says_credit_recorded():
+    """A proposal is not an application; 'credit recorded' is a lie until the
+    allocation is applied. The reason must say what WOULD happen."""
+    inv = _c(9, "INV-1009", "Lumen Stores", "USD", 1_000_00)
+    r = try_rule(1_200_00, "USD", "Lumen Stores", [inv])
+    assert r.status == "OVERPAID"
+    assert "credit recorded" not in r.reason.lower(), r.reason
+    assert "would leave" in r.reason.lower(), r.reason
+    assert "as credit if approved" in r.reason.lower(), r.reason
+
+    r2 = try_partial(1_200_00, "USD", "Lumen Stores", [inv],
+                     reference="INV-1009")
+    assert r2.status == "OVERPAID"
+    assert "credit recorded" not in r2.reason.lower(), r2.reason
+    assert "would leave" in r2.reason.lower(), r2.reason
+
+
 def test_deferral_reason_calls_it_a_safety_cushion():
     """F7: user-facing copy says safety cushion, never reserve floor."""
     from app.domain.planner import CashPosition, Payable, build_plan

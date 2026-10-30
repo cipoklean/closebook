@@ -297,7 +297,7 @@ def try_rule(inflow_amount_minor: int, inflow_currency: str,
                               "credit_minor": over,
                               "name_similarity": round(sim, 3)},
                     reason=(f"overpayment of {over/100:.2f} against {c.number}; "
-                            f"credit recorded (any refund needs approval)"),
+                            f"would leave {over/100:.2f} as credit if approved"),
                 )
             return MatchResult(
                 status="MATCHED",
@@ -384,8 +384,29 @@ def try_exact_multi(inflow_amount_minor: int, inflow_currency: str,
 
 
 # ---- tier 3: PARTIAL / MULTI-INVOICE subset-sum -------------------------
+def _fit_subsets(pool: list[Candidate], inflow_amount_minor: int) -> list[str]:
+    """Subsets of two or more open invoices whose amounts sum exactly to the
+    inflow — used to name WHAT the money could cover when we do not know WHO
+    sent it. Bounded to 12 invoices, capped at the first four fits."""
+    out: list[str] = []
+    for mask in range(1, 1 << len(pool)):
+        chosen = [pool[i] for i in range(len(pool)) if mask & (1 << i)]
+        if len(chosen) < 2:
+            continue
+        if sum(c.amount_open_minor for c in chosen) == inflow_amount_minor:
+            custs = {c.customer_name for c in chosen}
+            label = " + ".join(c.number for c in chosen)
+            if len(custs) > 1:
+                label += f" ({len(custs)} customers)"
+            out.append(label)
+            if len(out) == 4:
+                break
+    return out
+
+
 def try_partial(inflow_amount_minor: int, inflow_currency: str,
-                payer_name: str, candidates: Iterable[Candidate]) -> Optional[MatchResult]:
+                payer_name: str, candidates: Iterable[Candidate],
+                reference: str = "") -> Optional[MatchResult]:
     """Subset-sum over the payer's open invoices, allowing a bank-fee shortfall."""
     pool = [c for c in candidates if c.currency == inflow_currency]
     if not pool:
@@ -477,6 +498,44 @@ def try_partial(inflow_amount_minor: int, inflow_currency: str,
         # refund obligation, and a refund always needs human approval (spec
         # §5.2). It must never auto-apply.
         over = -diff
+        # F1 leftover: THE OVERPAYMENT TIER NEEDS THE SAME GATE AS SUBSET-SUM.
+        # Amount alone must not pin money to one invoice. An overpayment names
+        # a customer, and an unrecognized payer with no reference gives us no
+        # basis to choose one — so it waits in suspense with an honest reason.
+        # The gate is a recognized payer (similarity >= 0.90) or a reference
+        # that names THIS invoice.
+        sim_c = (token_set_ratio(payer_name, c.customer_name)
+                 if payer_name else 0.0)
+        referenced = bool(reference) and normalise(c.number) in normalise(reference)
+        if sim_c < 0.90 and not referenced:
+            fits = _fit_subsets(pool, inflow_amount_minor)
+            who = payer_name or "the sender"
+            if fits:
+                return MatchResult(
+                    status="AMBIGUOUS", allocations=[], confidence=0.0,
+                    method="RULE",
+                    evidence={"rule": "overpayment of an unidentified sender",
+                              "invoice": c.number, "over_minor": over,
+                              "could_be": fits,
+                              "payer_similarity": round(sim_c, 3),
+                              "referenced": False},
+                    reason=(f"amount {money_str(inflow_amount_minor, inflow_currency)} "
+                            f"could be {fits[0]}; nobody on the books matches "
+                            f"{who} and the reference is empty. Who sent it? "
+                            f"It waits in suspense"),
+                )
+            return MatchResult(
+                status="AMBIGUOUS", allocations=[], confidence=0.0,
+                method="RULE",
+                evidence={"rule": "overpayment of an unidentified sender",
+                          "invoice": c.number, "over_minor": over,
+                          "payer_similarity": round(sim_c, 3),
+                          "referenced": False},
+                reason=(f"nobody on the books matches {who} and the reference "
+                        f"is empty; "
+                        f"{money_str(inflow_amount_minor, inflow_currency)} "
+                        f"waits in suspense"),
+            )
         return MatchResult(
             status="OVERPAID",
             allocations=[Allocation(c.invoice_id, c.amount_open_minor)],
@@ -486,8 +545,8 @@ def try_partial(inflow_amount_minor: int, inflow_currency: str,
             evidence={"rule": "inflow exceeds the open balance",
                       "invoice": c.number, "credit_minor": over,
                       "payer_similarity": round(best_sim, 3)},
-            reason=f"overpayment of {over/100:.2f} against {c.number}; "
-                   f"credit recorded (any refund needs approval)",
+            reason=f"overpayment of {over/100:.2f} against {c.number}; would leave "
+                   f"{over/100:.2f} as credit if approved",
         )
     return None
 
@@ -718,7 +777,8 @@ def match_inflow(inflow_amount_minor: int, inflow_currency: str,
                  lambda: try_rule(inflow_amount_minor, inflow_currency, payer, candidates),
                  lambda: try_exact_multi(inflow_amount_minor, inflow_currency, candidates,
                                          payer_name=payer),
-                 lambda: try_partial(inflow_amount_minor, inflow_currency, payer, candidates)):
+                 lambda: try_partial(inflow_amount_minor, inflow_currency, payer,
+                                     candidates, reference=reference)):
         res = tier()
         if res is None:
             continue
