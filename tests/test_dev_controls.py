@@ -165,9 +165,10 @@ class TestScheduledReadsAsInFlight:
         assert tone == "info"
         assert "SCHEDULED" not in words
 
-    def test_the_controls_are_offered_while_it_is_scheduled(self):
+    def test_the_controls_are_offered_while_it_is_scheduled(self, monkeypatch):
         from app.ui import _dev_controls
 
+        monkeypatch.setenv("CLOSEBOOK_DEV_ROUTES", "1")
         html = _dev_controls("tr_1", "SCHEDULED")
         assert "Settle" in html and "Fail" in html, (
             "a scheduled transfer is in flight, so the controls must be there: "

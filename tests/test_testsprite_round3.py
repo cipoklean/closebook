@@ -234,24 +234,27 @@ class TestTheTrackerOnlyMarksWhatStopped:
 class TestSandboxRowsNameTheirPayment:
     """Item 3. "Settle" with no subject."""
 
-    def test_the_row_names_the_payment(self):
+    def test_the_row_names_the_payment(self, monkeypatch):
         from app.ui import _dev_controls
 
+        monkeypatch.setenv("CLOSEBOOK_DEV_ROUTES", "1")
         html = _dev_controls("tr-abc", "PROCESSING",
                              "PO-7001 · Atlanta Packaging · USD 1,800.00")
         assert "PO-7001" in html and "Atlanta Packaging" in html
         assert "USD 1,800.00" in html
 
-    def test_each_button_carries_a_per_transfer_testid(self):
+    def test_each_button_carries_a_per_transfer_testid(self, monkeypatch):
         from app.ui import _dev_controls
 
+        monkeypatch.setenv("CLOSEBOOK_DEV_ROUTES", "1")
         html = _dev_controls("tr-abc", "PROCESSING", "PO-1")
         for what in ("settle", "fail", "return"):
             assert f'data-testid="sandbox-{what}-tr-abc"' in html, what
 
-    def test_the_row_is_addressable(self):
+    def test_the_row_is_addressable(self, monkeypatch):
         from app.ui import _dev_controls
 
+        monkeypatch.setenv("CLOSEBOOK_DEV_ROUTES", "1")
         html = _dev_controls("tr-abc", "PROCESSING", "PO-1")
         assert 'id="sandbox-row-tr-abc"' in html
 

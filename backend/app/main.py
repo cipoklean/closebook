@@ -343,7 +343,18 @@ async def dev_transfer_transition(transfer_id: str, request: Request):
     if guard:
         return _back(request, tab="money-out", err=guard)
 
+    # F2: dev routes are off by default, and even when enabled they need the
+    # operator PIN. The sandbox controls move a transfer's state; neither may
+    # be reachable without an explicit person.
+    if not _dev_routes_enabled():
+        return _back(request, tab="money-out",
+                     err="The sandbox controls are disabled on this instance. "
+                         "Nothing changed.")
     b = await _read_body(request)
+    refusal = _check_pin(str(b.get("pin") or ""))
+    if refusal:
+        return _back(request, tab="money-out",
+                     err=refusal + " Nothing changed.")
     what = str(b.get("what") or "").strip().lower()
     # FAILED needs a failure_type, and the two reasons are different incidents:
     # a beneficiary the bank rejected is fixable, a bank RETURN is money coming
@@ -1307,6 +1318,25 @@ async def money_in_simulate(request: Request):
             return _back(request, tab="money-in",
                          err="Amount has to be more than zero.")
 
+        # F2: simulated deposits are capped at USD 50,000.00. The sandbox
+        # account is shared and the button is open on purpose for judges; a
+        # huge deposit is not a thing a demo needs, and it lets one person's
+        # test drown everyone else's book.
+        from .domain.policy import usd_value_minor
+        from .domain.treasury import DEMO_RATES
+
+        usd_minor = usd_value_minor(amount_minor, ccy, DEMO_RATES)
+        if usd_minor <= 0 and ccy != "USD":
+            return _back(request, tab="money-in",
+                         err=("Cannot price this currency against USD, so a "
+                              "simulated deposit in it is refused. Use USD or "
+                              "GBP."))
+        if usd_minor > 5_000_000:
+            return _back(request, tab="money-in",
+                         err=("Simulated deposits are capped at "
+                              "USD 50,000.00. This one is "
+                              f"{money_str(usd_minor, 'USD')}."))
+
         deposit = simulate_deposit(
             client, global_account_id=ga_id, amount_minor=amount_minor,
             currency=ccy, payer_name=payer, reference=reference)
@@ -1387,6 +1417,18 @@ def _require_sandbox() -> Optional[str]:
     return None
 
 
+def _dev_routes_enabled() -> bool:
+    """Whether the sandbox /dev/* controls are on for this instance.
+
+    F2: OFF BY DEFAULT. Production refuses /dev/* outright; only the tester
+    instance opts in (`CLOSEBOOK_DEV_ROUTES=1` in scripts/testsprite.sh). A
+    route that moves transfer states on a public URL must not be reachable by
+    accident.
+    """
+    return os.environ.get("CLOSEBOOK_DEV_ROUTES", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def _back(request: Request, tab: str = "setup", ok: str = "", err: str = ""):
     """Return ONE message, in whatever shape the caller can actually read.
 
@@ -1432,6 +1474,9 @@ async def setup_settings(request: Request):
     from .domain.settings_store import SettingsRefused, save
 
     b = await _read_body(request)
+    refusal = _check_pin(str(b.get("pin") or ""))
+    if refusal:
+        return _back(request, tab="setup", err=refusal + " Nothing changed.")
     try:
         with _database().session_scope() as s:
             save(s, budget_currency=str(b.get("budget_currency") or "USD"),
@@ -1527,6 +1572,9 @@ async def setup_suppliers(request: Request):
         return _back(request, tab="setup", err=guard)
 
     b = await _read_body(request)
+    refusal = _check_pin(str(b.get("pin") or ""))
+    if refusal:
+        return _back(request, tab="setup", err=refusal + " Nothing changed.")
     form = {k: (v if isinstance(v, str) else "") for k, v in b.items()}
     try:
         with _database().session_scope() as s:
@@ -1566,6 +1614,9 @@ async def setup_supplier_beneficiary(supplier_id: int, request: Request):
         return _back(request, err=guard)
 
     b = await _read_body(request)
+    refusal = _check_pin(str(b.get("pin") or ""))
+    if refusal:
+        return _back(request, err=refusal + " Nothing changed.")
     form = {k: (v if isinstance(v, str) else "") for k, v in b.items()}
     with _database().session_scope() as s:
         sup = s.get(Supplier, supplier_id)
@@ -1622,6 +1673,9 @@ async def workspace_reset(request: Request):
     from .domain.workspace import WorkspaceRefused, archive_and_reset
 
     b = await _read_body(request)
+    refusal = _check_pin(str(b.get("pin") or ""))
+    if refusal:
+        return _back(request, err=refusal + " Nothing changed.")
     try:
         arch = archive_and_reset(_database(), confirm=str(b.get("confirm") or ""))
         total = sum(arch.cleared.values())

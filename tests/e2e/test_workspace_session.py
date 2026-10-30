@@ -303,7 +303,8 @@ class TestABookStaysItsBook:
 
         # ---- a supplier (the beneficiary call is refused: no credentials)
         submit(page, "/setup/suppliers",
-               {"name": SUPPLIER, "country": "US", "currency": "USD"})
+               {"name": SUPPLIER, "country": "US", "currency": "USD",
+                "pin": PIN})
         assert_still_in_book(page, "a", tester, before)
         page.goto(f"{base}/app?tab=setup", wait_until="load")
         assert SUPPLIER in page.inner_text("body"), "the supplier is not in book a"

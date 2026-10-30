@@ -1910,8 +1910,12 @@ def _dev_controls(transfer_id: str, live: str, label: str = "") -> str:
     """
     # ONE lifecycle definition, shared with the route that handles the press.
     # Two copies would drift, and the failure mode is a button the API refuses.
-    from .main import _dev_controls_are_offered
+    from .main import _dev_controls_are_offered, _dev_routes_enabled
 
+    # F2: when the instance has dev routes off (production), do not render the
+    # controls at all — a button that always fails is worse than no button.
+    if not _dev_routes_enabled():
+        return ""
     if not _dev_controls_are_offered(live):
         return ""
     ref = html.escape(transfer_id, quote=True)
@@ -1922,21 +1926,25 @@ def _dev_controls(transfer_id: str, live: str, label: str = "") -> str:
             ("fail", "Fail", "beneficiary details rejected"),
             ("return", "Return", "the beneficiary bank sent it back")):
         buttons += (
-            f'<form method="post" action="{action}" style="display:inline">'
-            f'<input type="hidden" name="what" value="{value}">'
-            # PER-TRANSFER TESTIDS. Several of these panels can be on one page,
-            # and "the Settle button" is ambiguous the moment there is more than
-            # one payment -- a test that has to guess which one it pressed is
-            # not testing the transfer it thinks it is.
-            f'<button class="x-btn x-btn--sm" type="submit" title="{e(title)}" '
-            f'data-testid="sandbox-{value}-{ref}">{e(text)}</button></form>')
+            f'<button class="x-btn x-btn--sm" type="submit" '
+            f'formaction="{action}" name="what" value="{value}" '
+            f'title="{e(title)}" '
+            f'data-testid="sandbox-{value}-{ref}">{e(text)}</button>')
+    # ONE PIN PER TRANSFER, NOT PER BUTTON. The three buttons share one form
+    # (each carries its own formaction), so the operator types their PIN once.
+    pin = (
+        f'<span class="x-pin"><label for="pin-dev-{ref}">Your PIN</label>'
+        f'<input id="pin-dev-{ref}" name="pin" type="password" '
+        f'style="width:168px" '
+        f'inputmode="numeric" maxlength="12" autocomplete="off"></span>')
     # WHICH PAYMENT IS THIS ROW ABOUT? The panel collected every control on the
     # page, so without this a Settle button was a button with no subject.
     who = (f'<span class="x-devlabel" data-testid="sandbox-who-{ref}">'
            f'{e(label)}</span>' if label else "")
     return (f'<div class="x-meta x-devrow" id="sandbox-row-{ref}" '
             f'data-transfer="{ref}">{who}'
-            f'<span class="x-pills">{buttons}</span></div>')
+            f'<form method="post" action="{action}" style="display:inline">'
+            f'{pin}<span class="x-pills">{buttons}</span></form></div>')
 
 
 
@@ -3425,6 +3433,10 @@ def _setup(c: dict) -> str:
         + _field("fx_tolerance_pct", "FX drift headroom (%)",
                  value=f'{st.get("fx_tolerance_pct", 0.5)}',
                  hint="Extra room a conversion leaves for a rate move.")
+        + f'<div class="x-pin x-span-6"><label for="pin-settings">Your PIN</label>'
+          f'<input id="pin-settings" name="pin" type="password" '
+          f'style="width:168px" '
+          f'inputmode="numeric" maxlength="12" autocomplete="off"></div>'
         + f'<div class="x-submit"><button class="x-btn x-btn--primary" '
           f'type="submit">Save settings</button>'
           f'<span class="x-hint">Now: keep {e(st.get("reserve_floor") or "?")} '
@@ -3528,6 +3540,10 @@ def _setup(c: dict) -> str:
         + _field("state", "State", span="x-span-2", hint="US only")
         + _field("bank_account_category", "Account category", span="x-span-3",
                  value="Checking", hint='USD only: "Checking" or "Savings"')
+        + '<div class="x-pin x-span-6"><label for="pin-supplier">Your PIN</label>'
+          '<input id="pin-supplier" name="pin" type="password" '
+          'style="width:168px" '
+          'inputmode="numeric" maxlength="12" autocomplete="off"></div>'
         + '<div class="x-submit">'
           '<button class="x-btn x-btn--primary" type="submit">'
           'Validate and create beneficiary</button>'
@@ -3598,6 +3614,10 @@ def _setup(c: dict) -> str:
           "onsubmit=\"return confirm('Archive and empty this workspace?')\">"
         + _field("confirm", "Type START FRESH to confirm", span="x-span-6",
                  placeholder="START FRESH", required=True)
+        + '<div class="x-pin x-span-6"><label for="pin-reset">Your PIN</label>'
+          '<input id="pin-reset" name="pin" type="password" '
+          'style="width:168px" '
+          'inputmode="numeric" maxlength="12" autocomplete="off"></div>'
         + '<div class="x-submit"><button class="x-btn" type="submit">'
           'Archive and start fresh</button></div></form></details>')))
 

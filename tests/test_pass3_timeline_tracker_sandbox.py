@@ -283,10 +283,11 @@ class TestTheSandboxIsFenced:
         assert _sandbox_panel() == ""
         assert _sandbox_panel(simulate="   ") == ""
 
-    def test_the_dev_controls_keep_their_route_and_testids(self):
+    def test_the_dev_controls_keep_their_route_and_testids(self, monkeypatch):
         """The user's rule: existing data-testids keep working inside it."""
         from app.ui import _dev_controls
 
+        monkeypatch.setenv("CLOSEBOOK_DEV_ROUTES", "1")
         html = _dev_controls("tr-1", "PROCESSING")
         assert "/dev/transfers/tr-1/transition" in html
         assert 'name="what"' in html

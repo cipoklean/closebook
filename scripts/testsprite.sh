@@ -102,6 +102,10 @@ export CLOSEBOOK_INSTANCE="${CLOSEBOOK_INSTANCE:-testsprite}"
 export CLOSEBOOK_WORKSPACES=1
 export CLOSEBOOK_WORKSPACE_ROOT="${ROOT}/data/workspaces"
 export CLOSEBOOK_INGEST_UNCLAIMED=0
+# F2: the sandbox /dev/* controls are ON here and OFF everywhere else.
+# Production refuses them outright; the tester is the instance whose whole job
+# is driving transfer states.
+export CLOSEBOOK_DEV_ROUTES=1
 # ONE PIN CONCEPT. The gate reads DEMO_APPROVER_PIN and knows nothing about
 # which instance it is in; the VALUE is what differs. Keeping the name in .env
 # as TESTSPRITE_PIN and pointing the gate at it here means the code never grows

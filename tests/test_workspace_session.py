@@ -236,14 +236,17 @@ class TestEveryRouteResolvesTheBook:
         assert counts()["approval"] == before["approval"], (
             "an approval POSTed with no ?ws= was recorded against the shared book")
 
-    def test_a_sandbox_control_lands_in_the_cookie_book(self, workspaces):
+    def test_a_sandbox_control_lands_in_the_cookie_book(self, workspaces,
+                                                        monkeypatch):
         before = counts()
         before_a = counts("aaa")
         c = opened("aaa")
+        monkeypatch.setenv("CLOSEBOOK_DEV_ROUTES", "1")
         # A real sandbox control route, refused locally (before any network
         # call) so this test stays provider-free. What is under test is WHERE
         # the press landed, not what the sandbox answered.
-        r = c.post("/dev/transfers/none/transition", json={"what": "nope"},
+        r = c.post("/dev/transfers/none/transition",
+                   json={"what": "nope", "pin": PIN},
                    headers={"Accept": "application/json"})
         assert r.status_code == 200
         assert "Pick settle, fail or return" in r.text, r.text

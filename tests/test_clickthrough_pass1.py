@@ -146,8 +146,10 @@ class TestFailuresSpeakPlainly:
         monkeypatch.setattr(TR, "Transfers", Boom)
         monkeypatch.setattr(SIM, "Simulation", Boom)
         monkeypatch.setattr(M, "_require_sandbox", lambda: "")
+        monkeypatch.setenv("CLOSEBOOK_DEV_ROUTES", "1")
         c = TestClient(M.app, raise_server_exceptions=False)
-        body = c.post("/dev/transfers/tr-1/transition", data={"what": "settle"},
+        body = c.post("/dev/transfers/tr-1/transition",
+                      data={"what": "settle", "pin": PIN},
                       headers={"Accept": "application/json"}).json()
         assert body["ok"] is False
         assert body["err"] == SETTLE_REFUSED, body

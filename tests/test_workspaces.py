@@ -66,12 +66,18 @@ class TestTwoBooks:
         assert "Only In A" in get("aaa", "/app?tab=setup").text
         assert "Only In A" not in get("bbb", "/app?tab=setup").text
 
-    def test_each_book_has_its_own_settings(self, workspaces):
-        # the route takes MAJOR-unit strings under these names
+    def test_each_book_has_its_own_settings(self, workspaces, monkeypatch):
+        # the route takes MAJOR-unit strings under these names, and now the
+        # operator PIN as well
+        from pydantic import SecretStr
+        from app.config import get_settings
+        monkeypatch.setattr(get_settings(), "demo_approver_pin",
+                            SecretStr("ws-pin"), raising=False)
         r = post("aaa", "/setup/settings", {"budget_currency": "USD",
                                             "budget": "40000",
                                             "reserve_floor": "5000",
-                                            "auto_pay_limit": "9000"})
+                                            "auto_pay_limit": "9000",
+                                            "pin": "ws-pin"})
         assert r.status_code < 500
         a = get("aaa", "/state").json()
         b = get("bbb", "/state").json()
