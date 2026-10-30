@@ -281,6 +281,24 @@ def try_rule(inflow_amount_minor: int, inflow_currency: str,
             or inflow_amount_minor >= c.amount_open_minor
         )
         if sim >= 0.9 and amount_plausible:
+            # F4: A RECOGNIZED PAYER OVERPAYING THEIR ONLY OPEN INVOICE. The
+            # proposal must be capped at the open balance with the rest as
+            # credit — proposing the whole deposit made approve refuse it as
+            # an overpayment, a dead end. Overpayments never auto-apply.
+            if inflow_amount_minor > c.amount_open_minor:
+                over = inflow_amount_minor - c.amount_open_minor
+                return MatchResult(
+                    status="OVERPAID",
+                    allocations=[Allocation(c.invoice_id, c.amount_open_minor)],
+                    confidence=0.85, method="RULE",
+                    credit_minor=over,
+                    evidence={"rule": "the payer overpays their only open invoice",
+                              "invoice": c.number,
+                              "credit_minor": over,
+                              "name_similarity": round(sim, 3)},
+                    reason=(f"overpayment of {over/100:.2f} against {c.number}; "
+                            f"credit recorded (any refund needs approval)"),
+                )
             return MatchResult(
                 status="MATCHED",
                 allocations=[Allocation(c.invoice_id, inflow_amount_minor)],

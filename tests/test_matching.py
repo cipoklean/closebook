@@ -116,6 +116,19 @@ def test_rule_single_invoice_fires_on_plausible_amount():
     assert r.confidence == 0.85  # below auto threshold: approval, not auto
 
 
+def test_single_open_invoice_overpayer_proposes_capped_allocation():
+    """F4: a recognized payer overpaying their single open invoice must get a
+    proposal capped at the open balance with the rest as credit — not a full-
+    amount proposal that approve would refuse as an overpayment."""
+    cands = [_c(9, "INV-0099", "Lumen Stores", "USD", 500_000)]
+    r = try_rule(600_000, "USD", "Lumen Stores", cands)
+    assert r is not None
+    assert r.status == "OVERPAID"
+    assert [a.amount_minor for a in r.allocations] == [500_000]
+    assert r.credit_minor == 100_000
+    assert r.confidence < 0.90, "overpayments never auto-apply"
+
+
 def test_rule_high_confidence_on_fuzzy_payer_and_amount():
     r = try_rule(450_000, "USD", "Lumen Stores", [LUMEN])
     assert r.confidence >= 0.9

@@ -389,9 +389,12 @@ def record_and_match(session, *, deposit_id: str, currency: str,
                 open_minor = max(0, target.amount_minor - target.amount_paid_minor)
                 take = min(inflow.amount_minor, open_minor)
                 applied = take
+                # The matcher's credit_minor (e.g. an OVERPAID reading) describes
+                # the ORIGINAL reading, not this forced, capped one; any leftover
+                # is accounted below as credit against the settled invoice.
                 result = replace(
                     result, allocations=[_Alloc(target.id, take)], confidence=1.0,
-                    method="RULE",
+                    method="RULE", credit_minor=0, shortfall_minor=0,
                     status=("MATCHED" if take == open_minor else "PARTIAL"))
             leftover = inflow.amount_minor - applied
             if leftover > 0:
