@@ -144,12 +144,58 @@ class TestWhatMayMoveWithoutAHuman:
         assert "4,200.00" in held[0].detail, \
             "the reason must carry the number that actually decides it"
 
-    def test_a_payment_over_the_limit_needs_a_human_not_a_decision(self):
+    def test_an_over_limit_payment_needs_a_human_not_a_decision(self):
         db = _wire(get_default_db(), amount="9000.00", limit="2500")
         run = _run(db, source="t", dry_run=True)
         assert not clear_steps(run.plan)
         v = next(v for v in run.verdicts if v.action == ACT_PAY)
         assert v.outcome == "HELD"
+
+
+class TestApprovedButUnsentBillIsChargedOnce:
+    def test_approved_over_limit_bill_with_exact_cash_is_clear_and_sends(self):
+        """F8: an approved-but-unsent bill is charged exactly once. The bill is
+        over the auto-pay limit, so without the stored approval it must be
+        held; with it, the limit is cleared and the cash is enough for exactly
+        one charge (floor + amount), so the step is clear and the conductor
+        sends it. A phantom second charge would leave it short and defer it."""
+        from app.domain.planner import CashPosition, Payable, build_plan
+        from app.domain.policy import BudgetSettings
+
+        pos = CashPosition(
+            balances={"USD": 8_000_00},       # floor 5000 + bill 3000
+            budget_currency="USD",
+            floor_minor=5_000_00,
+            rates={"USD": Decimal("1")},
+        )
+        bill = Payable(number="PO-1", supplier="S", currency="USD",
+                       amount_minor=3_000_00, has_valid_approval=True)
+        plan = build_plan([bill], pos,
+                          BudgetSettings(auto_pay_limit_usd=Decimal("2500")))
+        pay = [s for s in plan.steps if s.action == ACT_PAY]
+        assert pay, plan.summary()
+        assert not pay[0].blockers, pay[0].blockers
+        assert not pay[0].needs_approval, "the stored approval clears the limit"
+        # And the conductor agrees: it sends, it does not hold.
+        assert any(s.action == ACT_PAY for s in clear_steps(plan))
+
+    def test_without_the_approval_the_same_bill_is_held(self):
+        from app.domain.planner import CashPosition, Payable, build_plan
+        from app.domain.policy import BudgetSettings
+
+        pos = CashPosition(
+            balances={"USD": 8_000_00},
+            budget_currency="USD",
+            floor_minor=5_000_00,
+            rates={"USD": Decimal("1")},
+        )
+        bill = Payable(number="PO-1", supplier="S", currency="USD",
+                       amount_minor=3_000_00)
+        plan = build_plan([bill], pos,
+                          BudgetSettings(auto_pay_limit_usd=Decimal("2500")))
+        pay = [s for s in plan.steps if s.action == ACT_PAY]
+        assert pay[0].needs_approval
+        assert not [s for s in clear_steps(plan) if s.action == ACT_PAY]
 
     def test_defer_and_escalate_never_move_money(self):
         steps = [Step(action=ACT_DEFER, reason="wait", payable_number="PO-1"),
