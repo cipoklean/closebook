@@ -145,11 +145,19 @@ def main() -> None:
     assert_ok(not paid, "no invoice auto-applied across customers", str(paid))
     # The deposit's own answer is the authoritative one: it must have been
     # read BELOW the automatic threshold and nothing applied — not MATCHED
-    # at 0.91 across the two customers' invoices.
+    # at 0.91 across the two customers' invoices. And with an unknown sender
+    # and an empty reference it must NOT be pinned to either invoice, or say
+    # "credit recorded" (F1 leftover).
     msg = (d.get("message") or "").lower()
     assert_ok("nothing has been applied" in msg
               and "below the automatic threshold" in msg,
               "inflow held for a human, nothing applied", msg[:300])
+    assert_ok("overpayment" not in msg,
+              "unknown sender is not pinned to one invoice", msg[:300])
+    assert_ok("credit recorded" not in msg,
+              "nothing that was not applied is called recorded credit", msg[:300])
+    assert_ok("suspense" in msg,
+              "the money waits in suspense", msg[:300])
 
     # ---------------- F2: route gates + deposit cap ------------------------
     print("F2: dev/settings gates and the deposit cap")
