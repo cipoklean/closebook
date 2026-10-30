@@ -172,7 +172,10 @@ class TestTheCurrencyIsVisible:
             cash_minor=1_000_00, committed_this_run_minor=250_00, floor_minor=50_00))
         label = re.search(r'aria-label="([^"]+)"', html).group(1)
         assert "GBP" in label
-        assert "promised" in label and "reserve floor" in label
+        # RENAMED ON PURPOSE (run 14): the label says "safety cushion"
+        # everywhere else a reader meets this figure, and the same two facts
+        # are still named.
+        assert "promised" in label and "safety cushion" in label
         assert "over-committed" in label or "free to spend" in label
 
     def test_the_bars_are_not_confusable(self):

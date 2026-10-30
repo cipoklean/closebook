@@ -586,6 +586,16 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
 
         # --- 3. the amount we actually move (rail fee included) -----------
         move_minor = total_payout_minor(p.amount_minor, p.currency, p.payout_method)
+        # A BILL NEVER RESERVES AGAINST ITSELF. An approved-but-unsent payment
+        # is already inside `in_flight`, so its amount is off `working` before
+        # this loop starts -- and then charging `move_minor` again while
+        # evaluating the same bill took it off twice: a USD 2,600 bill against
+        # USD 10,000 reported "would leave cash USD 4,800.00" when 2,600 of
+        # that 4,800 was the bill itself. The amount is still DISPLAYED; it is
+        # simply not spent a second time.
+        already_reserved = bool(getattr(p, "has_valid_approval", False)) and (
+            int((pos.in_flight or {}).get(p.currency.upper(), 0)) >= move_minor)
+        chargeable_minor = 0 if already_reserved else move_minor
         fee_txt = ""
         if move_minor != p.amount_minor:
             fee_txt = (f" (incl. {money_str(move_minor - p.amount_minor, p.currency)} "
@@ -635,8 +645,10 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
 
             sell_minor = _fx_sell_needed(move_minor, p.currency, rate,
                                          fx_tolerance_pct)
+            chargeable_sell = 0 if already_reserved else sell_minor
             bs, bc = _blocked_reason(
-                needed_minor=sell_minor, available_after=_available(sell_minor),
+                needed_minor=chargeable_sell,
+                available_after=_available(chargeable_sell),
                 currency_held=working.get(bccy, 0), currency=bccy,
                 floor_minor=floor_minor, forecast=pos.forecast,
                 what=f"buy {money_str(move_minor, p.currency)} for {p.number}",
@@ -673,7 +685,7 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
         # The cost to the budget currency is what actually leaves it: a payout in
         # a currency we already hold does not touch USD, so it does not consume
         # the USD budget.
-        pay_cost = move_minor if p.currency.upper() == bccy else 0
+        pay_cost = (chargeable_minor if p.currency.upper() == bccy else 0)
         bs, bc = _blocked_reason(
             needed_minor=pay_cost,
             available_after=_available(pay_cost),

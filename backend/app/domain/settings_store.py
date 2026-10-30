@@ -153,7 +153,7 @@ def save(session, *, budget_currency: str, reserve_floor: str,
         floor = to_minor(reserve_floor, ccy)
     except Exception:
         raise SettingsRefused(
-            f"The reserve floor has to be a number, like 5000. "
+            f"The safety cushion has to be a number, like 5000. "
             f"Got {reserve_floor!r}.") from None
     try:
         limit = to_minor(auto_pay_limit, ccy)

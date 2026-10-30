@@ -293,3 +293,65 @@ class TestNoStaleCaptionAfterApproval:
         text = " ".join(notes)
         assert "safety cushion" in text, text
         assert "reserve floor" not in text, text
+
+
+# --------------------------------------------------------------------------- #
+# 3. a bill never reserves against itself, and nothing says "reserve floor"
+# --------------------------------------------------------------------------- #
+class TestABillDoesNotReserveAgainstItself:
+    def test_an_approved_bill_already_in_flight_is_not_charged_twice(self):
+        """USD 10,000, a USD 2,600 bill already reserved: nothing is short.
+
+        The card said "paying it would leave cash USD 4,800.00, below the
+        USD 5,000.00 floor" -- 2,600 of that 4,800 was the bill itself, counted
+        once as committed and once as the payment.
+        """
+        from app.domain.planner import CashPosition, Payable, build_plan
+
+        pos = CashPosition(balances={"USD": 1_000_000},
+                           in_flight={"USD": 260_000},   # the approved bill
+                           budget_currency="USD", floor_minor=500_000)
+        bill = Payable(number="PO-2600", supplier="Atlanta Packaging",
+                       currency="USD", amount_minor=260_000,
+                       payout_method="LOCAL", has_valid_approval=True)
+        plan = build_plan([bill], pos, budget=_budget())
+        step = plan.steps[0]
+        said = " | ".join(list(step.blockers) + [step.reason or ""])
+        assert "below the" not in said, (
+            "the bill is counted as committed AND as the payment: " + said)
+        assert "4,800.00" not in said, said
+
+    def test_a_bill_that_is_genuinely_short_still_says_so(self):
+        """The fix must not silence a real shortfall."""
+        from app.domain.planner import CashPosition, Payable, build_plan
+
+        pos = CashPosition(balances={"USD": 300_000}, budget_currency="USD",
+                           floor_minor=500_000)
+        bill = Payable(number="PO-9", supplier="X", currency="USD",
+                       amount_minor=260_000, payout_method="LOCAL")
+        plan = build_plan([bill], pos, budget=_budget())
+        said = " | ".join(list(plan.steps[0].blockers)
+                          + [plan.steps[0].reason or ""])
+        assert "floor" in said or "free to spend" in said, said
+
+
+def _budget():
+    from decimal import Decimal
+
+    from app.domain.policy import BudgetSettings
+
+    return BudgetSettings(currency="USD", reserve_floor_usd=Decimal("5000"),
+                          auto_pay_limit_usd=Decimal("2500"))
+
+
+class TestNoVisibleCopySaysReserveFloor:
+    def test_no_screen_says_reserve_floor(self, client):
+        for tab in ("home", "ok", "money-out", "setup", "money-in", "ai"):
+            html = client.get(f"/app?tab={tab}").text.lower()
+            assert "reserve floor" not in html, (
+                f"{tab} still shows 'reserve floor' to a reader")
+
+    def test_the_policy_card_says_safety_cushion(self, client):
+        html = client.get("/app?tab=home").text
+        assert "safety cushion" in html.lower(), (
+            "the page never names the cushion at all")

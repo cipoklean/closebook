@@ -1618,7 +1618,7 @@ async def workspace_reset(request: Request):
         arch = archive_and_reset(_database(), confirm=str(b.get("confirm") or ""))
         total = sum(arch.cleared.values())
         return _back(request, ok=f"Workspace archived to {arch.path} and cleared "
-                                 f"({total} rows). Your reserve floor and limit "
+                                 f"({total} rows). Your safety cushion and limit "
                                  f"were kept.")
     except WorkspaceRefused as exc:
         return _back(request, err=str(exc))

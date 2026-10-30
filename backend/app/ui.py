@@ -890,7 +890,7 @@ def render_landing(stats: dict | None = None, ws: str = "") -> str:
   <h1 class="x-l-h1">Every deposit matched.<br><em>Every payment checked.</em></h1>
   <p class="x-l-sub">Closebook keeps up with the money that lands, and decides what
   it can safely do with it. The model reads the messy parts. The rules hold the
-  amounts, the limits and the reserve floor.</p>
+  amounts, the limits and the safety cushion.</p>
   <div class="x-l-hero-cta">
     <a href="/app" class="x-btn x-btn--primary x-btn--pill x-btn--lg"
        data-testid="launch-app-hero">Launch app</a>
@@ -913,7 +913,7 @@ def render_landing(stats: dict | None = None, ws: str = "") -> str:
          "re-checked in code before it can change anything."),
         ("02", "It decides what the money may do",
          "Matching an invoice is not permission to spend. Closebook holds a "
-         "reserve floor, an automatic payment limit and a committed-cash "
+         "safety cushion, an automatic payment limit and a committed-cash "
          "position, and a payment that would breach any of them is deferred "
          "with the reason rather than quietly trimmed."),
         ("03", "It asks a person when unsure",
@@ -1432,7 +1432,7 @@ def _home(c: dict) -> str:
                          f"would take cash below the {floor_txt} safety cushion")
         else:
             headline += (f" after promised payments and the {floor_txt} "
-                         f"reserve floor")
+                         f"safety cushion")
         head_cls = ' style="color:var(--x-bad)"'
     else:
         headline = (f"{money_str(m['headline_free_minor'], hccy)} after promised "
@@ -1561,7 +1561,7 @@ def _home(c: dict) -> str:
         '<div class="x-label">Automatic limit</div>'
         f'<div class="x-fig" data-figure="auto_pay_limit">{e(tt["auto_pay_limit"])}</div>'
         f'<div class="x-statnote">Per payment. Anything over it needs a person. '
-        f'Reserve floor {e(floor_txt)}.</div>'
+        f'Safety cushion {e(floor_txt)}.</div>'
     )))
 
     # banner — must agree with the Problems list, the held payments AND the
@@ -3589,7 +3589,7 @@ def _setup(c: dict) -> str:
         _cardhead("Start fresh", "Archive this workspace to a file and empty it.")
         + '<p class="x-hint">Every customer, invoice, supplier, bill, match and '
           'ledger entry is archived first: nothing is destroyed without a '
-          'copy. Your reserve floor and automatic limit are kept, because they '
+          'copy. Your safety cushion and automatic limit are kept, because they '
           'are policy rather than data. <strong>Airwallex transfers that already '
           'exist are not cancelled</strong>: this empties the book, not the bank.'
           '</p>'

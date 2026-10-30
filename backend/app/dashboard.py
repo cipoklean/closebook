@@ -1425,8 +1425,8 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
                 # The planner's own verdict on this payable: action, the exact
                 # reason with its numbers, and whether it needs a human.
                 "plan_action": step.action if step else None,
-                "plan_reason": _without_kept_promise(
-                    step.reason if step else None, _kept_promise(state, bank)),
+                "plan_reason": (None if _kept_promise(state, bank)
+                                else (step.reason if step else None)),
                 "plan_policy_reason": step.policy_reason if step else None,
                 "plan_needs_approval": bool(step.needs_approval) if step else False,
                 # A CAPTION MUST NOT OUTLIVE ITS TRUTH. The planner re-says
@@ -1440,10 +1440,14 @@ def build_context(incidents: list | None = None) -> dict[str, Any]:
                     None if _kept_promise(state, bank)
                     else (step.approval_reason if step else None)),
                 # EVERY reason the planner gave, not just the first.
-                "plan_blockers": [
-                    b for b in (list(step.blockers) if step else [])
-                    if not (_kept_promise(state, bank)
-                            and b.strip().startswith("Approved. Sends once"))],
+                # ONCE THE STEP HAS A TRANSFER, EVERY PLANNER BLOCKER IS
+                # HISTORY. Filtering only the waiting-on-cash sentence left the
+                # cash arithmetic on a bill the bank had already scheduled
+                # ("the book holds USD 10,000.00; paying it would leave cash
+                # USD 4,800.00, below the floor"), which is a live-looking
+                # reason for something that is not waiting at all.
+                "plan_blockers": ([] if _kept_promise(state, bank)
+                                  else (list(step.blockers) if step else [])),
                 "plan_blocker_codes": list(step.blocker_codes) if step else [],
                 # The conversion step's Airwallex id, if one was ever executed
                 # for this payable. money_block checks it against the LEDGER.

@@ -73,7 +73,7 @@ def cash_waterfall(*, cash_minor: int, in_flight_minor: int = 0,
         ("promised", "promised", int(committed_this_run_minor or 0), "minus"),
         ("unmatched", "unmatched", int(suspense_minor or 0), "minus"),
         ("refunds_owed", "refunds owed", int(refunds_owed_minor or 0), "minus"),
-        ("floor", "reserve floor", int(floor_minor or 0), "minus"),
+        ("floor", "safety cushion", int(floor_minor or 0), "minus"),
     ]
     # `running` starts at ZERO and the first step adds the cash, so the running
     # total is literally the sum of the segments DRAWN. Starting it at the cash

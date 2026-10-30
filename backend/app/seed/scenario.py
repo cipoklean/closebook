@@ -2,7 +2,7 @@
 
 A Lagos importer: paid by customers in USD/GBP, paying suppliers in EUR/USD.
 Starting cash: USD 40,000 + GBP 6,000 (both via simulated deposits), with a
-USD 5,000 reserve floor.
+USD 5,000 safety cushion.
 
 This module is PURE DATA + determinism: it defines the receivables,
 payables, and the 7 scripted demo beats so `run_seed.py` and `run_demo.py`
@@ -196,7 +196,7 @@ BEATS: list[DemoBeat] = [
         "close",
         inject="summarise_day",
         expect="Reconciled ledger, final balances still above the USD 5000 "
-               "reserve floor, end-of-day report.",
+               "safety cushion, end-of-day report.",
     ),
 ]
 
