@@ -294,30 +294,75 @@ def try_rule(inflow_amount_minor: int, inflow_currency: str,
 
 
 def try_exact_multi(inflow_amount_minor: int, inflow_currency: str,
-                    candidates: list[Candidate]) -> Optional[MatchResult]:
+                    candidates: list[Candidate],
+                    payer_name: str = "") -> Optional[MatchResult]:
     """Subset-sum: does the inflow exactly cover two or more open invoices?
 
     Runs before the single-invoice partial rule so a payment that covers two
     bills is not mistaken for a partial against the larger of the two.
     Bounded to 12 invoices (4095 subsets).
+
+    F1: TWO GATES BEFORE ANY AUTO MATCH. The subset sum is only meaningful
+    when we know WHOSE invoices the money covers:
+      * the payer must be RECOGNIZED (token similarity >= 0.90 to the
+        customer), and
+      * every invoice in the matched subset must belong to THAT customer.
+    An unknown payer, or a combination that reaches across customers, returns
+    None — the lower tiers may still propose, but nothing auto-applies.
+    And if more than one combination fits even for one payer, it is a TIE:
+    AMBIGUOUS at 0.50, naming the candidates, exactly like the single-invoice
+    tie.
     """
     pool = [c for c in candidates if c.currency == inflow_currency][:12]
     if len(pool) < 2:
         return None
-    for mask in range(1, 1 << len(pool)):
-        chosen = [c for i, c in enumerate(pool) if mask & (1 << i)]
+    if not payer_name:
+        return None
+    # Payer identity first: the payer must be recognizably one customer.
+    sims = {c.invoice_id: token_set_ratio(payer_name, c.customer_name)
+            for c in pool}
+    if max(sims.values(), default=0.0) < 0.90:
+        return None
+    # Only that customer's open invoices may participate.
+    own = [c for c in pool if sims[c.invoice_id] >= 0.90]
+    if len(own) < 2:
+        return None
+
+    fits: list[list[Candidate]] = []
+    for mask in range(1, 1 << len(own)):
+        chosen = [c for i, c in enumerate(own) if mask & (1 << i)]
         if len(chosen) < 2:
             continue
         if sum(c.amount_open_minor for c in chosen) == inflow_amount_minor:
-            return MatchResult(
-                status="MATCHED",
-                allocations=[Allocation(c.invoice_id, c.amount_open_minor) for c in chosen],
-                confidence=0.91, method="RULE",
-                evidence={"rule": "subset-sum of open invoices equals the inflow",
-                          "invoices": [c.number for c in chosen]},
-                reason="inflow exactly covers " + ", ".join(c.number for c in chosen),
-            )
-    return None
+            fits.append(chosen)
+    if not fits:
+        return None
+    if len(fits) > 1:
+        names = sorted({c.number for chosen in fits for c in chosen})
+        return MatchResult(
+            status="AMBIGUOUS",
+            allocations=[],
+            confidence=0.5, method="RULE",
+            evidence={"rule": "more than one subset of open invoices equals "
+                              "the inflow",
+                      "invoices": names, "payer": payer_name,
+                      "tie": True},
+            reason=(f"{money_str(inflow_amount_minor, inflow_currency)} fits "
+                    f"more than one combination of open invoices "
+                    f"({', '.join(names)}); which one?"),
+        )
+    chosen = fits[0]
+    return MatchResult(
+        status="MATCHED",
+        allocations=[Allocation(c.invoice_id, c.amount_open_minor)
+                     for c in chosen],
+        confidence=0.91, method="RULE",
+        evidence={"rule": "subset-sum of one customer's open invoices equals "
+                          "the inflow",
+                  "invoices": [c.number for c in chosen],
+                  "payer": payer_name},
+        reason="inflow exactly covers " + ", ".join(c.number for c in chosen),
+    )
 
 
 # ---- tier 3: PARTIAL / MULTI-INVOICE subset-sum -------------------------
@@ -636,7 +681,8 @@ def match_inflow(inflow_amount_minor: int, inflow_currency: str,
     best: Optional[MatchResult] = None
     for tier in (lambda: try_exact(inflow_amount_minor, inflow_currency, reference, candidates),
                  lambda: try_rule(inflow_amount_minor, inflow_currency, payer, candidates),
-                 lambda: try_exact_multi(inflow_amount_minor, inflow_currency, candidates),
+                 lambda: try_exact_multi(inflow_amount_minor, inflow_currency, candidates,
+                                         payer_name=payer),
                  lambda: try_partial(inflow_amount_minor, inflow_currency, payer, candidates)):
         res = tier()
         if res is None:

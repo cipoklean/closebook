@@ -167,16 +167,44 @@ def test_partial_tolerates_small_bank_fee():
 def test_multi_invoice_subset_sum():
     a = _c(1, "INV-A", "Acme", "USD", 300_000)
     b = _c(2, "INV-B", "Acme", "USD", 450_000)
-    r = try_exact_multi(750_000, "USD", [a, b])
+    r = try_exact_multi(750_000, "USD", [a, b], payer_name="Acme")
     assert r.status == "MATCHED"
     assert {x.invoice_id for x in r.allocations} == {1, 2}
     assert r.confidence >= 0.9
 
 
+def test_subset_sum_across_customers_is_ambiguous():
+    """F1: an unknown payer's payment must never be auto-applied across two
+    different customers' invoices just because their open balances happen to
+    sum to the deposit. The subset-sum tier requires a recognized payer."""
+    a = _c(1, "INV-A", "Alpha Inc", "USD", 400_000)
+    b = _c(2, "INV-B", "Beta LLC", "USD", 600_000)
+    r = try_exact_multi(1_000_000, "USD", [a, b],
+                        payer_name="Mystery Payer")
+    assert r is None, "unknown payer: no auto match across customers"
+
+
+def test_subset_sum_tie_is_ambiguous():
+    """F1: within one recognized payer, if more than one combination of open
+    invoices equals the deposit, it is a tie: AMBIGUOUS at 0.50, naming the
+    candidates, exactly like the single-invoice tie."""
+    a = _c(1, "INV-A", "Acme", "USD", 300_000)
+    b = _c(2, "INV-B", "Acme", "USD", 700_000)
+    c = _c(3, "INV-C", "Acme", "USD", 500_000)
+    d = _c(4, "INV-D", "Acme", "USD", 500_000)
+    r = try_exact_multi(1_000_000, "USD", [a, b, c, d],
+                        payer_name="Acme")
+    assert r is not None
+    assert r.status == "AMBIGUOUS"
+    assert r.confidence == 0.5
+    assert not r.allocations
+    assert "INV-A" in r.reason and "INV-B" in r.reason
+
+
 def test_multi_invoice_needs_two_invoices():
     """A single exact invoice is tier 2's job, not the subset-sum's."""
     a = _c(1, "INV-A", "Acme", "USD", 300_000)
-    assert try_exact_multi(300_000, "USD", [a]) is None
+    assert try_exact_multi(300_000, "USD", [a], payer_name="Acme") is None
 
 
 def test_multi_invoice_beats_single_invoice_partial():
