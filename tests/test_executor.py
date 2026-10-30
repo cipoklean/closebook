@@ -67,10 +67,11 @@ class FakeTransfers:
 
 
 class FakeFX:
-    def __init__(self, *, ambiguous=False):
+    def __init__(self, *, ambiguous=False, in_flight=None):
         self.quotes: list[dict] = []
         self.conversions: list[dict] = []
         self._ambiguous = ambiguous
+        self.in_flight = in_flight or {}      # request_id -> existing conversion
 
     def create_quote(self, **kw):
         self.quotes.append(kw)
@@ -81,6 +82,9 @@ class FakeFX:
         if self._ambiguous:
             raise AmbiguousSubmit("5xx from /fx/conversions/create")
         return {"id": "cnv_1"}
+
+    def find_by_request_id(self, request_id):
+        return self.in_flight.get(request_id)
 
 
 class FakeClient:
@@ -204,6 +208,42 @@ def test_ambiguous_fx_does_not_resend_the_conversion():
         res = ex.run_step(step)
     assert len(f.conversions) == 1
     assert res.ambiguous is True
+
+
+def test_crash_after_fx_send_before_writeback_is_resolved_by_lookup():
+    """F6: a crash after the conversion POST but before the writeback leaves
+    the row SUBMITTED with no object id. A restart must LOOK UP the conversion
+    by request_id and adopt it — never book a second quote and conversion."""
+    f = FakeFX(in_flight={"rid_crash":
+                           {"id": "cnv_crashed", "status": "SETTLED"}})
+    ex = _executor(FakeTransfers(existing=None), f)
+    with session_scope() as s:
+        s.add(PlanStep(type=StepType.FX,
+                       payload_json=json.dumps({"payable_number": "PO-7003",
+                                                "action": "FX"}),
+                       status=StepStatus.PROPOSED))
+        s.commit()
+
+    # Crash window: request_id on disk, status SUBMITTED, no object id.
+    with session_scope() as s:
+        row = s.query(PlanStep).filter_by(type=StepType.FX).first()
+        row.request_id = "rid_crash"
+        row.status = StepStatus.SUBMITTED
+        s.commit()
+        assert row.airwallex_object_id is None, "the writeback never happened"
+
+    step = Step(action=ACT_FX, reason="convert", sell_currency="USD",
+                buy_currency="EUR", sell_amount_minor=901_285, currency="EUR",
+                payable_number="PO-7003")
+    with session_scope() as s:
+        ex.db = s
+        res = ex.run_step(step)
+
+    assert f.quotes == [], "must not create a second quote after the crash"
+    assert f.conversions == [], "must not book a second conversion"
+    assert res.airwallex_object_id == "cnv_crashed"
+    assert res.resolved_from == "lookup"
+    assert res.status == "SUBMITTED"
 
 
 # ---- approvals -----------------------------------------------------------

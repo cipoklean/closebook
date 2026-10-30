@@ -278,6 +278,29 @@ class Executor:
                               "holds a live conversion; not re-issuing",
                               resolved_from="existing_object")
 
+        # F6: a SUBMITTED conversion with no object id is a crash the writeback
+        # — the POST left, the id never came back. Resolve it by request_id
+        # BEFORE quoting again, exactly like _pay does for transfers. Creating
+        # a second quote and conversion would book the same money twice.
+        if row.status == StepStatus.SUBMITTED and row.request_id and not self.dry_run:
+            found = None
+            try:
+                found = self.fx.find_by_request_id(row.request_id)
+            except Exception:
+                found = None
+            if found:
+                oid = _object_id(found)
+                if oid:
+                    row.airwallex_object_id = oid
+                    row.status = StepStatus.SUBMITTED
+                    self.db.commit()
+                return StepResult(step, True, oid, "SUBMITTED",
+                                  "found the in-flight conversion: not resent",
+                                  resolved_from="lookup")
+            return StepResult(step, True, None, "AMBIGUOUS",
+                              "in-flight conversion not found by request_id; "
+                              "a human must decide before anything is re-booked")
+
         if self.dry_run:
             return StepResult(step, False, None, "DRY_RUN",
                               f"would sell {step.sell_amount_minor} minor "

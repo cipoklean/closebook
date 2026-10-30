@@ -136,5 +136,23 @@ class FX:
         """
         return self._c.call("GET", f"/api/v1/fx/conversions/{conversion_id}")
 
+    def find_by_request_id(self, request_id: str) -> Optional[dict]:
+        """Look a conversion up by its idempotency key. READ-ONLY.
+
+        F6: a crash after `conversions/create` left the machine but before the
+        object id was written back leaves a SUBMITTED step with nothing but the
+        request_id. The executor resolves it here instead of booking a second
+        conversion. Airwallex lists conversions with a `request_id` filter
+        (the same query it indexes transfers by).
+        """
+        data = self._c.call(
+            "GET", "/api/v1/fx/conversions",
+            query={"request_id": request_id},
+        )
+        items = data.get("items", data) if isinstance(data, dict) else data
+        if isinstance(items, list) and items:
+            return items[0]
+        return None
+
 
 __all__ = ["FX", "Quote"]
