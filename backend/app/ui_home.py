@@ -378,9 +378,12 @@ def money_in_card(c: dict) -> str:
     inv_txt = ", ".join(invs) if invs else ""
 
     if method in ("LLM", "MODEL", "AI"):
-        ai = (f'<p>Reference "{_e(a.get("reference") or "")}" means '
-              f'{_e(inv_txt or "no invoice it could name")}</p>'
-              f'<p class="h-why">{_e(_pct(conf))} sure. The AI alone can never '
+        ref_txt = (a.get("reference") or "").strip()
+        ai = ((f'<p>Reference "{_e(ref_txt)}" means '
+               f'{_e(inv_txt or "no invoice it could name")}</p>') if ref_txt
+              else (f'<p>No reference; the payer and amount point to '
+                    f'{_e(inv_txt or "no invoice")}</p>'))
+        ai += (f'<p class="h-why">{_e(_pct(conf))} sure. The AI alone can never '
               f'reach the {_e(_pct(bar))} bar, so the rules decide.</p>')
     else:
         rule = str((prop.get("evidence") or {}).get("rule") or "")
@@ -455,9 +458,21 @@ def money_out_card(c: dict) -> str:
         tone = "is-wait"
     b = c["budget"]
     limit = money_str(b["auto_pay_limit_minor"], b["currency"])
-    approved_by_person = bool(p.get("plan_needs_approval"))
+    # OVER THE LIMIT IS A FACT ABOUT THE AMOUNT, not about whether the plan
+    # still needs approval: once approved, the plan stops asking, and this card
+    # used to call a USD 3,000 bill "within the USD 2,500 limit".
+    same_ccy = (str(p.get("currency") or "").upper()
+                == str(b.get("currency") or "").upper())
+    over = (same_ccy and int(p.get("amount_minor") or 0)
+            > int(b.get("auto_pay_limit_minor") or 0)) or \
+        "approved this exact payment" in str(p.get("plan_reason") or "") or \
+        "approved this exact payment" in str(p.get("plan_approval_reason") or "")
+    approved_by_person = bool(p.get("plan_needs_approval")) or over
     checks = (_check(True, f"Bill {p.get('number')} is on the books", "rule-pass")
-              + _check(True, ("Approved by you with your PIN" if approved_by_person
+              + _check(True, ((f"Over the {limit} limit, approved by you with "
+                               f"your PIN" if over else
+                               "Approved by you with your PIN")
+                              if approved_by_person
                               else f"Within the {limit} auto-pay limit"), "rule-pass")
               + _check(True, "Cash covered it and kept the safety cushion",
                        "rule-pass"))

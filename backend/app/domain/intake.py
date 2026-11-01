@@ -92,6 +92,43 @@ def candidates_from_db(session) -> list:
     return out
 
 
+REPEAT_WINDOW_SECONDS = 600
+
+
+def _recent_twin(session, inflow):
+    """An earlier deposit with the same payer, amount, currency and reference,
+    received within REPEAT_WINDOW_SECONDS of this one, or None."""
+    from datetime import timedelta
+    from ..timeutils import utcnow as _now
+
+    def _key(text):
+        return " ".join((text or "").lower().split())
+
+    now = inflow.received_at or _now()
+    if now.tzinfo is None:
+        from datetime import timezone
+        now = now.replace(tzinfo=timezone.utc)
+    rows = (session.query(Inflow)
+            .filter(Inflow.id != inflow.id,
+                    Inflow.amount_minor == inflow.amount_minor,
+                    Inflow.currency == inflow.currency)
+            .order_by(Inflow.id.desc()).limit(50).all())
+    for r in rows:
+        if _key(r.payer_name) != _key(inflow.payer_name):
+            continue
+        if _key(r.reference_raw) != _key(inflow.reference_raw):
+            continue
+        t = r.received_at
+        if t is None:
+            continue
+        if t.tzinfo is None:
+            from datetime import timezone
+            t = t.replace(tzinfo=timezone.utc)
+        if abs((now - t).total_seconds()) <= REPEAT_WINDOW_SECONDS:
+            return r
+    return None
+
+
 def _reference_invoices(session, reference: str, currency: str):
     """Invoices the reference NAMES, split into (settled, open).
 
@@ -402,6 +439,25 @@ def record_and_match(session, *, deposit_id: str, currency: str,
                 notes.append(_credit_sentence(leftover))
             result = replace(result, reason=(
                 f"{result.reason} " + " ".join(n for n in notes if n)).strip())
+
+    # A REPEAT IS A PERSON'S CALL. The same payer, amount, currency and
+    # reference within ten minutes is usually a double click or a retried
+    # transfer, not a second payment. It never auto-applies: whatever the
+    # matcher read is kept as a proposal, and the reason names the earlier one.
+    twin = _recent_twin(session, inflow)
+    if twin is not None:
+        from .policy import MATCH_CONFIDENCE_AUTO as _AUTO
+        when = twin.received_at.strftime("%H:%M") if twin.received_at else ""
+        lead = (f"Looks like a repeat of deposit #{twin.id}"
+                f"{' from ' + when + ' UTC' if when else ''}: same payer, "
+                f"amount and reference.")
+        result = replace(
+            result,
+            confidence=min(float(result.confidence or 0), _AUTO - 0.01),
+            status=("AMBIGUOUS" if result.status == "MATCHED"
+                    and not result.allocations else result.status),
+            reason=f"{lead} {result.reason or ''}".strip(),
+            evidence=dict(result.evidence or {}, repeat_of=twin.id))
 
     # The ledger re-checks confidence and posts the cash. It is the ONLY writer
     # of a receivable's paid amount and status.

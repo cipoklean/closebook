@@ -135,13 +135,13 @@ def _rule_checks(model: dict, code: dict) -> list[tuple[str, bool, str]]:
                     "is-pass" if ok else "is-fail"))
     verdict = str(code.get("verdict") or "").strip()
     if verdict:
-        applied = verdict.upper() == "MATCHED"
-        out.append((f"Verdict: {verdict.lower()}"
-                    + ("" if applied else " (a person decides this one)"),
-                    applied, "is-pass" if applied else "is-fail"))
+        done = not verdict.lower().startswith(("waiting", "left unmatched"))
+        out.append((verdict[0].upper() + verdict[1:], done,
+                    "is-pass" if done else "is-fail"))
     rule = str(code.get("rule") or "").strip()
     if rule:
-        out.append((f"Rule that fired: {rule}", True, "is-pass"))
+        from .dashboard import _rule_words
+        out.append((f"Rule that fired: {_rule_words(rule)}", True, "is-pass"))
     if not out:
         out.append(("No check recorded for this payment.", False, "is-fail"))
     return out
@@ -191,7 +191,8 @@ def _receipt(model: dict, code: dict) -> str:
     if c.get("verdict"):
         rows.append(("Verdict", e(c["verdict"])))
     if c.get("rule"):
-        rows.append(("Rule that fired", e(c["rule"])))
+        from .dashboard import _rule_words
+        rows.append(("Rule that fired", e(_rule_words(c["rule"]))))
     if c.get("confidence") not in (None, ""):
         rows.append(("Final confidence", e(pct(c["confidence"]))))
     if c.get("note"):
@@ -431,7 +432,9 @@ _JS = """
     for (var i = 0; i < fields.length; i++) {
       var f = fields[i];
       if (f.type === "password" && f.value) return true;
-      if (f.value && f.type !== "hidden") return true;
+      /* A prefilled default (a due date, a priority) is not typing. */
+      if (f.tagName === "SELECT") continue;
+      if (f.value && f.type !== "hidden" && f.value !== f.defaultValue) return true;
     }
     return false;
   };
@@ -673,6 +676,127 @@ _JS = """
       });
     });
   });
+}());
+
+/* FORMS THAT HELP. Number previews, date shortcuts, the invoice quick-fill,
+   country presets, a busy button, a repeat-deposit check, and the banner. */
+(function () {
+  var norm = function (raw, prefix) {
+    var t = (raw || "").replace(/\s+/g, " ").trim();
+    if (!t) return "";
+    if (/^\d+$/.test(t)) return prefix + "-" + t;
+    var m = t.match(new RegExp("^" + prefix + "[\\s_\\-#.]*(\\d+)$", "i"));
+    if (m) return prefix + "-" + m[1];
+    return t.toUpperCase();
+  };
+  [].forEach.call(document.querySelectorAll("input[data-prefix]"), function (inp) {
+    var out = inp.parentNode.querySelector("[data-preview-for]");
+    var upd = function () {
+      var v = norm(inp.value, inp.getAttribute("data-prefix"));
+      if (out) out.textContent = v ? "Saves as " + v : "";
+    };
+    inp.addEventListener("input", upd); upd();
+  });
+
+  var iso = function (d) {
+    var z = function (n) { return (n < 10 ? "0" : "") + n; };
+    return d.getFullYear() + "-" + z(d.getMonth() + 1) + "-" + z(d.getDate());
+  };
+  [].forEach.call(document.querySelectorAll("[data-date-chip]"), function (b) {
+    b.addEventListener("click", function () {
+      var inp = document.getElementById(b.getAttribute("data-for"));
+      if (!inp) return;
+      var k = b.getAttribute("data-date-chip"), d = new Date();
+      if (k === "eom") { d = new Date(d.getFullYear(), d.getMonth() + 1, 0); }
+      else { d.setDate(d.getDate() + parseInt(k, 10)); }
+      inp.value = iso(d);
+    });
+  });
+
+  [].forEach.call(document.querySelectorAll("select[data-quickfill]"), function (sel) {
+    sel.addEventListener("change", function () {
+      var o = sel.options[sel.selectedIndex], f = sel.form;
+      if (!o || !o.value || !f) return;
+      var set = function (n, v) { var x = f.querySelector("[name=" + n + "]"); if (x) x.value = v; };
+      set("payer_name", o.getAttribute("data-payer") || "");
+      set("reference", o.getAttribute("data-ref") || "");
+      set("amount", o.getAttribute("data-amount") || "");
+    });
+  });
+
+  [].forEach.call(document.querySelectorAll("select[data-presets-ccy]"), function (sel) {
+    sel.addEventListener("change", function () {
+      var o = sel.options[sel.selectedIndex], f = sel.form;
+      var c = f && f.querySelector("select[data-ccy-select]");
+      if (o && c && o.getAttribute("data-ccy")) c.value = o.getAttribute("data-ccy");
+    });
+  });
+
+  var REPEAT_MS = 120000;
+  [].forEach.call(document.querySelectorAll("form.x-form"), function (f) {
+    f.addEventListener("submit", function (ev) {
+      var sub = ev.submitter || f.querySelector("button[type=submit]");
+      var act = (sub && sub.getAttribute("formaction")) || f.getAttribute("action") || "";
+      if (act.indexOf("/money-in/simulate") === 0) {
+        var g = function (n) { var x = f.querySelector("[name=" + n + "]"); return x ? x.value.trim().toLowerCase() : ""; };
+        var key = [g("amount"), g("payer_name"), g("reference")].join("|");
+        var last = {};
+        try { last = JSON.parse(localStorage.getItem("cb_last_deposit") || "{}"); } catch (e) {}
+        var age = Date.now() - (last.t || 0);
+        if (last.k === key && age < REPEAT_MS) {
+          var secs = Math.round(age / 1000);
+          if (!window.confirm("You sent this exact deposit " + secs + "s ago. Send another?")) {
+            ev.preventDefault(); return;
+          }
+        }
+        try { localStorage.setItem("cb_last_deposit", JSON.stringify({k: key, t: Date.now()})); } catch (e) {}
+      }
+      if (sub) {
+        window.setTimeout(function () {
+          sub.disabled = true;
+          sub.classList.add("is-busy");
+          sub.setAttribute("data-label", sub.textContent);
+          sub.textContent = "Sending\u2026";
+        }, 0);
+      }
+    });
+  });
+
+  var flash = document.querySelector("[data-testid=flash]");
+  if (flash) {
+    var x = flash.querySelector("[data-flash-close]");
+    var hide = function () { flash.classList.add("is-gone"); window.setTimeout(function () { if (flash.parentNode) flash.parentNode.removeChild(flash); }, 300); };
+    if (x) x.addEventListener("click", hide);
+    if (!flash.hasAttribute("data-pending") && !flash.classList.contains("x-flash--err")) {
+      window.setTimeout(hide, 8000);
+    }
+    window.scrollTo(0, 0);
+  }
+
+  /* A DEPOSIT JUST SENT: watch for its match, then show it. This is the one
+     refresh the page takes on its own, because the person asked for it by
+     pressing the button seconds ago; it stops after 90 seconds, and never
+     while someone is typing. */
+  if (document.querySelector("[data-pending]")) {
+    var first = document.querySelector("[data-pending]").getAttribute("data-version") || null, tries = 0;
+    var watch = function () {
+      tries += 1;
+      fetch("/state/version", { headers: { "Accept": "application/json" } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (res) {
+          var v = res && res.ok ? res.version : null;
+          if (v === null) return;
+          if (first === null) { first = v; return; }
+          var a = document.activeElement;
+          var typing = a && /^(INPUT|TEXTAREA)$/.test(a.tagName) && a.value;
+          if (v !== first && !typing) {
+            window.location.replace(window.location.href);
+          }
+        }).catch(function () {});
+      if (tries < 30) window.setTimeout(watch, 3000);
+    };
+    watch();
+  }
 }());
 
 /* THE ACCOUNT PICKER FILLS ITSELF IN. The page renders without waiting for
@@ -1987,6 +2111,13 @@ def _resolve_form(a: dict) -> str:
         '<option value="reject">Not this invoice: leave it unmatched</option>')
 
     blocked = ""
+    if invs and fit.get("ok") and fit.get("note"):
+        blocked = (f'<div class="x-note" style="margin-top:14px">{_I["info"]}'
+                   f'<span>{e(fit["note"])}</span></div>')
+    if a.get("credit_waiting"):
+        blocked = (f'<div class="x-note" style="margin-top:14px">{_I["info"]}'
+                   f'<span>{e(a.get("applied_summary") or "")}. Refund the '
+                   f'credit or release it as income.</span></div>')
     if not (invs and fit.get("ok")) and a.get("no_match_why"):
         blocked = (f'<div class="x-note" style="margin-top:14px">{_I["warn"]}'
                    f'<span>{e(a["no_match_why"])}</span></div>')
@@ -2098,13 +2229,16 @@ def _simulate_card(c: dict) -> str:
         'payment.</p></div>'
         f'<span class="x-pill x-pill--{"info" if ready else "bad"}">'
         f'{"sandbox" if ready else "sandbox not ready"}</span></div>'
-        + '<form class="x-form" method="post" action="/money-in/simulate">'
+        + '<form class="x-form" autocomplete="off" method="post" action="/money-in/simulate">'
         + acct_field
         + _field("amount", "Amount", span="x-span-2", placeholder="12000",
                  required=True)
+        + _paying_invoice_select(c)
         + _field("payer_name", "Payer name", span="x-span-3",
                  placeholder="Brightline Retail",
-                 hint="What the bank says, not what you wish it said")
+                 hint="What the bank says. Pick a customer, or type it messy on purpose",
+                 attrs='list="payer-options"',
+                 after=_payer_datalist(c))
         + _field("reference", "Reference", span="x-span-3",
                  placeholder="inv 0O41 brightline",
                  hint="Free text. Typos welcome: that is the point.")
@@ -2118,6 +2252,36 @@ def _simulate_card(c: dict) -> str:
           'that is late. Both paths use the same intake, so neither can post the '
           'cash twice.</span></div></form>')
     return _card(inner=body)
+
+
+def _payer_datalist(c: dict) -> str:
+    """Customers pay you, so the payer suggestions are the book's customers."""
+    names = sorted({x.get("name") or "" for x in
+                    ((c.get("workspace") or {}).get("customers") or [])} - {""})
+    return ('<datalist id="payer-options">'
+            + "".join(f'<option value="{e(n)}"></option>' for n in names)
+            + '</datalist>')
+
+
+def _paying_invoice_select(c: dict) -> str:
+    """Optional quick-fill: pick an open invoice, get payer, reference, amount."""
+    rows = [r for r in (c.get("receivables") or []) if r.get("open_minor", 0) > 0]
+    if not rows:
+        return ""
+    opts = '<option value="">Choose to fill the fields (optional)</option>'
+    for r in rows:
+        amt = money(r["open_minor"])
+        opts += (f'<option value="{e(r["number"])}" '
+                 f'data-payer="{e(r.get("customer") or "")}" '
+                 f'data-amount="{r["open_minor"] / 100:.2f}" '
+                 f'data-ref="{e(r["number"])}">{e(r["number"])} \u00b7 '
+                 f'{e(r.get("customer") or "")} \u00b7 {e(r["currency"])} {amt} '
+                 f'open</option>')
+    return (f'<div class="x-field x-span-4"><label for="f-paying">Paying invoice'
+            f'</label><select class="x-select" id="f-paying" data-quickfill '
+            f'data-testid="paying-invoice">{opts}</select>'
+            f'<span class="x-hint">Fills the payer, reference and amount. You can '
+            f'still edit them.</span></div>')
 
 
 def _acct_label(a: dict) -> str:
@@ -2280,6 +2444,20 @@ def _money_in(c: dict) -> str:
         if still_line:
             reasons.append(still_line + ".")
 
+        if u.get("credit_after"):
+            # THE CREDIT AN APPROVED PAYMENT LEFT. Not "USD 1,200 held": the
+            # match was applied, and only the remainder is waiting on a person.
+            un.append(
+                '<div class="x-card x-l-card" data-testid="credit-left" '
+                'style="box-shadow:none;background:var(--x-bg)">'
+                f'<div class="x-cardhead" style="margin-bottom:8px"><div>'
+                f'<h3>{e(u["payer_name"] or "Unknown payer")}</h3>'
+                f'<p class="x-help">{e(money_str(u["waiting_minor"], u["currency"]))} '
+                f'credit left after {e(u["credit_after"])}.</p></div>'
+                '<span class="x-pill x-pill--warn">Credit</span></div>'
+                f'<p class="x-help">Refund it or release it as income on '
+                f'<b>Needs your OK</b>. Until then it is not spendable.</p></div>')
+            continue
         un.append(
             '<div class="x-card x-l-card" style="box-shadow:none;background:var(--x-bg)">'
             f'<div class="x-cardhead" style="margin-bottom:8px"><div>'
@@ -2313,7 +2491,7 @@ def _money_in(c: dict) -> str:
         '<div class="x-cardhead"><div><h3>Money we couldn\'t match</h3>'
         '<p class="x-help">Unmatched: not applied to any invoice, and no '
         'supplier paid from it.</p></div>'
-        f'<span class="x-pill x-pill--warn">{n_unmatched} held</span></div>'
+        f'<span class="x-pill x-pill--warn" style="white-space:nowrap;flex-shrink:0">{n_unmatched} held</span></div>'
         f'<div class="x-stack">{("".join(un)) if un else empty_un}</div>'
         + note))
 
@@ -2773,9 +2951,15 @@ def _arrival_row(a: dict, *, detail: bool = False) -> str:
             else ("bad" if (conf is not None and conf < 0.75) else "warn"))
     method = a.get("method") or "n/a"
     conf_txt = f"{conf:.2f}" if conf is not None else "n/a"
-    ref = a["reference"] if a["has_reference"] else "(no reference given)"
     applied = (" -> " + ", ".join(x["invoice"] for x in a["applied"])
                if a["applied"] else "")
+    # Where it is going if nothing has been applied yet: the proposal.
+    if not applied and a.get("proposed_invoices"):
+        applied = " -> " + ", ".join(str(x) for x in a["proposed_invoices"])
+    # A rule that holds money has no confidence to show.
+    meta = (f"{_RULE_SHORT.get(method, method)}{applied}"
+            if method == "DUPLICATE" or conf is None
+            else f"{method} \u00b7 confidence {conf_txt}{applied}")
     out = (
         '<div style="border-bottom:1px solid var(--x-line);padding:10px 0">'
         '<div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">'
@@ -2783,9 +2967,13 @@ def _arrival_row(a: dict, *, detail: bool = False) -> str:
         f'<span class="x-hint">{e(a["payer"] or "payer not given")}</span>'
         f'<span class="x-pill x-pill--{tone}" data-testid="deposit-state">'
         f'{e(_deposit_state(a))}</span>'
-        f'<span class="x-hint">{e(method)} &middot; confidence {e(conf_txt)}'
-        f'{e(applied)}</span></div>'
-        f'<div class="x-mono" style="margin-top:6px">ref: {e(ref)}</div>')
+        f'<span class="x-hint">{e(meta)}</span></div>'
+        + _reference_line(a))
+    if a.get("applied_summary"):
+        out += (f'<div class="x-hint" data-testid="applied-summary" '
+                f'style="margin-top:4px"><b>{e(a["applied_summary"])}</b></div>')
+    out += _retarget_warning(a)
+
     if detail and a.get("reason"):
         out += f'<div class="x-hint" style="margin-top:4px">{e(a["reason"])}</div>'
     rec = a.get("receipt") or {}
@@ -2798,6 +2986,41 @@ def _arrival_row(a: dict, *, detail: bool = False) -> str:
         out += (f'<div class="x-hint">Airwallex deposit '
                 f'<span class="x-mono">{e(a["deposit_id"])}</span></div>')
     return out + "</div>"
+
+
+_RULE_SHORT = {"DUPLICATE": "Rule: already paid"}
+
+
+def _reference_line(a: dict) -> str:
+    """The reference exactly as it was typed when the money was sent."""
+    if a.get("has_reference"):
+        return (f'<div class="x-hint" data-testid="deposit-reference" '
+                f'style="margin-top:6px">Reference on the payment: '
+                f'<span class="x-mono">{e(a["reference"])}</span></div>')
+    return ('<div class="x-hint" data-testid="deposit-reference" '
+            'style="margin-top:6px">No reference on the payment</div>')
+
+
+def _retarget_warning(a: dict) -> str:
+    """Say so when the invoice we chose is not the one the payment names."""
+    ref = (a.get("reference") or "")
+    if not ref.strip():
+        return ""
+    from .domain.matching import normalise
+    target = [x["invoice"] for x in (a.get("applied") or [])] or \
+        [str(x) for x in (a.get("proposed_invoices") or [])]
+    if not target:
+        return ""
+    rn = normalise(ref)
+    if any(normalise(t) and normalise(t) in rn for t in target):
+        return ""
+    import re as _re
+    if not _re.search(r"\d{3,}", ref):
+        return ""
+    return (f'<div class="x-note" data-testid="retarget-warning" '
+            f'style="margin-top:8px">{_I["warn"]}<span>The payment names '
+            f'<b>{e(ref)}</b>, but this went to <b>{e(", ".join(target))}</b>. '
+            f'Check it before approving.</span></div>')
 
 
 _RESOLUTION_WORDS = {
@@ -2817,9 +3040,13 @@ def _deposit_state(a: dict) -> str:
     statement about the same row and it wins.
     """
     resolved = (a.get("review_state") or "").upper()
+    if resolved == "APPROVED" and a.get("credit_waiting"):
+        return "Matched \u00b7 credit left"
     word = _RESOLUTION_WORDS.get(resolved)
     if word:
         return word
+    if (a.get("method") or "") == "DUPLICATE":
+        return "Already paid"
     st = str(a.get("match_status") or "")
     # A deposit is never "Not sent yet": that is a payment's word. A proposed
     # deposit is a suggestion waiting on a person.
@@ -3265,14 +3492,103 @@ def _known_good_helper() -> str:
 
 def _field(name: str, label: str, *, span: str = "x-span-3", kind: str = "text",
            value: str = "", placeholder: str = "", hint: str = "",
-           required: bool = False, step: str = "") -> str:
+           required: bool = False, step: str = "", attrs: str = "",
+           after: str = "") -> str:
+    # AUTOCOMPLETE IS OFF ON EVERY BOOK FIELD. The browser offered last time's
+    # invoice numbers and payer names under each box, which reads as the app
+    # remembering the wrong thing; nothing here is a value worth recalling.
     req = " required" if required else ""
     extra = f' step="{e(step)}"' if step else ""
     hint_html = f'<span class="x-hint">{e(hint)}</span>' if hint else ""
     return (f'<div class="x-field {span}"><label for="f-{e(name)}">{e(label)}</label>'
             f'<input class="x-input" id="f-{e(name)}" name="{e(name)}" type="{e(kind)}"'
-            f' value="{e(value)}" placeholder="{e(placeholder)}"{extra}{req}>'
-            f'{hint_html}</div>')
+            f' value="{e(value)}" placeholder="{e(placeholder)}"{extra}{req}'
+            f' autocomplete="off"{(" " + attrs) if attrs else ""}>'
+            f'{after}{hint_html}</div>')
+
+
+#: Currencies the book can hold (money.CURRENCY_EXPONENT), with the words a
+#: person picks them by. A typed code was a place to make a mistake for no gain.
+_CCY_NAMES = {
+    "USD": ("US dollar", "$"), "EUR": ("Euro", "\u20ac"),
+    "GBP": ("British pound", "\u00a3"), "CAD": ("Canadian dollar", "C$"),
+    "AUD": ("Australian dollar", "A$"), "NZD": ("New Zealand dollar", "NZ$"),
+    "JPY": ("Japanese yen", "\u00a5"), "HKD": ("Hong Kong dollar", "HK$"),
+    "SGD": ("Singapore dollar", "S$"), "CNY": ("Chinese yuan", "\u00a5"),
+    "INR": ("Indian rupee", "\u20b9"), "ZAR": ("South African rand", "R"),
+}
+
+#: Bank countries a supplier is most likely in, each with the currency it pays
+#: in, so picking the country presets the currency.
+_COUNTRIES = [
+    ("US", "United States", "USD"), ("GB", "United Kingdom", "GBP"),
+    ("NG", "Nigeria", "USD"), ("HK", "Hong Kong", "HKD"),
+    ("SG", "Singapore", "SGD"), ("AU", "Australia", "AUD"),
+    ("CA", "Canada", "CAD"), ("NZ", "New Zealand", "NZD"),
+    ("DE", "Germany", "EUR"), ("FR", "France", "EUR"),
+    ("NL", "Netherlands", "EUR"), ("IE", "Ireland", "EUR"),
+    ("ES", "Spain", "EUR"), ("IT", "Italy", "EUR"),
+    ("JP", "Japan", "JPY"), ("CN", "China", "CNY"),
+    ("IN", "India", "INR"), ("ZA", "South Africa", "ZAR"),
+]
+
+
+def _currency_select(name: str = "currency", label: str = "Currency", *,
+                     span: str = "x-span-2", selected: str = "USD",
+                     hint: str = "") -> str:
+    from .money import CURRENCY_EXPONENT
+    sel = (selected or "USD").upper()
+    opts = "".join(
+        f'<option value="{c}"{" selected" if c == sel else ""}>'
+        f'{c} \u00b7 {e(_CCY_NAMES.get(c, (c, ""))[0])}'
+        f'{(" (" + e(_CCY_NAMES[c][1]) + ")") if c in _CCY_NAMES else ""}</option>'
+        for c in CURRENCY_EXPONENT)
+    hint_html = f'<span class="x-hint">{e(hint)}</span>' if hint else ""
+    return (f'<div class="x-field {span}"><label for="f-{e(name)}">{e(label)}</label>'
+            f'<select class="x-select" id="f-{e(name)}" name="{e(name)}" '
+            f'data-ccy-select>{opts}</select>{hint_html}</div>')
+
+
+def _country_select(name: str = "country", label: str = "Country", *,
+                    span: str = "x-span-2", selected: str = "",
+                    optional: bool = False, presets_currency: bool = False) -> str:
+    sel = (selected or "").upper()
+    opts = ('<option value="">Not given</option>' if optional else "")
+    opts += "".join(
+        f'<option value="{c}" data-ccy="{ccy}"'
+        f'{" selected" if c == sel else ""}>{c} \u00b7 {e(n)}</option>'
+        for c, n, ccy in _COUNTRIES)
+    attr = " data-presets-ccy" if presets_currency else ""
+    return (f'<div class="x-field {span}"><label for="f-{e(name)}">{e(label)}</label>'
+            f'<select class="x-select" id="f-{e(name)}" name="{e(name)}"{attr}>'
+            f'{opts}</select></div>')
+
+
+def _date_field(name: str = "due_date", label: str = "Due date", *,
+                span: str = "x-span-3", days: int = 30) -> str:
+    """A calendar picker, prefilled, with one-tap shortcuts."""
+    from datetime import date, timedelta
+    today = date.today()
+    default = (today + timedelta(days=days)).isoformat()
+    chips = "".join(
+        f'<button type="button" class="x-chip" data-date-chip="{d}" '
+        f'data-for="f-{e(name)}">{lbl}</button>'
+        for d, lbl in (("7", "+7 days"), ("14", "+14"), ("30", "+30"),
+                       ("eom", "End of month")))
+    return (f'<div class="x-field {span}"><label for="f-{e(name)}">{e(label)}</label>'
+            f'<input class="x-input" id="f-{e(name)}" name="{e(name)}" type="date" '
+            f'value="{default}" min="{today.isoformat()}" autocomplete="off">'
+            f'<div class="x-chips">{chips}</div></div>')
+
+
+def _number_field(prefix: str, label: str, *, span: str = "x-span-2",
+                  placeholder: str = "", hint: str = "") -> str:
+    """A document number that shows, as you type, how it will be saved."""
+    return _field("number", label, span=span, placeholder=placeholder,
+                  required=True, hint=hint,
+                  attrs=f'data-prefix="{e(prefix)}"',
+                  after=(f'<span class="x-hint x-preview" data-preview-for="number" '
+                         f'data-testid="number-preview" aria-live="polite"></span>'))
 
 
 def _select(name: str, label: str, options: list[tuple[str, str]], *,
@@ -3421,9 +3737,10 @@ def _setup(c: dict) -> str:
     out.append(_card(inner=(
         _cardhead("Settings", "The rules the planner obeys. Stored in the "
                               "workspace, not in a config file.")
-        + f'<form class="x-form" method="post" action="/setup/settings">'
-        + _field("budget_currency", "Budget currency", value=ccy,
-                 placeholder="USD", hint="The floor and the limit are in this currency.")
+        + f'<form class="x-form" autocomplete="off" method="post" action="/setup/settings">'
+        + _currency_select("budget_currency", "Budget currency", span="x-span-3",
+                           selected=ccy,
+                           hint="The floor and the limit are in this currency.")
         + _field("reserve_floor", "Safety cushion",
                  value=f'{st.get("reserve_floor_minor", 0) / 100:.2f}',
                  hint="Cash the planner will never spend.")
@@ -3449,11 +3766,10 @@ def _setup(c: dict) -> str:
                  for x in ws.get("customers", [])]
     out.append(_card(inner=(
         _cardhead("Customers", "Who owes you money.")
-        + '<form class="x-form" method="post" action="/setup/customers">'
+        + '<form class="x-form" autocomplete="off" method="post" action="/setup/customers">'
         + _field("name", "Customer name", span="x-span-4",
                  placeholder="Brightline Trading", required=True)
-        + _field("country", "Country", span="x-span-2", placeholder="NG",
-                 hint="Optional")
+        + _country_select("country", "Country", span="x-span-2", optional=True)
         + _field("email", "Email", span="x-span-4", placeholder="optional")
         + '<div class="x-submit"><button class="x-btn x-btn--primary" '
           'type="submit">Add customer</button></div></form>'
@@ -3473,17 +3789,16 @@ def _setup(c: dict) -> str:
     out.append(_card(inner=(
         _cardhead("Invoices", "Money owed to you. Payments match against these "
                               "numbers, so a messy reference is the interesting case.")
-        + '<form class="x-form" method="post" action="/setup/invoices">'
+        + '<form class="x-form" autocomplete="off" method="post" action="/setup/invoices">'
         + _select("customer_id", "Customer", cust_opts, span="x-span-4",
                   selected=newest_customer)
-        + _field("number", "Invoice number", span="x-span-2",
-                 placeholder="INV-0041", required=True)
+        + _number_field("INV", "Invoice number", span="x-span-2",
+                        placeholder="1001", hint="Type 1001 or INV-1001")
         + _field("amount", "Amount", span="x-span-2", placeholder="12000",
-                 required=True)
-        + _field("currency", "Currency", span="x-span-2", placeholder="USD",
-                 hint=_CURRENCY_HINT)
-        + _field("due_date", "Due date", span="x-span-2", placeholder="2026-11-30",
-                 hint="YYYY-MM-DD")
+                 required=True, kind="number", step="0.01",
+                 attrs='min="0.01" inputmode="decimal"')
+        + _currency_select(selected=ccy)
+        + _date_field(span="x-span-4")
         + '<div class="x-submit"><button class="x-btn x-btn--primary" '
           'type="submit">Add invoice</button></div></form>'
         + _table(["Number", "Customer", "Amount", "Paid", "Status", "Due"],
@@ -3512,17 +3827,17 @@ def _setup(c: dict) -> str:
         # from `beneficiary_form.KNOWN_GOOD_BENEFICIARY`, which is the input that
         # was verified by CREATING a real sandbox beneficiary.
         + _known_good_helper()
-        + '<form class="x-form" method="post" action="/setup/suppliers">'
+        + '<form class="x-form" autocomplete="off" method="post" action="/setup/suppliers">'
         + _field("name", "Supplier name", span="x-span-3",
                  placeholder="Atlanta Packaging", required=True)
-        + _field("country", "Bank country", span="x-span-2", placeholder="US",
-                 hint="2-letter code")
-        + _field("currency", "Currency", span="x-span-2", placeholder="USD",
-                 hint=_CURRENCY_HINT)
+        + _country_select("country", "Bank country", span="x-span-2",
+                          selected="US", presets_currency=True)
+        + _currency_select(selected="USD")
         + _select("payout_method", "Payout method",
                   [("LOCAL", "LOCAL"), ("SWIFT", "SWIFT")], span="x-span-2")
-        + _field("entity_type", "Entity type", span="x-span-2",
-                 value="COMPANY", hint="PERSONAL or COMPANY")
+        + _select("entity_type", "Entity type",
+                  [("COMPANY", "Company"), ("PERSONAL", "Person")],
+                  span="x-span-2", selected="COMPANY")
         + _field("account_name", "Account name", span="x-span-4",
                  hint="Defaults to the supplier name")
         + _field("account_number", "Account number", span="x-span-3",
@@ -3538,8 +3853,9 @@ def _setup(c: dict) -> str:
         + _field("street_address", "Street address", span="x-span-5")
         + _field("postcode", "Postcode", span="x-span-2")
         + _field("state", "State", span="x-span-2", hint="US only")
-        + _field("bank_account_category", "Account category", span="x-span-3",
-                 value="Checking", hint='USD only: "Checking" or "Savings"')
+        + _select("bank_account_category", "Account category",
+                  [("Checking", "Checking"), ("Savings", "Savings")],
+                  span="x-span-3", selected="Checking", hint="USD only")
         + '<div class="x-pin x-span-6"><label for="pin-supplier">Your PIN</label>'
           '<input id="pin-supplier" name="pin" type="password" '
           'style="width:168px" '
@@ -3580,21 +3896,26 @@ def _setup(c: dict) -> str:
     out.append(_card(inner=(
         _cardhead("Bills to pay", "What you owe. A bill only becomes payable "
                                   "once its supplier has a beneficiary.")
-        + '<form class="x-form" method="post" action="/setup/payables">'
+        + '<form class="x-form" autocomplete="off" method="post" action="/setup/payables">'
         + _select("supplier_id", "Supplier", sup_opts, span="x-span-3",
                   selected=newest_supplier)
-        + _field("number", "Your reference", span="x-span-2", placeholder="PO-7001",
-                 required=True, hint="Half of the payment's identity")
+        + _number_field("BILL", "Bill number", span="x-span-2",
+                        placeholder="BILL-1001",
+                        hint="Your own number for this bill")
         + _field("amount", "Amount", span="x-span-2", placeholder="1800",
-                 required=True)
-        + _field("currency", "Currency", span="x-span-2", placeholder="USD",
-                 hint=_CURRENCY_HINT)
-        + _field("criticality", "Priority", span="x-span-2", value="3",
-                 kind="number", hint="1-5")
-        + _field("due_date", "Due date", span="x-span-2", placeholder="2026-11-30")
-        + _field("depends_on", "Pay only after invoice", span="x-span-3",
-                 hint=("Optional. One of: " + ", ".join(inv_nums)) if inv_nums
-                      else "Optional. No invoices exist yet.")
+                 required=True, kind="number", step="0.01",
+                 attrs='min="0.01" inputmode="decimal"')
+        + _currency_select(selected=ccy)
+        + _select("criticality", "Priority",
+                  [("1", "1 \u00b7 lowest"), ("2", "2"), ("3", "3 \u00b7 normal"),
+                   ("4", "4"), ("5", "5 \u00b7 critical")],
+                  span="x-span-2", selected="3")
+        + _date_field(span="x-span-4")
+        + _select("depends_on", "Pay only after invoice",
+                  [("", "No, pay when it is due")]
+                  + [(n, f"After {n} is paid") for n in inv_nums],
+                  span="x-span-4", selected="",
+                  hint="The bill waits until that customer pays.")
         + '<div class="x-submit"><button class="x-btn x-btn--primary" '
           'type="submit">Add bill</button></div></form>'
         + _table(["Reference", "Supplier", "Amount", "Status", "Depends on",
@@ -3763,11 +4084,38 @@ def _flash(c: dict) -> str:
     is a screen that silently swallows an error.
     """
     out = ""
+    pending = bool(c.get("flash_pending"))
     if c.get("flash_ok"):
-        out += f'<div class="x-note x-note--ok">{e(c["flash_ok"])}</div>'
+        out += _flash_banner(c["flash_ok"],
+                             "wait" if pending else "ok", pending=pending,
+                             version=str(c.get("state_version") or ""))
     if c.get("flash_err"):
-        out += f'<div class="x-note x-note--err">{e(c["flash_err"])}</div>'
+        out += _flash_banner(c["flash_err"], "err")
     return out
+
+
+def _flash_banner(text: str, tone: str, *, pending: bool = False,
+                  version: str = "") -> str:
+    """A confirmation a person notices: full width, a bold headline, one line.
+
+    It used to be a narrow note in the first grid column, which wrapped one
+    word per line, so a success looked like an error message squeezed into a
+    corner. The headline is the first sentence; the rest is the detail.
+    """
+    t = " ".join(str(text or "").split())
+    head, _sep, rest = t.partition(". ")
+    head = head.rstrip(".")
+    icon = {"ok": "\u2713", "wait": "\u2026", "err": "!"}[tone]
+    legacy = {"ok": "x-note--ok", "wait": "x-note--ok", "err": "x-note--err"}[tone]
+    return (f'<div class="x-flash x-flash--{tone} {legacy}" data-testid="flash" '
+            f'role="{"alert" if tone == "err" else "status"}"'
+            f'{" data-pending=" + chr(34) + "1" + chr(34) if pending else ""}'
+            f'{" data-version=" + chr(34) + e(version) + chr(34) if version else ""}>'
+            f'<span class="x-flash-ic" aria-hidden="true">{icon}</span>'
+            f'<div class="x-flash-tx"><b>{e(head)}</b>'
+            f'{("<span>" + e(rest) + "</span>") if rest else ""}</div>'
+            f'<button type="button" class="x-flash-x" aria-label="Close" '
+            f'data-flash-close>\u00d7</button></div>')
 
 
 def render_app(ctx: dict, tab: str = "home", health: dict | None = None,

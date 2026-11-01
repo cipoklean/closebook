@@ -188,7 +188,7 @@ def add_bill(page, number: str, amount: str) -> None:
     form = page.locator('form[action^="/setup/payables"]')
     form.locator('[name="number"]').fill(number)
     form.locator('[name="amount"]').fill(amount)
-    form.locator('[name="currency"]').fill("USD")
+    form.locator('[name="currency"]').select_option("USD")
     form.locator('[name="supplier_id"]').select_option(index=0)
     form.locator('button[type="submit"]').first.click()
     page.wait_for_load_state("load")

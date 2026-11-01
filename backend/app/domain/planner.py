@@ -782,7 +782,7 @@ def build_plan(payables: Iterable[Payable], pos: CashPosition,
         if needs_approval and p.has_valid_approval:
             if why and "limit" in why.lower():
                 needs_approval = False
-                why = ("within the auto-pay limit, because a person already "
+                why = ("over the auto-pay limit; sent because a person "
                        "approved this exact payment")
 
         working[p.currency.upper()] = working.get(p.currency.upper(), 0) - move_minor

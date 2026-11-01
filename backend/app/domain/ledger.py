@@ -304,14 +304,41 @@ def approve_inflow(db_session, inflow, *, approved_by: str = "dashboard") -> lis
         blob = json.loads(inflow.proposed_json or "{}")
     except ValueError:
         blob = {}
+    # A PROPOSAL IS A SNAPSHOT. Two payments can both name INV-1003 while it
+    # still owes 2,000; once the first is approved it owes 800, and the second
+    # proposal (1,200) no longer fits in full. Refusing it outright left the
+    # money stuck behind a button that could only fail. The invoice the
+    # customer NAMED still takes what it owes, and the rest is credit, said out
+    # loud -- exactly as if the payment had arrived after the first one. An
+    # invoice with nothing left still refuses (that is a duplicate, not a
+    # part-fit), so nothing can ever be paid twice.
+    capped_allocs, extra_credit, used = [], 0, {}
+    for a in allocs:
+        inv = db_session.query(InvoiceReceivable).filter_by(id=a.invoice_id).first()
+        if inv is not None:
+            open_minor = inv.amount_minor - inv.amount_paid_minor - used.get(inv.id, 0)
+            if 0 < open_minor < a.amount_minor:
+                extra_credit += a.amount_minor - open_minor
+                a = _Alloc(a.invoice_id, open_minor)
+            used[inv.id] = used.get(inv.id, 0) + a.amount_minor
+        capped_allocs.append(a)
+    status = str(blob.get("status") or "MATCHED")
+    # An approved overpayment IS a match: the invoice is settled. Its leftover
+    # credit is reported from suspense, not by calling the whole deposit
+    # AMBIGUOUS (OVERPAID is an invoice state, not a deposit state, and the
+    # fallback used to turn an applied payment back into "unmatched").
+    if extra_credit or status == "OVERPAID":
+        status = "MATCHED"
     created = _apply_allocations(
-        db_session, inflow, allocs,
+        db_session, inflow, capped_allocs,
         confidence=float(blob.get("confidence") or 0.0),
         method=str(blob.get("method") or "RULE"),
-        status=str(blob.get("status") or "MATCHED"),
+        status=status,
         evidence=dict(blob.get("evidence") or {},
-                      approved_by=approved_by, approved_from_proposal=True),
-        credit_minor=int(blob.get("credit_minor") or 0))
+                      approved_by=approved_by, approved_from_proposal=True,
+                      **({"capped_credit_minor": extra_credit}
+                         if extra_credit else {})),
+        credit_minor=int(blob.get("credit_minor") or 0) + extra_credit)
 
     allocated = sum(m.amount_applied_minor for m in created)
     if allocated:

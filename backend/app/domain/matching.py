@@ -22,7 +22,7 @@ unstructured text; every number it returns is re-checked against the DB.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import replace, dataclass, field
 from decimal import Decimal
 from typing import Any, Callable, Iterable, Optional, Protocol
 
@@ -97,6 +97,28 @@ def number_blob(text: str) -> str:
 
 def normalise_invoice(number: str) -> str:
     return normalise(number)
+
+
+def referenced_candidates(reference: str, candidates) -> list:
+    """The open candidates whose invoice number the reference names.
+
+    Same word-safe containment the duplicate rule uses (at least 3 characters,
+    so "1" never names INV-1 inside "INV-1003"). A number that names several
+    candidates keeps only the longest matches, so "INV-1003" does not also name
+    an "INV-100".
+    """
+    ref_norm = normalise(reference or "")
+    if not ref_norm:
+        return []
+    hits = []
+    for c in candidates:
+        num = normalise_invoice(c.number)
+        if len(num) >= 3 and num in ref_norm:
+            hits.append((num, c))
+    # drop a hit that is a strict substring of another hit
+    nums = [n for n, _ in hits]
+    return [c for n, c in hits
+            if not any(n != m and n in m for m in nums)]
 
 
 def token_set_ratio(a: str, b: str) -> float:
@@ -768,6 +790,18 @@ def match_inflow(inflow_amount_minor: int, inflow_currency: str,
     reference = inflow_meta.get("reference_raw") or ""
     payer = inflow_meta.get("payer_name") or ""
 
+    # A REFERENCE THAT NAMES AN OPEN INVOICE PINS THE POOL. The amount-driven
+    # tiers score every open invoice by how well the AMOUNT fits, so "USD 1,200,
+    # ref INV-1003" against INV-1003 (2,000 open) and INV-1004 (1,000 open) was
+    # proposed as an overpayment of INV-1004: the amount fit it better. A
+    # customer who writes an invoice number has said which bill they are paying;
+    # the amount can say how much of it, never which one. So when the reference
+    # names one or more open invoices, every tier (and the model) only sees
+    # those, and anything the amount does not cover is credit on THAT bill.
+    named = referenced_candidates(reference, candidates)
+    if named:
+        candidates = named
+
     # Deterministic tiers first. Note we do NOT stop at the first tier that
     # returns anything — only at the first result confident enough to act on
     # (>= MATCH_CONFIDENCE_AUTO). A weaker deterministic result still leaves
@@ -817,6 +851,11 @@ def match_inflow(inflow_amount_minor: int, inflow_currency: str,
             "rationale": (llm_res.evidence or {}).get("rationale") or "",
             "error": (llm_res.evidence or {}).get("error"),
         }
+        llm_ids = {a.invoice_id for a in (llm_res.allocations or [])}
+        if named and llm_ids and not llm_ids <= {c.invoice_id for c in named}:
+            # The model pointed at a bill the reference does not name. It is
+            # never allowed to retarget a named payment.
+            llm_res = replace(llm_res, confidence=0.0, allocations=[])
         if best is None or llm_res.confidence > best.confidence:
             llm_res.evidence = dict(llm_res.evidence or {},
                                     model_consulted=True,

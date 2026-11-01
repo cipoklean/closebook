@@ -1261,7 +1261,7 @@ async def reject_inflow_route(inflow_id: int, request: Request):
 # transfer or conversion call anywhere on this path.
 
 @app.post("/money-in/simulate")
-async def money_in_simulate(request: Request):
+async def money_in_simulate(request: Request, background: BackgroundTasks):
     """Simulate a customer payment landing in the sandbox.
 
     The reference is passed through EXACTLY as typed, because a messy one is the
@@ -1349,33 +1349,40 @@ async def money_in_simulate(request: Request):
     # The deposit's OWN currency is the last word on what was credited.
     credited = ((deposit or {}).get("currency") or ccy).upper() \
         if isinstance(deposit, dict) else ccy
-    try:
-        result = ingest_deposit(_database(), deposit) if dep_id else None
-    except Exception as exc:
-        log.exception("intake failed for deposit %s", dep_id)
-        result = None
 
-    head = (f"Deposit {money_str(amount_minor, credited)}"
-            f"{' from ' + payer if payer else ''} created in the sandbox "
-            f"({credited} account ending "
-            f"{(account['account_number'] or '?')[-4:]})")
-    if result is None:
+    head = (f"Deposit received \u00b7 {money_str(amount_minor, credited)}"
+            f"{' from ' + payer if payer else ''}")
+    if not dep_id:
         return _back(request, tab="money-in",
                      ok=f"{head}. It will appear once Airwallex reports it.")
-    if result.duplicate:
-        return _back(request, tab="money-in", ok=f"{head}. {result.reason}")
-    if result.disposition == "PROPOSED":
-        return _back(request, tab="money-in", ok=(
-            f"{head}. Read as {result.status} via {result.method} at "
-            f"{result.confidence:.2f}. BELOW the automatic threshold, so "
-            f"nothing has been applied. The invoice has not moved and the cash "
-            f"is in suspense awaiting your approval. {result.reason}"
-            + _run_loop("deposit")))
-    applied = f" -> {', '.join(result.applied)}" if result.applied else ""
-    return _back(request, tab="money-in", ok=(
-        f"{head}. Matched {result.status} via {result.method} at "
-        f"{result.confidence:.2f}{applied}. {result.reason}"
-        + _run_loop("deposit")))
+
+    # THE BUTTON DOES NOT WAIT FOR THE MATCHER. Matching can ask the model,
+    # which takes seconds (more when it retries), and then re-plans; holding the
+    # form open for all of that is what made people press it twice. The deposit
+    # exists at Airwallex now, so the reply goes back at once and matching runs
+    # right after it, on the same book. The webhook and the poll take the same
+    # intake, and intake is idempotent on the deposit id, so whichever arrives
+    # first wins and nothing posts twice.
+    from . import workspaces as _wsmod
+    handle, suffix = _wsmod.current(), _wsmod.current_suffix()
+
+    def _match_now(dep=deposit):
+        token = _wsmod.set_current(handle, suffix) if handle is not None else None
+        try:
+            try:
+                ingest_deposit(_database(), dep)
+            except Exception:
+                log.exception("intake failed for deposit %s", dep_id)
+            _run_loop("deposit")
+        finally:
+            if token is not None:
+                _wsmod.reset(token)
+
+    background.add_task(_match_now)
+    target = (f"{reference.strip()}" if reference.strip() else "")
+    return _back(request, tab="money-in", pending=f"deposit:{dep_id}", ok=(
+        f"{head}. Matching it{' to ' + target if target else ''} now; "
+        f"this page updates when it lands."))
 
 
 @app.post("/money-in/poll")
@@ -1429,7 +1436,32 @@ def _dev_routes_enabled() -> bool:
         "1", "true", "yes", "on")
 
 
-def _back(request: Request, tab: str = "setup", ok: str = "", err: str = ""):
+def _deposit_outcome(ctx: dict, pending: str) -> str:
+    """The finished sentence for a deposit the page was waiting on, or ""."""
+    from .money import money_str
+    if not pending.startswith("deposit:"):
+        return ""
+    dep = pending.split(":", 1)[1]
+    row = next((a for a in (ctx.get("arrivals") or [])
+                if a.get("deposit_id") == dep), None)
+    if row is None or not (row.get("method") or row.get("reason")):
+        return ""
+    amt = money_str(row["amount_minor"], row["currency"])
+    if row.get("applied") and not row.get("awaiting_human"):
+        where = ", ".join(x["invoice"] for x in row["applied"])
+        return f"Deposit matched \u00b7 {amt} applied to {where}."
+    if row.get("method") == "DUPLICATE":
+        return (f"Deposit set aside \u00b7 {amt}. {row.get('reason') or ''}").strip()
+    sug = ", ".join(str(x) for x in (row.get("proposed_invoices") or []))
+    if sug:
+        return (f"Deposit needs your OK \u00b7 {amt}, suggested for {sug}. "
+                f"Nothing is applied until you approve it.")
+    return (f"Deposit needs you \u00b7 {amt}. "
+            f"{row.get('reason') or 'Nothing could be matched with certainty.'}")
+
+
+def _back(request: Request, tab: str = "setup", ok: str = "", err: str = "",
+          pending: str = ""):
     """Return ONE message, in whatever shape the caller can actually read.
 
     A browser form gets a 303 with the message on the query string: no flash
@@ -1459,6 +1491,8 @@ def _back(request: Request, tab: str = "setup", ok: str = "", err: str = ""):
         q["ok"] = ok
     if err:
         q["err"] = err
+    if pending:
+        q["pending"] = pending
     return RedirectResponse(f"/app?{urlencode(q)}", status_code=303)
 
 
@@ -1539,19 +1573,25 @@ async def setup_customers(request: Request):
 
 @app.post("/setup/invoices")
 async def setup_invoices(request: Request):
-    from .domain.workspace import WorkspaceRefused, create_invoice
+    from .domain.workspace import (WorkspaceRefused, create_invoice,
+                                   normalise_doc_number)
+    from .money import money_str
 
     b = await _read_body(request)
     try:
         with _database().session_scope() as s:
             row = create_invoice(
                 s, customer_id=int(b.get("customer_id") or 0),
-                number=str(b.get("number") or ""),
+                number=normalise_doc_number(str(b.get("number") or ""), "INV"),
                 currency=str(b.get("currency") or ""),
                 amount=str(b.get("amount") or ""),
                 due_date=str(b.get("due_date") or ""))
             num = row.number
-        return _back(request, tab="setup", ok=f"Added invoice {num}.")
+            amt = money_str(row.amount_minor, row.currency)
+            due = (f" due {row.due_date.day} {row.due_date:%b %Y}"
+                   if row.due_date else "")
+        return _back(request, tab="setup",
+                     ok=f"Invoice {num} added \u00b7 {amt}{due}.")
     except (WorkspaceRefused, ValueError) as exc:
         return _back(request, tab="setup", err=str(exc))
 
@@ -1644,7 +1684,8 @@ async def setup_supplier_beneficiary(supplier_id: int, request: Request):
 
 @app.post("/setup/payables")
 async def setup_payables(request: Request):
-    from .domain.workspace import WorkspaceRefused, create_payable
+    from .domain.workspace import (WorkspaceRefused, create_payable,
+                                   normalise_doc_number)
 
     b = await _read_body(request)
     try:
@@ -1653,7 +1694,7 @@ async def setup_payables(request: Request):
                 s, supplier_id=int(b.get("supplier_id") or 0),
                 currency=str(b.get("currency") or ""),
                 amount=str(b.get("amount") or ""),
-                number=str(b.get("number") or ""),
+                number=normalise_doc_number(str(b.get("number") or ""), "BILL"),
                 depends_on=str(b.get("depends_on") or ""),
                 criticality=int(b.get("criticality") or 3),
                 due_date=str(b.get("due_date") or ""))
@@ -1717,7 +1758,7 @@ def landing() -> str:
 @app.get("/app", response_class=HTMLResponse)
 def app_page(background: BackgroundTasks, request: Request,
              tab: str = "home",
-             ok: str = "", err: str = "") -> str:
+             ok: str = "", err: str = "", pending: str = "") -> str:
     """The operator app. Everything on it was decided by the deterministic layer
     before this function ran — the page only presents.
 
@@ -1758,6 +1799,16 @@ def app_page(background: BackgroundTasks, request: Request,
         ctx["flash_ok"] = ok
     if err:
         ctx["flash_err"] = err
+    if pending:
+        ctx["flash_pending"] = pending[:80]
+        try:
+            ctx["state_version"] = state_version().get("version") or ""
+        except Exception:                                   # noqa: BLE001
+            ctx["state_version"] = ""
+        done = _deposit_outcome(ctx, pending)
+        if done:
+            ctx["flash_ok"] = done
+            ctx.pop("flash_pending", None)
     health = healthz()
     ctx["sandbox_ready"] = bool(health.get("sandbox_ready"))
 

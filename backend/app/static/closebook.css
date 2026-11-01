@@ -1018,3 +1018,29 @@ a.x-big:hover { border-color: var(--x-line-2); }
 .x-receipt-col, .x-receipt-col--model, .x-receipt-col--code { background: none; }
 .x-pill--accent { background: var(--x-accent-t); color: var(--x-accent-ink); }
 .x-pill--info { background: #f5f1e8; color: #44403c; }
+
+/* ---- confirmations: one full-width banner at the top of the screen ---- */
+.x-screen > .x-flash, .x-screen > .x-note { grid-column: 1 / -1; }
+.x-flash { display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px; margin: 0; border-radius: var(--x-r-s); border: 1px solid transparent; font-size: 14px; line-height: 1.45; transition: opacity .25s ease, transform .25s ease; }
+.x-flash.is-gone { opacity: 0; transform: translateY(-6px); }
+.x-flash--ok { background: var(--x-good-t); color: var(--x-good); border-color: #bbf7d0; }
+.x-flash--wait { background: var(--x-warn-t); color: var(--x-warn); border-color: #fde68a; }
+.x-flash--err { background: var(--x-bad-t); color: var(--x-bad); border-color: #fecaca; }
+.x-flash-ic { flex: none; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 14px; background: rgba(255,255,255,.7); }
+.x-flash--wait .x-flash-ic { animation: x-pulse 1.2s ease-in-out infinite; }
+.x-flash-tx { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.x-flash-tx b { font-weight: 600; font-size: 15px; }
+.x-flash-tx span { color: inherit; opacity: .85; }
+.x-flash-x { all: unset; cursor: pointer; flex: none; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; font-size: 20px; line-height: 1; opacity: .6; }
+.x-flash-x:hover { opacity: 1; background: rgba(255,255,255,.6); }
+@keyframes x-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+
+/* ---- form helpers ---- */
+.x-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.x-chip { all: unset; cursor: pointer; font-size: 12px; font-weight: 500; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--x-line-2); background: var(--x-card); color: var(--x-muted); }
+.x-chip:hover { border-color: var(--x-accent); color: var(--x-accent); }
+.x-preview { color: var(--x-accent) !important; font-weight: 600; min-height: 1em; }
+input[type="date"].x-input { min-height: 44px; }
+.x-btn.is-busy { opacity: .75; cursor: progress; }
+.x-btn.is-busy::before { content: ""; width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: x-spin .7s linear infinite; }
+@keyframes x-spin { to { transform: rotate(360deg); } }

@@ -752,13 +752,15 @@ def arrivals_block(s) -> list[dict]:
             # invoice at its full value, and the second one is no longer true —
             # the invoice has nothing left open. The page has to say that rather
             # than offer a button that can only fail, or worse, overpay.
-            "proposal_fit": _proposal_fit(s, i),
+            "proposal_fit": ({} if i.review_state == "APPROVED"
+                             else _proposal_fit(s, i)),
             # WHEN MATCH IS NOT ON OFFER, SAY WHY. The stored proposal may name
             # an invoice that has since been paid, or the model may have named
             # one that is no longer a candidate at all. Either way the page must
             # not simply drop the option and leave the reader wondering what
             # happened to it.
-            "no_match_why": _no_match_why(s, i, left),
+            "no_match_why": ("" if i.review_state == "APPROVED"
+                             else _no_match_why(s, i, left)),
             "proposal": _loads(i.proposed_json),
             # WAITING means PENDING, full stop. This used to also ask "is the
             # confidence below the band", which stayed true after approval — so
@@ -768,9 +770,16 @@ def arrivals_block(s) -> list[dict]:
             # same as "PENDING". A REJECTED payment is not finished either: the
             # cash is still in suspense, so it still needs resolving — it just
             # needs a DIFFERENT decision now.
-            "awaiting_human": (i.review_state != "APPROVED"
-                               and left > 0 and i.review_state != "RELEASED_INCOME"
+            # AN APPROVED PAYMENT WITH MONEY LEFT OVER STILL NEEDS A PERSON.
+            # The match is done, but the credit it left (an overpayment, or a
+            # capped repeat) is in suspense until it is refunded or released.
+            # It is listed for THAT decision; the Match option is gone because
+            # the proposal has already been applied.
+            "awaiting_human": (left > 0 and i.review_state != "RELEASED_INCOME"
                                and i.review_state != "REFUND_OWED"),
+            "credit_waiting": (i.review_state == "APPROVED" and left > 0),
+            "applied_summary": _applied_summary(by_inflow.get(i.id, []), left,
+                                                i.currency),
             "settled_match": i.match_status == MatchStatus.MATCHED,
             # WHEN it landed, for the "What just happened" timeline. Read-only:
             # nothing decides anything from it.
@@ -802,6 +811,20 @@ def arrivals_block(s) -> list[dict]:
     return out
 
 
+def _applied_summary(applied: list, left: int, currency: str) -> str:
+    """"USD 1,000.00 applied to INV-1004 · USD 200.00 credit waiting for you"."""
+    from .money import money_str
+    parts = [f"{money_str(x['applied_minor'], x.get('currency') or currency)} "
+             f"applied to {x['invoice']}" for x in applied
+             if x.get("applied_minor")]
+    if not parts:
+        return ""
+    out = ", ".join(parts)
+    if left > 0:
+        out += f" \u00b7 {money_str(left, currency)} credit waiting for you"
+    return out
+
+
 def _proposal_fit(session, inflow) -> dict:
     """Whether the stored proposal still fits the invoices it names.
 
@@ -819,6 +842,7 @@ def _proposal_fit(session, inflow) -> dict:
 
     from .money import money_str
     already: dict[int, int] = {}
+    notes: list[str] = []
     for a in allocs:
         inv = session.query(InvoiceReceivable).filter_by(id=a.invoice_id).first()
         if inv is None:
@@ -832,13 +856,21 @@ def _proposal_fit(session, inflow) -> dict:
                     f"made, so it cannot take this money. It is already somebody "
                     f"else's payment: record this one as a refund owed, or ask "
                     f"the model again.")}
-            return {"ok": False, "invoices": [inv.number], "why": (
-                f"{inv.number} has only {money_str(max(0, left), inv.currency)} "
-                f"left open, so this cannot be applied to it in full. Record it "
-                f"as a refund owed, or ask the model again.")}
+            # THE NAMED INVOICE STILL TAKES WHAT IT OWES. Approval caps the
+            # allocation at the open balance and keeps the rest as credit
+            # (ledger.approve_inflow), so Match stays on offer and the page
+            # says exactly what it will do.
+            over = a.amount_minor - left
+            notes.append(
+                f"{inv.number} has only {money_str(left, inv.currency)} left "
+                f"open: matching applies {money_str(left, inv.currency)} and "
+                f"leaves {money_str(over, inv.currency)} as credit.")
+            already[inv.id] = already.get(inv.id, 0) + left
+            continue
         already[inv.id] = already.get(inv.id, 0) + a.amount_minor
-    return {"ok": True, "why": "", "invoices": [str(x) for x in
-                                                _proposed_invoice_numbers(session, inflow)]}
+    return {"ok": True, "why": "", "note": " ".join(notes),
+            "invoices": [str(x) for x in
+                         _proposed_invoice_numbers(session, inflow)]}
 
 
 def _no_match_why(session, inflow, left: int) -> str:
@@ -934,9 +966,12 @@ def unmatched_block(s) -> list[dict]:
     # the tile counting a payment nobody is waiting on (run 10).
     from .domain.ledger import RESOLVED_STATES
 
+    from .domain.ledger import suspense_for
     inflows = [i for i in s.query(Inflow).all()
-               if i.match_status in (MatchStatus.AMBIGUOUS, MatchStatus.UNMATCHED)
-               and (i.review_state or "") not in RESOLVED_STATES]
+               if (i.review_state or "") not in RESOLVED_STATES
+               and (i.match_status in (MatchStatus.AMBIGUOUS, MatchStatus.UNMATCHED)
+                    # an approved payment's leftover credit is unmatched money
+                    or (i.review_state == "APPROVED" and suspense_for(s, i) > 0))]
     out = []
     for i in inflows:
         # The money still waiting on a person, from the ONE helper that answers
@@ -967,6 +1002,16 @@ def unmatched_block(s) -> list[dict]:
             "reference_raw": i.reference_raw,
             "match_status": i.match_status.value,
             "model_proposed": proposed,
+            # Set when this is the CREDIT an approved payment left behind, so
+            # the card says "200 left after 1,000 applied", never "1,200 held".
+            "credit_after": (_applied_summary(
+                [{"invoice": (s.get(InvoiceReceivable, m.invoice_receivable_id).number
+                              if s.get(InvoiceReceivable, m.invoice_receivable_id)
+                              else "?"),
+                  "applied_minor": m.amount_applied_minor,
+                  "currency": i.currency}
+                 for m in s.query(Match).filter_by(inflow_id=i.id).all()],
+                0, i.currency) if i.review_state == "APPROVED" else ""),
             # What CODE concluded. None when the beat that produced this inflow
             # predates the trace; the UI must then say so rather than invent one.
             "decided": decided,
@@ -1119,6 +1164,18 @@ def refresh_live_statuses(ids: list[str]) -> None:
 
 
 
+_RULE_WORDS = {
+    "EXACT": "EXACT: the reference names the invoice and the amount fits",
+    "RULE": "RULE: payer and amount",
+    "LLM": "LLM: the model read the reference, code re-checked it",
+    "DUPLICATE": "Already paid: the invoice it names was settled before",
+}
+
+
+def _rule_words(method: str) -> str:
+    return _RULE_WORDS.get(method or "", method or "no rule")
+
+
 def receipt_data(s, i, prop: dict, final_conf, applied) -> dict:
     """The Model said / Code decided pair for one payment.
 
@@ -1177,19 +1234,41 @@ def receipt_data(s, i, prop: dict, final_conf, applied) -> dict:
     # you" on every deposit the rules HAD applied, right beside a Matched chip.
     # Held means nothing of it was applied: everything is still in suspense.
     left = int(applied or 0)
-    nothing_applied = left >= int(getattr(i, "amount_minor", 0) or 0)
-    verdict = "held for you" if nothing_applied or getattr(
-        i, "review_state", None) in ("PENDING", "REJECTED") else "applied"
-    if i.match_status and i.match_status.value == "ESCALATED":
-        verdict = "escalated to a person"
+    amount = int(getattr(i, "amount_minor", 0) or 0)
+    nothing_applied = left >= amount
+    review = (getattr(i, "review_state", None) or "").upper()
+    method = (i.match_method or "")
+    # ONE PLAIN VERDICT PER STATE. "applied (a person decides this one)" said
+    # two opposite things at once, and it was printed on deposits the rules had
+    # applied with certainty.
+    if review == "REFUND_OWED":
+        verdict = "set aside as a refund owed"
+    elif review == "RELEASED_INCOME":
+        verdict = "released as income"
+    elif method == "DUPLICATE":
+        verdict = "set aside: the invoice was already paid"
+    elif review == "APPROVED":
+        who = getattr(i, "reviewed_by", None) or "a person"
+        verdict = (f"applied after {who}'s OK"
+                   + (", credit waiting" if left > 0 else ""))
     elif i.match_status and i.match_status.value == "UNMATCHED":
         verdict = "left unmatched"
+    elif nothing_applied or review in ("PENDING", "REJECTED"):
+        verdict = "waiting for you"
+    else:
+        verdict = "applied automatically"
+    # A RULE THAT HOLDS MONEY HAS NO CONFIDENCE. "confidence 0.00, below the
+    # 0.90 bar" on an already-paid invoice read as a failed guess; it was a
+    # rule doing exactly its job.
+    if method == "DUPLICATE":
+        final_conf = None
     code = {"verdict": verdict,
-            "rule": (i.match_method or "no rule"),
+            "rule": (method or "no rule"),
             "confidence": final_conf,
             "note": ("" if final_conf is None
                      or final_conf >= MATCH_CONFIDENCE_AUTO
-                     else f"below the {MATCH_CONFIDENCE_AUTO:.2f} auto band, held for you")}
+                     or not verdict.startswith("waiting")
+                     else f"below the {MATCH_CONFIDENCE_AUTO:.2f} auto band, so it waits for you")}
     return {"model": model, "code": code}
 
 

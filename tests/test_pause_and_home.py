@@ -161,7 +161,7 @@ class TestNeverClaimsMoreThanHappened:
         _deposit()
         from app.dashboard import build_context
         a = [x for x in build_context([])["arrivals"] if x["deposit_id"] == "dep-1"][0]
-        assert a["receipt"]["code"]["verdict"] == "applied"
+        assert a["receipt"]["code"]["verdict"] == "applied automatically"
 
     def test_an_unapplied_deposit_is_held(self, client):
         _invoice()

@@ -45,6 +45,37 @@ def create_customer(session, *, name: str, email: str = "", country: str = "") -
     return row
 
 
+_DOC_PREFIX_RE = None
+
+
+def normalise_doc_number(raw: str, prefix: str) -> str:
+    """The number a person MEANT, written one way.
+
+    "1" -> "INV-1", "1001" -> "INV-1001", "inv1001" / "inv 1001" / "inv-1001"
+    -> "INV-1001". Anything else is kept as typed, uppercased ("PO-7001-b" ->
+    "PO-7001-B"). The form previews the same rule live, so what you see under
+    the field is what gets saved.
+    """
+    import re
+    t = " ".join((raw or "").split()).strip()
+    if not t:
+        return ""
+    if re.fullmatch(r"\d+", t):
+        return f"{prefix}-{t}"
+    m = re.fullmatch(rf"{re.escape(prefix)}[\s_\-#.]*(\d+)", t, re.I)
+    if m:
+        return f"{prefix}-{m.group(1)}"
+    return t.upper()
+
+
+def _find_number(session, model, number: str):
+    """A row whose number equals `number` ignoring case and spacing."""
+    from sqlalchemy import func
+    key = (number or "").strip().lower()
+    return (session.query(model)
+            .filter(func.lower(func.trim(model.number)) == key).first())
+
+
 def create_invoice(session, *, customer_id: int, number: str, currency: str,
                    amount: str, due_date: str = "") -> InvoiceReceivable:
     number = (number or "").strip()
@@ -54,7 +85,7 @@ def create_invoice(session, *, customer_id: int, number: str, currency: str,
     ccy = (currency or "").strip().upper()
     if len(ccy) != 3 or not ccy.isalpha():
         raise WorkspaceRefused("Currency must be a 3-letter code, e.g. USD.")
-    if session.query(InvoiceReceivable).filter_by(number=number).first():
+    if _find_number(session, InvoiceReceivable, number):
         raise WorkspaceRefused(f"Invoice {number} already exists. Numbers have to "
                                f"be unique: a payment matches on the number.")
     if session.get(Customer, customer_id) is None:
@@ -123,8 +154,8 @@ def create_payable(session, *, supplier_id: int, currency: str, amount: str,
                    criticality: int = 3, due_date: str = "") -> InvoicePayable:
     number = (number or "").strip()
     if not number:
-        raise WorkspaceRefused("The bill needs a reference, e.g. PO-7001. It is "
-                               "half of the payment's identity.")
+        raise WorkspaceRefused("The bill needs a reference, e.g. BILL-1001. It "
+                               "is your own number for this bill.")
     ccy = (currency or "").strip().upper()
     if len(ccy) != 3 or not ccy.isalpha():
         raise WorkspaceRefused("Currency must be a 3-letter code, e.g. USD.")
@@ -136,7 +167,7 @@ def create_payable(session, *, supplier_id: int, currency: str, amount: str,
             f"{sup.name} has no Airwallex beneficiary yet, so nothing could be "
             f"paid. Create a beneficiary for them first, on the Suppliers card."
         )
-    if session.query(InvoicePayable).filter_by(number=number).first():
+    if _find_number(session, InvoicePayable, number):
         raise WorkspaceRefused(
             f"{number} already exists, nothing added. A bill number is half of "
             f"the payment's identity, so two bills cannot share one.")
@@ -153,7 +184,10 @@ def create_payable(session, *, supplier_id: int, currency: str, amount: str,
     if (depends_on or "").strip():
         dep_label = depends_on.strip()
         rec = (session.query(InvoiceReceivable)
-               .filter_by(number=dep_label).first())
+               .filter_by(number=dep_label).first()
+               or _find_number(session, InvoiceReceivable, dep_label)
+               or _find_number(session, InvoiceReceivable,
+                               normalise_doc_number(dep_label, "INV")))
         if rec is None:
             raise WorkspaceRefused(
                 f"There is no invoice called {dep_label}, so this bill cannot "
