@@ -86,6 +86,11 @@ def wire(monkeypatch):
             super().__init__(*a, **kw)
 
     monkeypatch.setattr(conductor, "Executor", FakeExecutor)
+    # The transport is fake, so the "do we have sandbox credentials"
+    # gate must not depend on the machine running the suite (CI has
+    # none, and the run went REFUSED before the fake was reached).
+    from app.config import get_settings as _gs
+    monkeypatch.setattr(type(_gs()), "sandbox_ready", lambda self: True)
     yield FakeTransfers
     FakeTransfers.ALL.clear()
 
