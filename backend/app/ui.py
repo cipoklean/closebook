@@ -2719,6 +2719,10 @@ def _money_out(c: dict) -> str:
                 cls, mark = "is-stopped", "✕"
             elif stopped and i > idx:
                 cls, mark = "", str(i + 1)      # never reached: "next", not "done"
+            elif st == "PAID":
+                # PAID IS THE LAST STEP COMPLETED, not one in progress: the bank
+                # confirmed it, so "Confirmed" gets its tick like the rest.
+                cls, mark = "is-done", "✓"
             else:
                 cls = "is-done" if i < idx else ("is-now" if i == idx else "")
                 mark = "✓" if i < idx else str(i + 1)

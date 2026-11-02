@@ -236,3 +236,11 @@ def test_pause_and_resume_forms_reload_instead_of_saying_done(client):
     form = html.split('data-testid="ai-resume-form"')[0].rsplit("<form", 1)[1]
     assert "data-reload" in form
     assert 'f.hasAttribute("data-reload")' in html
+
+
+def test_a_paid_transfer_ticks_every_step_including_confirmed():
+    # Paid is the bank's confirmation: "Confirmed" must not read as in progress.
+    from app import ui
+    src = open(ui.__file__).read()
+    block = src.split('elif st == "PAID":')[1].split("else:")[0]
+    assert 'cls, mark = "is-done", "✓"' in block
