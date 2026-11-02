@@ -204,7 +204,16 @@ def authority(c: dict) -> str:
 
 
 # ----------------------------------------------------------- needs your OK
+def _repeat_of(a: dict) -> str:
+    """The earlier deposit's number when intake flagged this one as a repeat."""
+    import re as _re
+    m = _re.search(r"repeat of deposit #(\d+)", str(a.get("reason") or ""))
+    return m.group(1) if m else ""
+
+
 def _deposit_why(a: dict) -> str:
+    if _repeat_of(a):
+        return f"looks like a repeat of #{_repeat_of(a)}"
     st = str((a.get("proposal") or {}).get("status") or a.get("match_status") or "").upper()
     return {"PARTIAL": "pays only part of an invoice",
             "OVERPAID": "more than the invoice owes",
@@ -377,7 +386,12 @@ def money_in_card(c: dict) -> str:
     invs = applied or list(a.get("proposed_invoices") or [])
     inv_txt = ", ".join(invs) if invs else ""
 
-    if method in ("LLM", "MODEL", "AI"):
+    twin = _repeat_of(a)
+    if twin:
+        ai = (f'<p>Looks like a repeat of deposit #{_e(twin)}.</p>'
+              '<p class="h-why">Same payer, amount and reference, so nothing '
+              'was applied twice.</p>')
+    elif method in ("LLM", "MODEL", "AI"):
         ref_txt = (a.get("reference") or "").strip()
         ai = ((f'<p>Reference "{_e(ref_txt)}" means '
                f'{_e(inv_txt or "no invoice it could name")}</p>') if ref_txt
@@ -387,17 +401,25 @@ def money_in_card(c: dict) -> str:
               f'reach the {_e(_pct(bar))} bar, so the rules decide.</p>')
     else:
         rule = str((prop.get("evidence") or {}).get("rule") or "")
-        if method == "EXACT" or not rule:
+        if method == "EXACT":
             ai = ('<p>Not needed.</p><p class="h-why">The reference named the '
                   'invoice exactly, so the rules decided before the AI was '
                   'asked.</p>')
+        elif not rule:
+            # A RULE match (payer and amount, say) did NOT read the reference
+            # exactly; saying so would be false for "inv 1oo1".
+            ai = ('<p>Not needed.</p><p class="h-why">A deterministic rule '
+                  'settled it before the AI was asked.</p>')
         else:
             ai = (f'<p>Not asked. A rule proposed {_e(inv_txt or "a match")}.</p>'
                   f'<p class="h-why">Rule: {_e(rule)}.</p>')
 
     ok_conf = conf is not None and float(conf) >= bar
     checks = ""
-    if inv_txt:
+    if twin:
+        checks += _check(False, f"Not a repeat of an earlier deposit (#{twin})",
+                         "rule-fail")
+    elif inv_txt:
         checks += _check(True, f"{inv_txt} exists and was open", "rule-pass")
     else:
         checks += _check(False, "No open invoice matches the reference", "rule-fail")

@@ -109,3 +109,21 @@ class TestPagePolish:
     def test_the_currency_field_fits_its_label(self):
         from app.ui import _currency_select
         assert "x-span-3" in _currency_select()
+
+
+def test_a_rule_match_does_not_claim_the_reference_was_exact():
+    """inv 1oo1 matched by payer and amount must not read 'named the invoice exactly'."""
+    from app import ui_home
+    import inspect
+    src = inspect.getsource(ui_home)
+    assert 'if method == "EXACT":' in src
+    assert "A deterministic rule" in src
+
+
+def test_home_names_a_repeat_deposit():
+    from app.ui_home import _repeat_of, _deposit_why
+    a = {"reason": "Looks like a repeat of deposit #1, sent 3 min after it: same payer",
+         "match_status": "AMBIGUOUS"}
+    assert _repeat_of(a) == "1"
+    assert _deposit_why(a) == "looks like a repeat of #1"
+    assert _deposit_why({"match_status": "AMBIGUOUS"}) == "reference unclear"

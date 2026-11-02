@@ -3009,12 +3009,14 @@ def _ok(c: dict) -> str:
                     f"need{'s' if n == 1 else ''} your OK")
             sub = (f"Including {n_dep} deposit{'s' if n_dep != 1 else ''} nobody "
                    f"has placed yet. Decide each one below.")
+            ico = _I["warn"]
         else:
+            ico = _I["check"]
             head = "Nothing needs your OK"
             sub = "Every payment is inside your limits, or already decided."
         body = _card(inner=(
             '<div class="x-banner"><div class="x-banner-l">'
-            f'<span class="x-banner-ico">{_I["check"]}</span>'
+            f'<span class="x-banner-ico">{ico}</span>'
             f'<div><h2>{head}</h2>'
             f'<p>{sub}</p></div>'
             '</div></div>'))
