@@ -96,8 +96,13 @@ REPEAT_WINDOW_SECONDS = 600
 
 
 def _recent_twin(session, inflow):
-    """An earlier deposit with the same payer, amount, currency and reference,
-    received within REPEAT_WINDOW_SECONDS of this one, or None."""
+    """An EARLIER deposit with the same payer, amount, currency and reference,
+    received within REPEAT_WINDOW_SECONDS before this one, or None.
+
+    Earlier only. Matching runs in the background, so the second of two quick
+    deposits can be read before the first; looking both ways then labelled the
+    ORIGINAL as the repeat of the one sent after it.
+    """
     from datetime import timedelta
     from ..timeutils import utcnow as _now
 
@@ -109,7 +114,7 @@ def _recent_twin(session, inflow):
         from datetime import timezone
         now = now.replace(tzinfo=timezone.utc)
     rows = (session.query(Inflow)
-            .filter(Inflow.id != inflow.id,
+            .filter(Inflow.id < inflow.id,
                     Inflow.amount_minor == inflow.amount_minor,
                     Inflow.currency == inflow.currency)
             .order_by(Inflow.id.desc()).limit(50).all())
@@ -124,7 +129,7 @@ def _recent_twin(session, inflow):
         if t.tzinfo is None:
             from datetime import timezone
             t = t.replace(tzinfo=timezone.utc)
-        if abs((now - t).total_seconds()) <= REPEAT_WINDOW_SECONDS:
+        if -5 <= (now - t).total_seconds() <= REPEAT_WINDOW_SECONDS:
             return r
     return None
 
@@ -447,9 +452,15 @@ def record_and_match(session, *, deposit_id: str, currency: str,
     twin = _recent_twin(session, inflow)
     if twin is not None:
         from .policy import MATCH_CONFIDENCE_AUTO as _AUTO
-        when = twin.received_at.strftime("%H:%M") if twin.received_at else ""
-        lead = (f"Looks like a repeat of deposit #{twin.id}"
-                f"{' from ' + when + ' UTC' if when else ''}: same payer, "
+        gap = ""
+        if twin.received_at and inflow.received_at:
+            a, b = twin.received_at, inflow.received_at
+            if (a.tzinfo is None) != (b.tzinfo is None):
+                a, b = a.replace(tzinfo=None), b.replace(tzinfo=None)
+            secs = max(0, int((b - a).total_seconds()))
+            gap = (f", sent {secs} s after it" if secs < 120
+                   else f", sent {secs // 60} min after it")
+        lead = (f"Looks like a repeat of deposit #{twin.id}{gap}: same payer, "
                 f"amount and reference.")
         result = replace(
             result,

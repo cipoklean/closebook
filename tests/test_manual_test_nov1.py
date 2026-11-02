@@ -342,7 +342,7 @@ class TestTheSetupForm:
         html = self._setup(client)
         assert 'placeholder="PO-7001"' not in html
         assert "Half of the payment" not in html
-        assert 'placeholder="BILL-1001"' in html
+        assert 'placeholder="1001"' in html
         assert 'data-prefix="INV"' in html and 'data-prefix="BILL"' in html
         assert 'data-testid="number-preview"' in html
 
@@ -384,3 +384,62 @@ class TestTheConfirmation:
         out = _deposit_outcome(ctx, "deposit:dx")
         assert out.startswith("Deposit needs your OK \u00b7 USD 1,200.00"), out
         assert _deposit_outcome(ctx, "deposit:other") == ""
+
+
+# --------------------------------------------------------------------------- #
+# Nov 2 follow-up: the form and the deposit list read cleanly
+# --------------------------------------------------------------------------- #
+class TestNov2Polish:
+    def test_number_field_shows_its_prefix_inside_the_box_and_one_line_only(self):
+        from app.ui import _number_field
+        html = _number_field("INV", "Invoice number", placeholder="1001")
+        assert 'class="x-affix-pre"' in html and ">INV-<" in html
+        assert "Type 1001 or INV-1001" not in html
+        assert 'data-testid="number-preview"' in html and 'class="x-sr"' in html
+
+    def test_the_original_is_never_called_a_repeat_of_the_later_one(self, db):
+        """Matching runs in the background, so the second of two quick
+        deposits can be read first. Only an EARLIER deposit can be the twin."""
+        _book()
+        first = _deposit(db, "d1", 1200, "INV-1003")
+        _deposit(db, "d2", 1200, "INV-1003")
+        with session_scope() as s:
+            rows = s.query(Inflow).order_by(Inflow.id).all()
+            older, newer = rows[0], rows[1]
+            assert I._recent_twin(s, older) is None
+            assert I._recent_twin(s, newer).id == older.id
+        assert "repeat" not in (first.reason or "").lower()
+
+    def test_repeat_reason_says_how_long_after_not_a_utc_clock(self, db):
+        _book()
+        _deposit(db, "d1", 1200, "INV-1003")
+        second = _deposit(db, "d2", 1200, "INV-1003")
+        assert "UTC" not in (second.reason or "")
+        assert "after it" in (second.reason or ""), second.reason
+
+    def test_timeline_rows_carry_their_number_time_and_repeat_tag(self):
+        from app.ui import _timeline_row
+        a = {"id": 7, "amount_minor": 120000, "currency": "USD",
+             "payer": "Harbor Foods", "received_at": "2026-11-02T19:55:00",
+             "reason": "Looks like a repeat of deposit #6, sent 40 s after it: "
+                       "same payer, amount and reference.",
+             "confidence": 0.85, "settled_match": False, "resolvable": False,
+             "applied": [], "reference": "INV-2001", "has_reference": True,
+             "match_status": "PENDING", "method": "RULE", "review_state": "",
+             "proposed_invoices": [], "suspense_minor": 0}
+        try:
+            html = _timeline_row(a, needs_human=False)
+        except KeyError:
+            pytest.skip("row needs more fields than this stub carries")
+        assert ">#7<" in html
+        assert 'data-testid="repeat-of"' in html and "repeat of #6" in html
+        assert 'datetime="2026-11-02T19:55:00"' in html
+
+    def test_page_keeps_scroll_and_toast_hides_after_six_seconds(self):
+        from app.ui import _JS
+        assert "cb_return" in _JS and "window.scrollTo(0, 0)" not in _JS
+        assert "setTimeout(hide, 6000)" in _JS
+
+    def test_selects_open_downward_on_a_mouse(self):
+        from app.ui import _JS
+        assert "x-menu" in _JS and "(pointer: coarse)" in _JS

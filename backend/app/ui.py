@@ -690,10 +690,21 @@ _JS = """
     return t.toUpperCase();
   };
   [].forEach.call(document.querySelectorAll("input[data-prefix]"), function (inp) {
-    var out = inp.parentNode.querySelector("[data-preview-for]");
+    var field = inp.closest(".x-field");
+    var out = field && field.querySelector("[data-preview-for]");
+    var box = inp.closest("[data-affix]");
     var upd = function () {
-      var v = norm(inp.value, inp.getAttribute("data-prefix"));
+      var raw = inp.value.trim();
+      var v = norm(raw, inp.getAttribute("data-prefix"));
       if (out) out.textContent = v ? "Saves as " + v : "";
+      /* the prefix stays while the box is empty or holds digits only */
+      var free = !!raw && !/^\d+$/.test(raw);
+      if (box) {
+        box.classList.toggle("is-free", free);
+        var pre = box.querySelector(".x-affix-pre");
+        if (free || !pre) inp.style.removeProperty("padding-left");
+        else inp.style.setProperty("padding-left", (pre.offsetWidth + 6) + "px", "important");
+      }
     };
     inp.addEventListener("input", upd); upd();
   });
@@ -751,6 +762,11 @@ _JS = """
         }
         try { localStorage.setItem("cb_last_deposit", JSON.stringify({k: key, t: Date.now()})); } catch (e) {}
       }
+      try {
+        sessionStorage.setItem("cb_return", JSON.stringify({
+          y: window.scrollY, t: Date.now(), action: f.getAttribute("action") || "",
+          tab: (new URLSearchParams(location.search)).get("tab") || "home"}));
+      } catch (e) {}
       if (sub) {
         window.setTimeout(function () {
           sub.disabled = true;
@@ -768,10 +784,28 @@ _JS = """
     var hide = function () { flash.classList.add("is-gone"); window.setTimeout(function () { if (flash.parentNode) flash.parentNode.removeChild(flash); }, 300); };
     if (x) x.addEventListener("click", hide);
     if (!flash.hasAttribute("data-pending") && !flash.classList.contains("x-flash--err")) {
-      window.setTimeout(hide, 8000);
+      window.setTimeout(hide, 6000);
     }
-    window.scrollTo(0, 0);
   }
+
+  /* STAY WHERE YOU WERE. A form post reloads the page, which used to land at
+     the top of Setup after every add, so each customer, invoice or bill meant
+     scrolling back down. The scroll position and the form are remembered on
+     submit and restored on the page that comes back; the result shows as a
+     toast pinned to the screen, so it is seen wherever you are. */
+  try {
+    var back = JSON.parse(sessionStorage.getItem("cb_return") || "null");
+    sessionStorage.removeItem("cb_return");
+    var tabNow = (new URLSearchParams(location.search)).get("tab") || "home";
+    if (back && back.tab === tabNow && (Date.now() - back.t) < 60000) {
+      window.scrollTo(0, back.y);
+      var again = back.action && document.querySelector('form.x-form[action="' + back.action + '"]');
+      var firstBox = again && again.querySelector("input:not([type=hidden]):not([type=date]), textarea");
+      if (firstBox && flash && !flash.classList.contains("x-flash--err")) {
+        firstBox.focus({ preventScroll: true });
+      }
+    }
+  } catch (e) {}
 
   /* A DEPOSIT JUST SENT: watch for its match, then show it. This is the one
      refresh the page takes on its own, because the person asked for it by
@@ -797,6 +831,103 @@ _JS = """
     };
     watch();
   }
+}());
+
+/* Times on deposit rows are stored in UTC; show them on the reader's clock. */
+(function () {
+  [].forEach.call(document.querySelectorAll("time[data-local]"), function (t) {
+    var raw = t.getAttribute("datetime") || "";
+    if (!raw) return;
+    if (!/[zZ]|[+\-]\d\d:?\d\d$/.test(raw)) raw += "Z";
+    var d = new Date(raw);
+    if (isNaN(d)) return;
+    t.textContent = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  });
+}());
+
+/* DROPDOWNS OPEN DOWNWARD. A native list flips upward whenever the browser
+   thinks the space below is short, which put the currency list over the field
+   above it. On a mouse, a select opens this menu instead: always under the
+   field, scrolling the page a little first if it has to. The real <select>
+   stays in the form and keeps its value, keyboard and change events; phones
+   keep their own picker, which is better than anything drawn here. */
+(function () {
+  if (!window.matchMedia || window.matchMedia("(pointer: coarse)").matches) return;
+  var cur = null;
+  var close = function () {
+    if (!cur) return;
+    if (cur.menu.parentNode) cur.menu.parentNode.removeChild(cur.menu);
+    cur.sel.removeAttribute("aria-expanded");
+    cur = null;
+  };
+  var pick = function (sel, i) {
+    if (sel.selectedIndex !== i) {
+      sel.selectedIndex = i;
+      sel.dispatchEvent(new Event("input", { bubbles: true }));
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    close();
+    sel.focus({ preventScroll: true });
+  };
+  var mark = function (i) {
+    if (!cur) return;
+    var items = cur.menu.children;
+    for (var k = 0; k < items.length; k++) items[k].classList.toggle("is-active", k === i);
+    cur.active = i;
+    if (items[i]) items[i].scrollIntoView({ block: "nearest" });
+  };
+  var open = function (sel) {
+    var want = Math.min(320, sel.options.length * 38 + 12);
+    var r = sel.getBoundingClientRect();
+    var below = window.innerHeight - r.bottom - 12;
+    if (below < want) { window.scrollBy(0, want - below); r = sel.getBoundingClientRect(); }
+    var menu = document.createElement("div");
+    menu.className = "x-menu";
+    menu.setAttribute("role", "listbox");
+    [].forEach.call(sel.options, function (o, i) {
+      var it = document.createElement("div");
+      it.className = "x-menu-opt" + (i === sel.selectedIndex ? " is-sel" : "");
+      it.setAttribute("role", "option");
+      it.textContent = o.textContent;
+      if (o.disabled) it.classList.add("is-off");
+      it.addEventListener("mousedown", function (ev) {
+        ev.preventDefault();
+        if (!o.disabled) pick(sel, i);
+      });
+      it.addEventListener("mousemove", function () { mark(i); });
+      menu.appendChild(it);
+    });
+    menu.style.left = (r.left + window.scrollX) + "px";
+    menu.style.top = (r.bottom + window.scrollY + 4) + "px";
+    menu.style.minWidth = r.width + "px";
+    menu.style.maxHeight = Math.max(160, Math.min(320, window.innerHeight - r.bottom - 16)) + "px";
+    document.body.appendChild(menu);
+    sel.setAttribute("aria-expanded", "true");
+    cur = { sel: sel, menu: menu, active: sel.selectedIndex };
+    mark(sel.selectedIndex);
+  };
+  document.addEventListener("mousedown", function (ev) {
+    var t = ev.target;
+    var sel = t && t.closest ? t.closest("select.x-select") : null;
+    if (sel && !sel.disabled && !sel.multiple && !sel.hasAttribute("data-loading")
+        && sel.options.length > 1 && ev.button === 0) {
+      ev.preventDefault();
+      var same = cur && cur.sel === sel;
+      close();
+      if (!same) { sel.focus({ preventScroll: true }); open(sel); }
+      return;
+    }
+    if (cur && !(t && t.closest && t.closest(".x-menu"))) close();
+  }, true);
+  document.addEventListener("keydown", function (ev) {
+    if (!cur) return;
+    var n = cur.sel.options.length;
+    if (ev.key === "Escape" || ev.key === "Tab") { close(); return; }
+    if (ev.key === "ArrowDown") { ev.preventDefault(); mark(Math.min(n - 1, cur.active + 1)); }
+    else if (ev.key === "ArrowUp") { ev.preventDefault(); mark(Math.max(0, cur.active - 1)); }
+    else if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); pick(cur.sel, cur.active); }
+  }, true);
+  window.addEventListener("resize", close);
 }());
 
 /* THE ACCOUNT PICKER FILLS ITSELF IN. The page renders without waiting for
@@ -3093,13 +3224,22 @@ def _timeline_row(a: dict, *, needs_human: bool) -> str:
     tone = ("good" if a.get("settled_match")
             else ("bad" if (conf is not None and conf < 0.75) else "warn"))
     can_resolve = bool(a.get("resolvable"))
+    import re as _re
+    _rm = _re.match(r"Looks like a repeat of deposit #(\d+)", a.get("reason") or "")
+    repeat_of = _rm.group(1) if _rm else ""
     return (
         f'<details class="x-tl" data-testid="timeline-row" '
         f'data-deposit="{a["id"]}" id="deposit-{a["id"]}"'
         + (" open" if needs_human else "") + '>'
-        f'<summary><b>{e(money(a["amount_minor"], a["currency"]))}</b>'
-        f'<span class="x-hint">{e(a["payer"] or "payer not given")}</span>'
-        f'<span class="x-pill x-pill--{tone}" data-testid="deposit-state">'
+        f'<summary><span class="x-tl-no" title="Deposit number">#{a["id"]}</span>'
+        f'<b>{e(money(a["amount_minor"], a["currency"]))}</b>'
+        f'<span class="x-hint">{e(a["payer"] or "payer not given")}'
+        + (f' \u00b7 <time data-local datetime="{e(a["received_at"])}">'
+           f'{e(a["received_at"][11:16])}</time>' if a.get("received_at") else '')
+        + '</span>'
+        + (f'<span class="x-pill x-pill--warn" data-testid="repeat-of">'
+           f'repeat of #{repeat_of}</span>' if repeat_of else '')
+        + f'<span class="x-pill x-pill--{tone}" data-testid="deposit-state">'
         f'{e(_deposit_state(a))}</span>'
         + ('<span class="x-pill x-pill--warn" data-testid="needs-you">'
            'needs you</span>' if needs_human else '')
@@ -3148,8 +3288,9 @@ def _timeline(c: dict, *, only_needing_human: bool = False,
         f'<span class="x-pill x-pill--warn">{len(rows)} to review</span>'
         '</div>' if only_needing_human else
         '<div class="x-cardhead"><div><h3>One timeline of every deposit</h3>'
-        '<p class="x-help">What arrived, what the model said, what the code '
-        'decided, and where the money went. Each row expands.</p></div>'
+        '<p class="x-help">Newest first. What arrived, what the model said, '
+        'what the code decided, and where the money went. Each row expands.'
+        '</p></div>'
         f'<span class="x-pill x-pill--accent">{len(rows)} '
         f'deposit{"s" if len(rows) != 1 else ""}</span></div>')
     return _card(span=span, inner=(
@@ -3583,12 +3724,22 @@ def _date_field(name: str = "due_date", label: str = "Due date", *,
 
 def _number_field(prefix: str, label: str, *, span: str = "x-span-2",
                   placeholder: str = "", hint: str = "") -> str:
-    """A document number that shows, as you type, how it will be saved."""
-    return _field("number", label, span=span, placeholder=placeholder,
-                  required=True, hint=hint,
-                  attrs=f'data-prefix="{e(prefix)}"',
-                  after=(f'<span class="x-hint x-preview" data-preview-for="number" '
-                         f'data-testid="number-preview" aria-live="polite"></span>'))
+    """A document number with its prefix shown INSIDE the box.
+
+    A preview line plus a hint line under the field read as two competing
+    instructions. The prefix sits in the field instead ("INV-" then the digits
+    you type), and it steps aside the moment you type letters of your own, so
+    what you see is what gets saved. The server applies the same rule
+    (`normalise_doc_number`); the live preview stays for screen readers only.
+    """
+    return (f'<div class="x-field {span}"><label for="f-number">{e(label)}</label>'
+            f'<div class="x-affix" data-affix>'
+            f'<span class="x-affix-pre" aria-hidden="true">{e(prefix)}-</span>'
+            f'<input class="x-input" id="f-number" name="number" type="text" '
+            f'value="" placeholder="{e(placeholder)}" required autocomplete="off" '
+            f'data-prefix="{e(prefix)}"></div>'
+            f'<span class="x-sr" data-preview-for="number" '
+            f'data-testid="number-preview" aria-live="polite"></span></div>')
 
 
 def _select(name: str, label: str, options: list[tuple[str, str]], *,
@@ -3793,7 +3944,7 @@ def _setup(c: dict) -> str:
         + _select("customer_id", "Customer", cust_opts, span="x-span-4",
                   selected=newest_customer)
         + _number_field("INV", "Invoice number", span="x-span-2",
-                        placeholder="1001", hint="Type 1001 or INV-1001")
+                        placeholder="1001")
         + _field("amount", "Amount", span="x-span-2", placeholder="12000",
                  required=True, kind="number", step="0.01",
                  attrs='min="0.01" inputmode="decimal"')
@@ -3900,8 +4051,7 @@ def _setup(c: dict) -> str:
         + _select("supplier_id", "Supplier", sup_opts, span="x-span-3",
                   selected=newest_supplier)
         + _number_field("BILL", "Bill number", span="x-span-2",
-                        placeholder="BILL-1001",
-                        hint="Your own number for this bill")
+                        placeholder="1001")
         + _field("amount", "Amount", span="x-span-2", placeholder="1800",
                  required=True, kind="number", step="0.01",
                  attrs='min="0.01" inputmode="decimal"')
