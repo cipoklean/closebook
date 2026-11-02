@@ -171,7 +171,7 @@ def authority(c: dict) -> str:
             + _check(True, "You can still approve anything yourself")
         )
         control = (
-            '<form class="h-resume" method="post" action="/agent/resume" data-action '
+            '<form class="h-resume" method="post" action="/agent/resume" data-action data-reload '
             'data-testid="ai-resume-form">'
             '<label class="h-lbl" for="resume-pin">Your PIN to resume</label>'
             '<div class="h-inline"><input id="resume-pin" class="x-input" name="pin" '
@@ -192,7 +192,7 @@ def authority(c: dict) -> str:
                             "wait for you")
         )
         control = (
-            '<form method="post" action="/agent/pause" data-action '
+            '<form method="post" action="/agent/pause" data-action data-reload '
             'data-testid="ai-pause-form"><button class="h-pause" type="submit" '
             f'data-testid="ai-pause">{ui._I["lock"]}<span>Pause the AI</span>'
             '</button></form>')

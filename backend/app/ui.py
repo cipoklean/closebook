@@ -526,7 +526,10 @@ _JS = """
         Object.keys(res.tiles || {}).forEach(function (k) {
           [].forEach.call(
             document.querySelectorAll('[data-figure="' + k + '"]'),
-            function (el) { el.textContent = res.tiles[k]; });
+            function (el) {
+              var short = res.tiles[k + "_short"];
+              el.textContent = (typeof short === "string") ? short : res.tiles[k];
+            });
         });
         var badges = document.querySelectorAll(
           '.x-nav .x-badge, .x-tabs .x-badge, [data-testid="needs-you-count"]');
@@ -541,6 +544,10 @@ _JS = """
   };
 
   var settled = function (f, msg) {
+    // A FORM THAT CHANGES THE WHOLE PAGE'S STATE (pause, resume) reloads it:
+    // "this no longer needs you" is the wrong sentence for switching the AI
+    // off, and the authority card must redraw to say what the AI may do now.
+    if (f.hasAttribute("data-reload")) { window.location.reload(); return; }
     // Clear the PIN the moment it is spent: leaving it in a field on a card
     // that no longer needs it invites it to be typed somewhere it must not be.
     var p = f.querySelector("input[name=pin]");
@@ -1404,8 +1411,16 @@ def tile_text(c: dict) -> dict:
                     + (f"for supplier bills and the {floor_txt} safety cushion"
                        if promised_txt else
                        f"spare above the {floor_txt} safety cushion"))
+    # THE FIGURE, NOT THE SENTENCE. Home shows the bare amount in the
+    # free-to-spend slot and explains the cushion underneath; the live patcher
+    # must write the same short figure there, or the slot grows into a sentence
+    # that repeats the note below it.
+    free_short = ("Short by " + " and ".join(
+        money_str(v, ccy) for ccy, v in sorted(shorts.items()))
+        if shorts else money_str(m["headline_free_minor"], m["headline_currency"]))
     paid = m.get("paid_today") or []
     return {
+        "free_to_spend_short": free_short,
         "cash": join(cash) or "no cash yet",
         "promised": promised_txt or "Nothing owed",
         "in_flight": join(m["in_flight"]) or "Nothing sent",

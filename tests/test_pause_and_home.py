@@ -215,3 +215,24 @@ def test_a_bill_held_for_cash_is_not_counted_as_needing_your_ok():
     c["waiting"] = []
     assert needs_you(c) == 1
     assert len(needs_items(c)) == 1
+
+
+def test_tiles_carry_the_bare_free_to_spend_figure(client):
+    # The live patcher writes tiles into Home's free-to-spend slot. The slot
+    # holds an amount; the sentence about the cushion lives in the note below.
+    res = client.get("/state/tiles").json()
+    short = res["tiles"]["free_to_spend_short"]
+    assert "safety cushion" not in short
+    assert "safety cushion" in res["tiles"]["free_to_spend"]
+
+
+def test_pause_and_resume_forms_reload_instead_of_saying_done(client):
+    html = client.get("/app?tab=home").text
+    assert 'data-testid="ai-pause-form"' in html
+    form = html.split('data-testid="ai-pause-form"')[0].rsplit("<form", 1)[1]
+    assert "data-reload" in form
+    client.post("/agent/pause")
+    html = client.get("/app?tab=home").text
+    form = html.split('data-testid="ai-resume-form"')[0].rsplit("<form", 1)[1]
+    assert "data-reload" in form
+    assert 'f.hasAttribute("data-reload")' in html
