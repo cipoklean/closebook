@@ -34,10 +34,26 @@ class WorkspaceRefused(ValueError):
 
 
 # ---------------------------------------------------------------- customers
+
+def _same_name_exists(session, model, name: str):
+    """A second customer or supplier with the same name is almost always a
+    double click or a retyped form, and it splits one payer's history in two:
+    payments then match against whichever row the matcher sees first."""
+    from sqlalchemy import func
+    key = " ".join(name.split()).lower()
+    return (session.query(model)
+            .filter(func.lower(func.trim(model.name)) == key)
+            .first())
+
+
 def create_customer(session, *, name: str, email: str = "", country: str = "") -> Customer:
     name = (name or "").strip()
     if not name:
         raise WorkspaceRefused("The customer needs a name.")
+    name = " ".join(name.split())
+    if _same_name_exists(session, Customer, name):
+        raise WorkspaceRefused(f"Customer {name} already exists. "
+                               "Add their invoices to the one you have.")
     row = Customer(name=name, email=(email or "").strip() or None,
                    country=(country or "").strip().upper() or None)
     session.add(row)
@@ -119,6 +135,7 @@ def create_supplier(session, *, name: str, country: str, currency: str,
     name = (name or "").strip()
     if not name:
         raise WorkspaceRefused("The supplier needs a name.")
+    name = " ".join(name.split())
     ccy = (currency or "").strip().upper()
     if len(ccy) != 3 or not ccy.isalpha():
         raise WorkspaceRefused("Currency must be a 3-letter code, e.g. USD.")
@@ -126,6 +143,19 @@ def create_supplier(session, *, name: str, country: str, currency: str,
         method = PayoutMethod((payout_method or "LOCAL").strip().upper())
     except ValueError:
         raise WorkspaceRefused("Payout method has to be LOCAL or SWIFT.") from None
+    twin = _same_name_exists(session, Supplier, name)
+    if twin is not None and twin.airwallex_beneficiary_id:
+        raise WorkspaceRefused(f"Supplier {name} already exists and is payable. "
+                               "Add their bills to the one you have.")
+    if twin is not None:
+        # The first try was refused by Airwallex. Sending the form again with
+        # the details fixed is the natural retry, so it reuses that row rather
+        # than leaving a dead twin beside it.
+        twin.country = (country or "").strip().upper() or None
+        twin.currency = ccy
+        twin.payout_method = method
+        session.flush()
+        return twin
     row = Supplier(name=name, country=(country or "").strip().upper() or None,
                    currency=ccy, payout_method=method)
     session.add(row)

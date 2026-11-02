@@ -1,10 +1,13 @@
-# Card issuing on the sandbox: status, evidence, and the open question
+# Card issuing on the sandbox: status, evidence, and the fix
 
-**Status: still blocked. Dev Help's diagnosis was applied and did not resolve
-it, and their stated cause was disproved by direct test.**
+**Status: resolved on 2026-10-29.** A card issued on a second sandbox registered
+in Hong Kong approved a USD 2,500.00 authorisation and declined USD 2,500.01
+with `LIMIT_EXCEEDED`. The live proof is under "Live proof" below. The first
+half of this file is the history of the blocker, kept because it shows how the
+cause was found.
 
-Last updated after the Dev Help reply. Evidence is reproducible with
-`scripts/probe_card_create.py` and `scripts/probe_card_fields.py`.
+Evidence is reproducible with `scripts/probe_issuing_hk.py` (the fix) and
+`scripts/probe_card_create.py` / `scripts/probe_card_fields.py` (the blocker).
 
 ---
 

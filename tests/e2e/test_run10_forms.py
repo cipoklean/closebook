@@ -125,10 +125,14 @@ def seed(books: Path) -> None:
     with db.session_scope() as s:
         save_settings(s, budget_currency="USD", reserve_floor="0",
                       auto_pay_limit="2500", fx_tolerance_pct="0.50")
-        sup = create_supplier(s, name="Atlanta Packaging", country="US",
-                              currency="USD", payout_method="LOCAL")
-        record_beneficiary(s, sup.id, request={"e2e": "no provider"},
-                           beneficiary_id="ben-r10", status="CREATED")
+        # Both tests seed the same book, and a payable supplier may not be
+        # added twice (the duplicate-name rule), so reuse the first one.
+        from app.models import Supplier
+        if s.query(Supplier).filter_by(name="Atlanta Packaging").first() is None:
+            sup = create_supplier(s, name="Atlanta Packaging", country="US",
+                                  currency="USD", payout_method="LOCAL")
+            record_beneficiary(s, sup.id, request={"e2e": "no provider"},
+                               beneficiary_id="ben-r10", status="CREATED")
     with db.session_scope() as s:
         record_and_match(s, deposit_id="dep-r10-e2e", currency="USD",
                          amount_minor=700_000, payer_name="Apex Factors Ltd.",

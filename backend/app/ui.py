@@ -395,6 +395,12 @@ def _head(title: str) -> str:
         # System fonts first, Google as an upgrade: a blocked or slow CDN must
         # never leave the page unstyled.
         f'<link rel="stylesheet" href="/static/closebook.css?v={v}">\n'
+        # Inline icon: no extra file to serve, and no 404 in the console.
+        '<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 '
+        'viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%278%27 '
+        'fill=%27%231C1917%27/%3E%3Cpath d=%27M11 9h10v14H11z%27 fill=%27none%27 '
+        'stroke=%27%23F5F1E8%27 stroke-width=%272%27/%3E%3Cpath d=%27M14 13h4M14 17h4%27 '
+        'stroke=%27%23C2410C%27 stroke-width=%272%27/%3E%3C/svg%3E">\n'
         '</head>\n'
     )
 
@@ -798,7 +804,7 @@ _JS = """
     sessionStorage.removeItem("cb_return");
     var tabNow = (new URLSearchParams(location.search)).get("tab") || "home";
     if (back && back.tab === tabNow && (Date.now() - back.t) < 60000) {
-      window.scrollTo(0, back.y);
+      window.scrollTo({ top: back.y, behavior: "instant" });
       var again = back.action && document.querySelector('form.x-form[action="' + back.action + '"]');
       var firstBox = again && again.querySelector("input:not([type=hidden]):not([type=date]), textarea");
       if (firstBox && flash && !flash.classList.contains("x-flash--err")) {
@@ -880,7 +886,7 @@ _JS = """
     var want = Math.min(320, sel.options.length * 38 + 12);
     var r = sel.getBoundingClientRect();
     var below = window.innerHeight - r.bottom - 12;
-    if (below < want) { window.scrollBy(0, want - below); r = sel.getBoundingClientRect(); }
+    if (below < want) { window.scrollBy({ top: want - below, behavior: "instant" }); r = sel.getBoundingClientRect(); }
     var menu = document.createElement("div");
     menu.className = "x-menu";
     menu.setAttribute("role", "listbox");
@@ -902,6 +908,10 @@ _JS = """
     menu.style.minWidth = r.width + "px";
     menu.style.maxHeight = Math.max(160, Math.min(320, window.innerHeight - r.bottom - 16)) + "px";
     document.body.appendChild(menu);
+    // The menu itself makes room at the end of the page, so scroll it into
+    // full view: a list cut off by the bottom edge looks broken.
+    var mb = menu.getBoundingClientRect().bottom;
+    if (mb > window.innerHeight - 8) window.scrollBy({ top: mb - window.innerHeight + 12, behavior: "instant" });
     sel.setAttribute("aria-expanded", "true");
     cur = { sel: sel, menu: menu, active: sel.selectedIndex };
     mark(sel.selectedIndex);
@@ -3674,8 +3684,20 @@ _COUNTRIES = [
 ]
 
 
+def _nice_date(v) -> str:
+    """2026-12-02 -> 2 Dec 2026, the way the toast already says it."""
+    import datetime as _dt
+    if not v:
+        return ""
+    try:
+        d = v if isinstance(v, _dt.date) else _dt.date.fromisoformat(str(v)[:10])
+    except ValueError:
+        return str(v)
+    return f"{d.day} {d:%b %Y}"
+
+
 def _currency_select(name: str = "currency", label: str = "Currency", *,
-                     span: str = "x-span-2", selected: str = "USD",
+                     span: str = "x-span-3", selected: str = "USD",
                      hint: str = "") -> str:
     from .money import CURRENCY_EXPONENT
     sel = (selected or "USD").upper()
@@ -3912,8 +3934,8 @@ def _setup(c: dict) -> str:
           f'</div></form>')))
 
     # 2 ---- customers
-    cust_rows = [[e(x["name"]), e(x["country"] or "."),
-                  e(x["email"] or "."), str(x["open_count"])]
+    cust_rows = [[e(x["name"]), e(x["country"] or ""),
+                  e(x["email"] or ""), str(x["open_count"])]
                  for x in ws.get("customers", [])]
     out.append(_card(inner=(
         _cardhead("Customers", "Who owes you money.")
@@ -3936,12 +3958,12 @@ def _setup(c: dict) -> str:
         pill = _pill(x["status"])
         inv_rows.append([f'<strong>{e(x["number"])}</strong>', e(x["customer"]),
                          e(x["amount"]), e(x["paid"]), pill,
-                         e(x["due_date"] or ".")])
+                         e(_nice_date(x["due_date"]))])
     out.append(_card(inner=(
         _cardhead("Invoices", "Money owed to you. Payments match against these "
                               "numbers, so a messy reference is the interesting case.")
         + '<form class="x-form" autocomplete="off" method="post" action="/setup/invoices">'
-        + _select("customer_id", "Customer", cust_opts, span="x-span-4",
+        + _select("customer_id", "Customer", cust_opts, span="x-span-3",
                   selected=newest_customer)
         + _number_field("INV", "Invoice number", span="x-span-2",
                         placeholder="1001")
@@ -3965,8 +3987,8 @@ def _setup(c: dict) -> str:
             state = (_pill("NO BENEFICIARY")
                      + (f'<div class="x-hint">{e(x["beneficiary_error"])}</div>'
                         if x["beneficiary_error"] else ""))
-        sup_rows.append([f'<strong>{e(x["name"])}</strong>', e(x["country"] or "."),
-                         e(x["currency"] or "."), e(x["payout_method"]), state])
+        sup_rows.append([f'<strong>{e(x["name"])}</strong>', e(x["country"] or ""),
+                         e(x["currency"] or ""), e(x["payout_method"]), state])
     out.append(_card(inner=(
         _cardhead("Suppliers", "A supplier is only payable once Airwallex has "
                                "given it a beneficiary. Validation runs first, "
@@ -4043,7 +4065,7 @@ def _setup(c: dict) -> str:
         reason = f'<div class="x-hint">{e(note)}</div>' if note else ""
         pay_rows.append([f'<strong>{e(x["number"])}</strong>', e(x["supplier"]),
                          e(x["amount"]), _pill(label, tone=tone) + reason, dep,
-                         e(x["payout_method"] or ".")])
+                         e(x["payout_method"] or "")])
     out.append(_card(inner=(
         _cardhead("Bills to pay", "What you owe. A bill only becomes payable "
                                   "once its supplier has a beneficiary.")
