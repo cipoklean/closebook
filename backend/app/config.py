@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     # which names a page rather than a person — the one field an auditor actually
     # needs was the one field that could not answer "who decided this?".
     operator_name: str = "david"
+    # A WALKTHROUGH VIDEO for anyone lost on Home (WALKTHROUGH_URL). Empty hides
+    # the link entirely; only an https URL is ever rendered.
+    walkthrough_url: str = ""
     # WHO WE ARE, for deciding what is ours. Two instances share one Airwallex
     # sandbox account, so an instance must be able to tell its own deposits and
     # transfers from another's. Empty means "derive it from the database

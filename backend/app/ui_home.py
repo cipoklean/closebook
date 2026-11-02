@@ -539,6 +539,17 @@ def timeline(c: dict) -> str:
         f'<ul data-testid="what-just-happened">{rows}</ul></section>')
 
 
+def walkthrough_link(url: str) -> str:
+    """A quiet "Watch the walkthrough" link, shown only for an https URL."""
+    from html import escape
+    url = (url or "").strip()
+    if not url.lower().startswith("https://"):
+        return ""
+    return ('<a class="h-walkthrough" data-testid="walkthrough-link" '
+            f'href="{escape(url, quote=True)}" target="_blank" rel="noopener">'
+            'Lost? Watch the walkthrough</a>')
+
+
 def compose(c: dict, tt: dict, *, guide: str, details: str) -> str:
     """Home, top to bottom, in the order a person needs it."""
     # Two columns on a wide screen: the money and the decisions on the left,
@@ -548,7 +559,9 @@ def compose(c: dict, tt: dict, *, guide: str, details: str) -> str:
     main = (hero(c, tt) + needs_block(c) + stopped_card(c)
             + money_in_card(c) + money_out_card(c))
     side = authority(c) + timeline(c)
-    return (guide
+    from .config import get_settings
+    help_link = walkthrough_link(getattr(get_settings(), "walkthrough_url", ""))
+    return (help_link + guide
             + '<div class="h-grid" data-testid="home-grid">'
             f'<div class="h-col-main">{main}</div>'
             f'<aside class="h-col-side">{side}</aside></div>'

@@ -1081,3 +1081,9 @@ input[type="date"].x-input { min-height: 44px; }
 }
 .x-l-card { padding: 28px; border-radius: 18px; border: 1px solid var(--x-line); background: #FFF; }
 .x-l-sec--white .x-l-card { background: var(--x-bg); border-color: #E6DFD1; }
+
+/* Walkthrough video link (WALKTHROUGH_URL). Quiet, top of Home. */
+.h-walkthrough { display: inline-flex; align-items: center; gap: 6px; margin: 0 0 14px;
+  font-size: 14px; font-weight: 500; color: #C2410C; text-decoration: none; }
+.h-walkthrough::before { content: "\25B6"; font-size: 11px; }
+.h-walkthrough:hover { text-decoration: underline; }

@@ -157,6 +157,7 @@ Exactly as `backend/app/config.py` reads them (pydantic-settings loads `.env`):
 | `CLOSEBOOK_HMAC_SECRET` | to sign approvals | Signs the approval-bundle hashes. **An empty value fails at first real use** while unit tests still pass |
 | `DEMO_APPROVER_PIN` | to approve | PIN for approvals, Resume and Setup changes. If unset those routes are **closed**, not open |
 | `OPERATOR_NAME` | no | Stamped on every decision row. Defaults to `david` |
+| `WALKTHROUGH_URL` | no | An https link to a walkthrough video, shown at the top of Home. Empty hides it |
 | `LLM_API_KEY` | no | Any OpenAI-compatible endpoint |
 | `LLM_BASE_URL` | no | Defaults to `https://api.openai.com/v1` |
 | `LLM_MODEL` | no | Defaults to `gpt-4o-mini` (the live demo uses NVIDIA Build) |
@@ -296,7 +297,7 @@ docs/
   ENGINEERING_NOTES.md               key decisions and gotchas
   AIRWALLEX_CARD_ISSUING_REQUEST.md  the issuing blocker and its fix
 scripts/          live probes that verify real API assumptions
-tests/            1,198 unit and integration tests; tests/e2e for the browser
+tests/            1,202 unit and integration tests; tests/e2e for the browser
 ```
 
 ---
